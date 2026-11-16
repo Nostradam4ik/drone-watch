@@ -174,6 +174,7 @@ def _load_cfg(yaml_text):
 LIVE = """
 mode: live
 {auth}
+dashboard: {{auth: disabled}}
 zones: [{{name: z, radius_m: 100, level: WARNING}}]
 sensors:
   - {{id: radar1, type: radar, position: [0, 0], max_range: 1500{key}}}

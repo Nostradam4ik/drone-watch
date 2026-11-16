@@ -6,9 +6,9 @@
 # ключ (deploy/config.yaml), брокер закритий логінами й ACL (deploy/mosquitto.*). Сертифікати створює сервіс certs
 # (приватних ключів у репозиторії немає), а їхній CA демонстраційний: браузер покаже попередження, доки не додати ca.crt
 # до довірених (docker compose cp service:/certs/ca.crt ./ca.crt) або не погодитися з ризиком для цієї демо-сторінки.
-# Логіни, паролі й ключі датчиків ДЕМО-секрети, тож публічні. Дашборд ще без входу за паролем.
+# Дашборд закритий входом (демо-користувач demo, пароль нижче в сервісі emulator). Логіни, паролі й ключі ДЕМО-секрети, тож публічні.
 # Контейнери бачать один одного по мережі Docker, тож емулятору це не заважає. Щоб приймати датчики з мережі, замініть
-# демо-секрети й сертифікати своїми, і лише тоді змініть "127.0.0.1:" на "0.0.0.0:" (або адресу інтерфейсу).
+# демо-секрети й сертифікати своїми (див. service/README.md), і лише тоді змініть "127.0.0.1:" на "0.0.0.0:" (або адресу інтерфейсу).
 # Свої сертифікати замість демо: див. service/README.md, розділи про TLS і HTTPS.
 services:
   certs:   # одноразово (і при перевипуску) створює CA й сертифікат брокера в томах; приватних ключів у репозиторії немає
@@ -78,8 +78,9 @@ services:
     volumes:
       - certs-ca:/certs:ro
     environment:   # ДЕМО-ключі, їм відповідають key_sha256 у deploy/config.yaml. Не використовуйте за межами локальної демонстрації
+      DRONEWATCH_DASHBOARD_PASSWORD: "fX_-twChwCBeRa5c9ejoW6eF"   # ДЕМО-пароль користувача demo (хеш у deploy/config.yaml)
       DRONEWATCH_KEYS: "radar1=4v5RcNVejeP6hcZ3KgCBQch-CfEPHFq9qlCFkg6aTGI,rf1=CSG2LwD69wOqgdQxZkof6yJHdTKocB7w_UuLJ1E0CAs,ac1=Gm_V2dz2EwmK0VvEQfTdODAmEWoMVixM8SpnlJc6DSY"
-    command: ["--url", "https://service:8000", "--ca", "/certs/ca.crt", "--mqtt", "mosquitto:8883", "--mqtt-ca", "/certs/ca.crt", "--scenario", "swarm", "--count", "8", "--loop"]
+    command: ["--url", "https://service:8000", "--ca", "/certs/ca.crt", "--dashboard-user", "demo", "--mqtt", "mosquitto:8883", "--mqtt-ca", "/certs/ca.crt", "--scenario", "swarm", "--count", "8", "--loop"]
     depends_on:
       service: {condition: service_healthy}
     restart: unless-stopped

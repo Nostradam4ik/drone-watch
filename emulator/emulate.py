@@ -21,6 +21,10 @@ MQTT кладе в поле "key" кожної події і підключає�
 HTTPS до сервісу: --url https://ІМ'Я:8000 --ca CA.PEM (ім'я має бути в SAN сертифіката сервісу); сертифікат перевіряється
 завжди. Сервіс у режимі розробки без TLS: --url http://127.0.0.1:8000 (ключі підуть відкритим текстом). Видати ключі: python service/keygen.py radar1 rf1 ac1.
 
+Вхід у дашборд: GET /api/config і /api/state за паролем, тож емулятор входить сам: --dashboard-user ІМ'Я і пароль у змінній
+DRONEWATCH_DASHBOARD_PASSWORD (не в аргументах: їх видно в списку процесів). Справжнім датчикам вхід у дашборд не потрібен:
+вони лише шлють події (ключ датчика). Сервіс без входу (demo, dashboard.auth: disabled) цього не вимагає.
+
 Heartbeat: кожен скан кожен справний датчик шле {"sensor_id": ..., "heartbeat": true}, навіть коли нічого не бачить.
 Так сервіс відрізняє «небо порожнє» від «датчик відмовив». Вимкнути: --no-heartbeat.
 
@@ -37,6 +41,7 @@ import sys
 import time
 import urllib.error
 import urllib.request
+from http.cookiejar import CookieJar
 
 DEFAULT_NOISE = {"radar": (5.0, 0.7, 1.5), "rf": (None, 5.0, None), "acoustic": (None, 10.0, None)}  # м, °, °
 FALLBACK_SENSORS = [  # якщо сервіс недоступний (--dry-run без сервера)
@@ -210,6 +215,18 @@ class MqttPublisher:
 
 
 HTTPS_CONTEXT = None   # ssl.SSLContext для https://-адрес (встановлює main); для http:// не використовується
+_cache: tuple = (None, None)   # (контекст TLS, opener із cookie сесії дашборда)
+
+
+def opener():
+    """Один opener на контекст TLS: cookie сесії зберігається між запитами, а зміна контексту дає новий opener."""
+    global _cache
+    if _cache[1] is None or _cache[0] is not HTTPS_CONTEXT:
+        handlers = [urllib.request.HTTPCookieProcessor(CookieJar())]
+        if HTTPS_CONTEXT:
+            handlers.append(urllib.request.HTTPSHandler(context=HTTPS_CONTEXT))
+        _cache = (HTTPS_CONTEXT, urllib.request.build_opener(*handlers))
+    return _cache[1]
 
 
 def http(url, data=None, timeout=5, key=None):
@@ -217,7 +234,7 @@ def http(url, data=None, timeout=5, key=None):
     if key:
         headers["X-API-Key"] = key
     req = urllib.request.Request(url, data=json.dumps(data).encode() if data is not None else None, headers=headers)
-    with urllib.request.urlopen(req, timeout=timeout, context=HTTPS_CONTEXT) as r:
+    with opener().open(req, timeout=timeout) as r:
         return json.load(r)
 
 
@@ -250,6 +267,7 @@ def main():
                                  epilog=__doc__.split("Приклади:")[1])
     ap.add_argument("--url", default="https://127.0.0.1:8000", help="адреса сервісу; https:// з перевіркою сертифіката й імені хоста")
     ap.add_argument("--ca", metavar="CA.PEM", help="для https://: довіряти лише цьому CA (інакше системним); для MQTT див. --mqtt-ca")
+    ap.add_argument("--dashboard-user", metavar="ІМ'Я", help="логін у дашборд (пароль у змінній DRONEWATCH_DASHBOARD_PASSWORD)")
     ap.add_argument("--scenario", choices=SCENARIOS, default="cross")
     ap.add_argument("--count", type=int, default=8, help="кількість дронів (для swarm)")
     ap.add_argument("--duration", type=float, default=0, help="тривалість, с (0 = до кінця сценарію)")
@@ -277,13 +295,25 @@ def main():
             HTTPS_CONTEXT = tls_context(a.ca)
         except (OSError, ssl.SSLError) as e:
             sys.exit(f"Не вдалося прочитати CA «{a.ca}»: {e}")
+    if a.dashboard_user and not a.dry_run:
+        password = os.environ.get("DRONEWATCH_DASHBOARD_PASSWORD")
+        if not password:
+            sys.exit("Для --dashboard-user потрібна змінна DRONEWATCH_DASHBOARD_PASSWORD (пароль не береться з аргументів)")
+        try:
+            http(a.url + "/api/login", {"username": a.dashboard_user, "password": password})
+        except urllib.error.HTTPError as e:
+            sys.exit(f"Вхід у дашборд не вдався: HTTP {e.code}" + (" (хибний логін або пароль)" if e.code == 401 else ""))
+        except (urllib.error.URLError, OSError) as e:
+            sys.exit(f"Сервіс недоступний ({a.url}): {e}")
     try:
         sensors = http(a.url + "/api/config")["sensors"]
         print(f"Підключено до {a.url}, датчиків: {[s['id'] for s in sensors]}")
     except (urllib.error.URLError, OSError) as e:
         if not a.dry_run:
             hint = ""
-            if a.url.startswith("https://") and "WRONG_VERSION_NUMBER" in str(e):
+            if isinstance(e, urllib.error.HTTPError) and e.code == 401:
+                hint = "\nСервіс вимагає вхід у дашборд: --dashboard-user ІМ'Я і змінна DRONEWATCH_DASHBOARD_PASSWORD"
+            elif a.url.startswith("https://") and "WRONG_VERSION_NUMBER" in str(e):
                 hint = "\nСхоже, сервіс слухає відкритий HTTP (режим розробки): --url http://..."
             elif a.url.startswith("http://") and "Connection" in type(getattr(e, "reason", e)).__name__:
                 hint = "\nЯкщо сервіс працює по HTTPS: --url https://... --ca CA.PEM"

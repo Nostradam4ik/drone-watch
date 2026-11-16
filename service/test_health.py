@@ -142,7 +142,7 @@ def _app_with_engine():
         return None
     app.engine = Engine(default_sensors(), [Zone("z", 100, "WARNING")])
     app.demo_src = app.mqtt_ingest = None
-    app.clients = set()
+    app.clients = {}
     app.scan_task = _Task()
     app.scan_health.update(started=time.time(), last_ok=None, errors=0, consecutive=0, last_error=None)
     return app
@@ -168,7 +168,7 @@ def test_scan_error_does_not_stop_loop():
     app.engine.tick = real_tick                 # збій минув: скан знову проходить, лічильник серії скидається
     asyncio.run(app.scan_step())
     assert sh["consecutive"] == 0 and sh["errors"] == 5 and sh["last_ok"] is not None
-    assert app.health()["ok"] is True
+    assert app.health(user="тест")["ok"] is True
 
 
 def test_health_reports_dead_scanning():
@@ -176,13 +176,13 @@ def test_health_reports_dead_scanning():
     if app is None:
         return
     asyncio.run(app.scan_step())
-    assert app.health()["ok"] is True
+    assert app.health(user="тест")["ok"] is True
     app.scan_health["last_ok"] = time.time() - 100        # скани давно не йшли
-    r = app.health()
+    r = app.health(user="тест")
     assert r.status_code == 503 and b'"ok":false' in r.body
     app.scan_health["last_ok"] = time.time()
     app.scan_task = _Task(done=True)                      # цикл помер зовсім
-    assert app.health().status_code == 503
+    assert app.health(user="тест").status_code == 503
 
 
 def _flood(eng, sensor_id, n, rng=None):

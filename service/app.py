@@ -1,24 +1,27 @@
 """HTTP/WebSocket-сервіс поверх Engine. Запуск: python -m uvicorn app:app --port 8000"""
 import asyncio
+import contextlib
 import logging
 import os
 import sqlite3
 import time
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, closing
 from pathlib import Path
-from contextlib import closing
-from typing import Annotated, Optional
+from typing import Annotated
 
-from fastapi import Body, FastAPI, Header, Request, WebSocket, WebSocketDisconnect
+from fastapi import Body, Depends, FastAPI, Header, Request, WebSocket, WebSocketDisconnect
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 from pydantic import BaseModel, ConfigDict
 
 import config
-from mqtt_in import MqttIngest
-from demo import DemoSource, make_sensors
+import dashboard_web
 from auth import SensorAuth
-from engine import Engine, Zone
+from dashboard_auth import LoginLimiter, SessionStore, Users
+from dashboard_web import DashboardAccess, current_user, require_user
+from demo import DemoSource, make_sensors
+from engine import Engine
+from mqtt_in import MqttIngest
 
 log = logging.getLogger("dronewatch")
 BASE = Path(__file__).resolve().parent
@@ -31,17 +34,17 @@ DB_PATH = os.environ.get("DB_PATH", str(BASE / "incidents.db"))
 class Detection(BaseModel):
     model_config = ConfigDict(allow_inf_nan=False)   # JSON-літерали NaN/Infinity Python приймає, а фільтру вони шкодять: 422
     sensor_id: str
-    ts: Optional[float] = None             # обовʼязковий для детекції (рушій відхилить без нього), не потрібен для heartbeat
-    azimuth_deg: Optional[float] = None   # обовʼязковий для детекції, не потрібен для heartbeat
-    heartbeat: bool = False               # «я живий, але нічого не бачу»
-    range_m: Optional[float] = None
-    elevation_deg: Optional[float] = None
+    ts: float | None = None             # обовʼязковий для детекції (рушій відхилить без нього), не потрібен для heartbeat
+    azimuth_deg: float | None = None   # обовʼязковий для детекції, не потрібен для heartbeat
+    heartbeat: bool = False            # «я живий, але нічого не бачу»
+    range_m: float | None = None
+    elevation_deg: float | None = None
 
 
-engine: Engine = None
-mqtt_ingest: MqttIngest = None
-demo_src: DemoSource = None
-clients: set = set()
+engine: Engine | None = None
+mqtt_ingest: MqttIngest | None = None
+demo_src: DemoSource | None = None
+clients: dict[WebSocket, str | None] = {}   # вебсокет -> токен сесії (None, коли автентифікацію вимкнено)
 scan_task = None
 # стан циклу сканів для /api/health: last_ok = час останнього успішного скану
 scan_health = {"started": time.time(), "last_ok": None, "errors": 0, "consecutive": 0, "last_error": None}
@@ -50,6 +53,9 @@ scan_health = {"started": time.time(), "last_ok": None, "errors": 0, "consecutiv
 @asynccontextmanager
 async def lifespan(app):
     global engine, demo_src, DEMO, mqtt_ingest, scan_task
+    # Без цього Python показує лише WARNING і вище, а журнал входів оператора (INFO) не було б видно. Тільки при старті сервісу:
+    # при імпорті модуля це засмічувало б вивід тестів.
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     cfg = config.load(os.environ.get("CONFIG", BASE / "config.yaml"))
     DEMO = cfg.mode == "demo"
     sensors = make_sensors() if DEMO else config.build_sensors(cfg)  # demo: датчики симулятора, інакше з конфігу
@@ -79,6 +85,7 @@ async def lifespan(app):
                                  m.get("topic") or "dronewatch/events/#", m_user,
                                  os.environ.get("MQTT_PASSWORD", m.get("password")), tls=m_tls, ca_cert=m_ca)
         mqtt_ingest.start()
+    app.state.access = build_dashboard_access(cfg)
     scan_health.update(started=time.time(), last_ok=None, errors=0, consecutive=0, last_error=None)
     scan_task = asyncio.create_task(scan_loop())
     scan_task.add_done_callback(_scan_task_done)
@@ -88,7 +95,20 @@ async def lifespan(app):
         mqtt_ingest.stop()
 
 
+def build_dashboard_access(cfg: config.Config) -> DashboardAccess:
+    """У demo входу немає (локальна розробка). У live за замовчуванням обов'язковий; вимкнути можна лише свідомо."""
+    if cfg.mode == "demo":
+        return DashboardAccess()
+    if cfg.dashboard.auth == "disabled":
+        log.warning("вхід у дашборд вимкнено (dashboard.auth: disabled): стан, тривоги й WebSocket відкриті всім, хто дістанеться порту")
+        return DashboardAccess()
+    return DashboardAccess(Users({u.name: u.password_hash for u in cfg.dashboard.users}),
+                           SessionStore(cfg.dashboard.session_ttl_s), LoginLimiter())
+
+
 app = FastAPI(title="Drone Watch", lifespan=lifespan)
+app.include_router(dashboard_web.router)
+app.middleware("http")(dashboard_web.add_security_headers)
 
 
 @app.exception_handler(RequestValidationError)
@@ -117,11 +137,17 @@ async def scan_step():
         engine.tick()
         payload = {"type": "state", **engine.state(truth), "alerts": engine.alerts[:30],
                    "mqtt": mqtt_ingest.status() if mqtt_ingest else None}
-        for ws in list(clients):
+        access: DashboardAccess = getattr(app.state, "access", None) or DashboardAccess()
+        for ws, token in list(clients.items()):
+            if not access.session_valid(token):   # сесія скінчилась або користувач вийшов: клієнту більше нічого не шлемо
+                clients.pop(ws, None)
+                with contextlib.suppress(Exception):
+                    await ws.close(code=1008)
+                continue
             try:
                 await ws.send_json(payload)
             except Exception:
-                clients.discard(ws)
+                clients.pop(ws, None)
     except Exception as e:  # CancelledError сюди не потрапляє (це BaseException), тож зупинка сервісу працює
         sh["errors"] += 1
         sh["consecutive"] += 1
@@ -147,22 +173,27 @@ async def scan_loop():
 
 
 @app.get("/")
-def index():
+def index(user: Annotated[str | None, Depends(current_user)]):
+    if user is None:   # сторінку без входу не віддаємо: людину веде на форму входу
+        return RedirectResponse("/login", status_code=303)
     return FileResponse(BASE / "static" / "index.html")
 
 
-@app.get("/api/config")
+@app.get("/api/config", dependencies=[Depends(require_user)])
 def get_config():
     return {**engine.config(), "demo": DEMO}
 
 
 @app.get("/api/health")
-def health():
-    """Для моніторингу та docker healthcheck. 503, якщо цикл сканів помер або давно не було жодного успішного скану."""
+def health(user: Annotated[str | None, Depends(current_user)]):
+    """Для healthcheck і моніторингу. 503, якщо цикл сканів помер або давно не було жодного успішного скану.
+    Без входу віддає лише {"ok": ...}: імена втрачених датчиків, адреса брокера й тексти помилок це вже подробиці для оператора."""
     now, sh = time.time(), scan_health
     stale_after = max(5.0, 10 * engine.scan_dt)
     last = sh["last_ok"] if sh["last_ok"] is not None else sh["started"]
     scanning = scan_task is not None and not scan_task.done() and now - last <= stale_after
+    if user is None:
+        return {"ok": True} if scanning else JSONResponse({"ok": False}, status_code=503)
     lost = engine.degraded()
     body = {"ok": scanning, "degraded": bool(lost), "lost_sensors": lost, "auth": engine.auth is not None,
             "mode": "demo" if DEMO else "live", "scans": engine.stats["scans"],
@@ -172,13 +203,13 @@ def health():
     return body if scanning else JSONResponse(body, status_code=503)
 
 
-@app.get("/api/sensors")
+@app.get("/api/sensors", dependencies=[Depends(require_user)])
 def sensors():
     """Стан здоровʼя кожного датчика: OK / WAITING / LOST."""
     return list(engine.sensor_status().values())
 
 
-@app.get("/api/state")
+@app.get("/api/state", dependencies=[Depends(require_user)])
 def state():
     return engine.state()
 
@@ -195,7 +226,7 @@ def post_events(events: Annotated[list[Detection], Body(max_length=MAX_HTTP_BATC
     return {"accepted": r.accepted, "rejected": r.rejected, "unauthorized": r.unauthorized}
 
 
-@app.get("/api/incidents")
+@app.get("/api/incidents", dependencies=[Depends(require_user)])
 def incidents(limit: int = 100):
     # окреме з'єднання на запит, і його треба закривати (раніше воно витікало); LIMIT -1 у SQLite = «без ліміту», тож clamp знизу
     with closing(sqlite3.connect(DB_PATH)) as db:
@@ -206,10 +237,15 @@ def incidents(limit: int = 100):
 
 @app.websocket("/ws")
 async def ws(websocket: WebSocket):
+    access: DashboardAccess = getattr(app.state, "access", None) or DashboardAccess()
+    # до accept: відмова тут стає HTTP 403 на рукостисканні, WebSocket навіть не відкривається. Origin захищає від чужих сайтів
+    if access.user(websocket) is None or not dashboard_web.origin_ok(websocket):
+        await websocket.close(code=1008)
+        return
     await websocket.accept()
-    clients.add(websocket)
+    clients[websocket] = access.token(websocket)
     try:
         while True:
             await websocket.receive_text()
     except WebSocketDisconnect:
-        clients.discard(websocket)
+        clients.pop(websocket, None)

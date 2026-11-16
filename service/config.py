@@ -11,6 +11,7 @@ from pydantic import BaseModel, Field, ValidationError, field_validator, model_v
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "fusion_proto"))
 from models import Sensor  # noqa: E402
 
+from dashboard_auth import parse_hash  # noqa: E402
 from engine import Zone  # noqa: E402
 
 
@@ -32,6 +33,28 @@ class AuthCfg(BaseModel):
     """required: події без чинного ключа свого датчика відкидаються (за замовчуванням у live). disabled: явна відмова
     від автентифікації (довірена ізольована мережа); сервіс пише про це попередження при старті."""
     mode: Literal["required", "disabled"] = "required"
+
+
+class DashboardUser(BaseModel):
+    name: str = Field(pattern=r"^[A-Za-z0-9_.@-]{1,64}$")
+    password_hash: str = Field(description="scrypt-хеш пароля; видає python keygen.py --dashboard-user ІМ'Я")
+
+    @field_validator("password_hash")
+    @classmethod
+    def _valid_hash(cls, v: str) -> str:
+        try:
+            parse_hash(v)
+        except ValueError as e:
+            raise ValueError(f"{e}. Згенеруйте: python keygen.py --dashboard-user ІМ'Я") from None
+        return v
+
+
+class DashboardCfg(BaseModel):
+    """required: дашборд, API читання й WebSocket лише після входу (за замовчуванням у live). disabled: явна відмова
+    (локальна розробка, довірена мережа); сервіс пише про це попередження. У demo автентифікація вимкнена завжди."""
+    auth: Literal["required", "disabled"] = "required"
+    users: list[DashboardUser] = []
+    session_ttl_s: float = Field(8 * 3600, gt=0, le=30 * 86400)   # скільки діє сесія після входу
 
 
 class SensorCfg(BaseModel):
@@ -100,6 +123,7 @@ class Config(BaseModel):
     alerts: AlertsCfg = AlertsCfg()
     mqtt: MqttCfg | None = None
     auth: AuthCfg = AuthCfg()
+    dashboard: DashboardCfg = DashboardCfg()
 
     @model_validator(mode="after")
     def _check(self):
@@ -114,6 +138,13 @@ class Config(BaseModel):
                                  "інакше трекеру нема з чого визначити позицію")
             if not self.zones:
                 raise ValueError("не описано жодної зони: тривоги не буде за чим оцінювати")
+            if self.dashboard.auth == "required":
+                names = [u.name for u in self.dashboard.users]
+                if not names:
+                    raise ValueError("немає жодного користувача дашборда: вхід обовʼязковий. Додайте dashboard.users "
+                                     "(python keygen.py --dashboard-user ІМ'Я) або свідомо вимкніть: dashboard: {auth: disabled}")
+                if len(names) != len(set(names)):
+                    raise ValueError("імена користувачів дашборда мають бути унікальними")
             if self.auth.mode == "required":
                 keyless = [s.id for s in self.sensors if not s.key_sha256]
                 if keyless:
