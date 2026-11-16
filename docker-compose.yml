@@ -1,15 +1,28 @@
 # Запуск:  docker compose up --build
 # З емулятором датчиків:  docker compose --profile demo-sensors up --build
-# Дашборд: http://localhost:8000     Брокер MQTT: localhost:1883, топіки dronewatch/events/<sensor_id>
+# Дашборд: http://localhost:8000     Брокер MQTT: localhost:8883 (лише TLS), топіки dronewatch/events/<sensor_id>
 #
-# Обидва порти прив'язані до 127.0.0.1. Події датчиків вимагають ключ (deploy/config.yaml), а брокер закритий логінами й
-# ACL (deploy/mosquitto.*), усе це на ДЕМО-секретах. Але дашборд і WebSocket відкриті, а без TLS ключі й паролі йдуть відкритим текстом.
-# Контейнери бачать один одного по мережі Docker, тож емулятору це не заважає. Щоб приймати датчики з мережі, спершу
-# замініть демо-ключі своїми й увімкніть TLS, і лише тоді змініть "127.0.0.1:" на "0.0.0.0:" (або адресу потрібного інтерфейсу).
+# Обидва порти прив'язані до 127.0.0.1. Події датчиків вимагають ключ (deploy/config.yaml), брокер закритий логінами й ACL
+# (deploy/mosquitto.*) і слухає лише TLS (сертифікати створює сервіс certs, приватних ключів у репозиторії немає). Логіни,
+# паролі й ключі датчиків — ДЕМО-секрети. Що лишилось відкритим: дашборд, WebSocket і HTTP API (/api/events) без шифрування.
+# Контейнери бачать один одного по мережі Docker, тож емулятору це не заважає. Щоб приймати датчики з мережі, замініть
+# демо-секрети своїми, поставте HTTPS перед сервісом, і лише тоді змініть "127.0.0.1:" на "0.0.0.0:" (або адресу інтерфейсу).
+# Свої сертифікати брокера замість демо: див. service/README.md, розділ про TLS.
 services:
+  certs:   # одноразово (і при перевипуску) створює CA й сертифікат брокера в томах; приватних ключів у репозиторії немає
+    image: alpine/openssl
+    entrypoint: ["/bin/sh", "/gen-certs.sh"]
+    volumes:
+      - ./deploy/gen-certs.sh:/gen-certs.sh:ro
+      - certs-ca:/out/ca              # публічний ca.crt: його читають брокер, сервіс і емулятор
+      - certs-server:/out/server      # server.crt і server.key: бачить лише брокер
+    restart: "no"
+
   mosquitto:
     image: eclipse-mosquitto:2
-    ports: ["127.0.0.1:1883:1883"]
+    depends_on:
+      certs: {condition: service_completed_successfully}
+    ports: ["127.0.0.1:8883:8883"]
     # passwd і acl брокер читає лише з правами 0700 і власником mosquitto, інакше «майбутні версії відмовляться їх
     # завантажити». Монтування з Windows/macOS цього не дає, тож монтуємо окремо й копіюємо з потрібними правами при старті.
     # Наслідок: після зміни цих файлів потрібен `docker compose restart mosquitto` (SIGHUP копії не оновить).
@@ -24,8 +37,10 @@ services:
       - ./deploy/mosquitto.conf:/mosquitto/config/mosquitto.conf:ro
       - ./deploy/mosquitto.passwd:/run/broker-src/passwd:ro
       - ./deploy/mosquitto.acl:/run/broker-src/acl:ro
+      - certs-ca:/mosquitto/certs-ca:ro
+      - certs-server:/mosquitto/certs-server:ro
     healthcheck:   # окремий користувач, якому ACL дозволяє лише читати час роботи брокера (ДЕМО-пароль)
-      test: ["CMD-SHELL", "mosquitto_sub -h 127.0.0.1 -u healthcheck -P ClE1jaZ9qTQtQYcIhMrPIK2wtBmdfXZT -t '$$SYS/broker/uptime' -C 1 -W 3 || exit 1"]
+      test: ["CMD-SHELL", "mosquitto_sub -h 127.0.0.1 -p 8883 --cafile /mosquitto/certs-ca/ca.crt -u healthcheck -P ClE1jaZ9qTQtQYcIhMrPIK2wtBmdfXZT -t '$$SYS/broker/uptime' -C 1 -W 3 || exit 1"]
       interval: 5s
       timeout: 5s
       retries: 10
@@ -37,11 +52,14 @@ services:
     environment:
       CONFIG: /config/config.yaml
       MQTT_HOST: mosquitto
+      MQTT_PORT: 8883
+      MQTT_CA_CERT: /certs/ca.crt      # з цим CA сервіс перевіряє сертифікат і ім'я хоста брокера
       MQTT_USER: dronewatch-service
       MQTT_PASSWORD: "8DgvEHMEllwyXmx4bD_eWc0NOTz690ll"   # ДЕМО-пароль (хеш у deploy/mosquitto.passwd)
     volumes:
       - ./deploy/config.yaml:/config/config.yaml:ro
       - incidents:/data          # журнал тривог переживає перезапуск
+      - certs-ca:/certs:ro       # лише публічний ca.crt
     depends_on:
       mosquitto: {condition: service_healthy}
     restart: unless-stopped
@@ -49,12 +67,16 @@ services:
   emulator:                      # лише з профілем demo-sensors
     profiles: ["demo-sensors"]
     build: ./emulator
+    volumes:
+      - certs-ca:/certs:ro
     environment:   # ДЕМО-ключі, їм відповідають key_sha256 у deploy/config.yaml. Не використовуйте за межами локальної демонстрації
       DRONEWATCH_KEYS: "radar1=4v5RcNVejeP6hcZ3KgCBQch-CfEPHFq9qlCFkg6aTGI,rf1=CSG2LwD69wOqgdQxZkof6yJHdTKocB7w_UuLJ1E0CAs,ac1=Gm_V2dz2EwmK0VvEQfTdODAmEWoMVixM8SpnlJc6DSY"
-    command: ["--url", "http://service:8000", "--mqtt", "mosquitto:1883", "--scenario", "swarm", "--count", "8", "--loop"]
+    command: ["--url", "http://service:8000", "--mqtt", "mosquitto:8883", "--mqtt-ca", "/certs/ca.crt", "--scenario", "swarm", "--count", "8", "--loop"]
     depends_on:
       service: {condition: service_healthy}
     restart: unless-stopped
 
 volumes:
   incidents:
+  certs-ca:
+  certs-server:

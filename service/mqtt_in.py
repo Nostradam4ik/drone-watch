@@ -5,6 +5,7 @@
 автентифікований датчик не може видавати події за інший. Невідповідність рахується як events_unauthorized."""
 import json
 import logging
+import ssl
 import time
 
 import paho.mqtt.client as mqtt
@@ -13,9 +14,20 @@ DEFAULT_TOPIC = "dronewatch/events/#"
 log = logging.getLogger("dronewatch.mqtt")
 
 
+def tls_context(ca_cert=None):
+    """Контекст TLS для клієнта: сертифікат брокера й ім'я хоста перевіряються обов'язково (CERT_REQUIRED, check_hostname),
+    не нижче TLS 1.2. З ca_cert довіряємо ЛИШЕ цьому CA (а не всім системним), без нього системному сховищу.
+    Перевірку не вимкнути: небезпечного режиму «не перевіряти сертифікат» тут свідомо немає."""
+    ctx = ssl.create_default_context(cafile=ca_cert) if ca_cert else ssl.create_default_context()
+    ctx.minimum_version = ssl.TLSVersion.TLSv1_2
+    return ctx
+
+
 class MqttIngest:
-    def __init__(self, engine, host, port=1883, topic=DEFAULT_TOPIC, username=None, password=None):
+    def __init__(self, engine, host, port=1883, topic=DEFAULT_TOPIC, username=None, password=None, tls=False, ca_cert=None):
+        """tls або ca_cert вмикають TLS (ca_cert: довіряти лише цьому CA). Без TLS пароль і ключі ходять відкритим текстом."""
         self.engine, self.host, self.port, self.topic = engine, host, port, topic
+        self.tls = bool(tls or ca_cert)
         self.connected = False
         self.subscribed = False
         self.since = None           # коли з'єднання стало робочим (monotonic)
@@ -25,8 +37,14 @@ class MqttIngest:
         self.client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2, client_id=username or "dronewatch-service")
         if username:
             self.client.username_pw_set(username, password)
+        if self.tls:
+            try:
+                self.client.tls_set_context(tls_context(ca_cert))
+            except (OSError, ssl.SSLError) as e:   # хибний шлях або не-PEM: краще впасти на старті зі зрозумілою причиною
+                raise RuntimeError(f"MQTT TLS: не вдалося прочитати сертифікат CA «{ca_cert}»: {e}") from e
         self.client.reconnect_delay_set(min_delay=1, max_delay=15)
         self.client.on_connect = self._on_connect
+        self.client.on_connect_fail = self._on_connect_fail
         self.client.on_disconnect = self._on_disconnect
         self.client.on_subscribe = self._on_subscribe
         self.client.on_message = self._on_message
@@ -55,6 +73,12 @@ class MqttIngest:
         else:   # пароль у повідомлення не потрапляє
             self._report(("connect", str(reason_code)), "MQTT: брокер %s:%s відхилив підключення (%s). Перевірте MQTT_USER і MQTT_PASSWORD",
                          self.host, self.port, reason_code)
+
+    def _on_connect_fail(self, client, userdata):
+        # TCP/TLS-рукостискання не вдалося до будь-якої відповіді брокера. paho не передає причину, тож називаємо найімовірніші
+        hint = ("Для TLS перевірте, що ca_cert це CA, яким підписано сертифікат брокера, і що ім'я хоста збігається з SAN сертифіката"
+                if self.tls else "Перевірте адресу й порт брокера")
+        self._report(("connect_fail",), "MQTT: не вдалося зʼєднатися з %s:%s. %s", self.host, self.port, hint)
 
     def _on_subscribe(self, client, userdata, mid, reason_codes, properties):
         ok = all(not rc.is_failure for rc in reason_codes)
@@ -90,4 +114,4 @@ class MqttIngest:
         ok = self.connected and self.subscribed
         marks = [t for t in (self.last_message, self.since) if t is not None]   # пізніше з двох: повідомлення чи (пере)підключення
         idle = round(time.monotonic() - max(marks), 1) if ok and marks else None
-        return {"host": f"{self.host}:{self.port}", "connected": ok, "idle_s": idle}
+        return {"host": f"{self.host}:{self.port}", "connected": ok, "idle_s": idle, "tls": self.tls}

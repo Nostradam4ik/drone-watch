@@ -320,7 +320,7 @@ def test_mqtt_idle_shows_connected_but_silent():
         print("skip: no paho:", e)
         return
     ing = MqttIngest(make_engine(), "broker")
-    assert ing.status() == {"host": "broker:1883", "connected": False, "idle_s": None}
+    assert ing.status() == {"host": "broker:1883", "connected": False, "idle_s": None, "tls": False}
 
     class FakeClient:
         def subscribe(self, *a, **k):

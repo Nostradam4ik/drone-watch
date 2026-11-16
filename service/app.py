@@ -69,9 +69,15 @@ async def lifespan(app):
     m = cfg.mqtt.model_dump() if cfg.mqtt else {}
     m_host = os.environ.get("MQTT_HOST", m.get("host"))  # змінні оточення перекривають конфіг (зручно для docker)
     if m_host:
+        m_user = os.environ.get("MQTT_USER", m.get("username"))
+        m_ca = os.environ.get("MQTT_CA_CERT", m.get("ca_cert")) or None
+        m_tls = bool(m_ca) or os.environ.get("MQTT_TLS", str(m.get("tls", False))).strip().lower() in ("1", "true", "yes", "on")
+        if m_user and not m_tls:
+            log.warning("MQTT без TLS: логін, пароль і ключі датчиків ідуть відкритим текстом. Задайте MQTT_CA_CERT "
+                        "(або mqtt.ca_cert / mqtt.tls у конфігу), якщо брокер не на довіреному каналі")
         mqtt_ingest = MqttIngest(engine, m_host, int(os.environ.get("MQTT_PORT", m.get("port", 1883))),
-                                 m.get("topic") or "dronewatch/events/#",
-                                 os.environ.get("MQTT_USER", m.get("username")), os.environ.get("MQTT_PASSWORD", m.get("password")))
+                                 m.get("topic") or "dronewatch/events/#", m_user,
+                                 os.environ.get("MQTT_PASSWORD", m.get("password")), tls=m_tls, ca_cert=m_ca)
         mqtt_ingest.start()
     scan_health.update(started=time.time(), last_ok=None, errors=0, consecutive=0, last_error=None)
     scan_task = asyncio.create_task(scan_loop())

@@ -16,7 +16,8 @@
 Ключі: HTTP шле їх у заголовку X-API-Key (окремий запит на кожен датчик: ключ належить одному датчику),
 MQTT кладе в поле "key" кожної події і підключається до брокера з логіном = id датчика та паролем = ключ датчика
 (по з'єднанню на датчик: ACL брокера дозволяє датчику писати лише у власний топік). --mqtt-user/--mqtt-password
-задають один спільний логін на всіх датчиків (шлюз). Видати ключі: python service/keygen.py radar1 rf1 ac1.
+задають один спільний логін на всіх датчиків (шлюз). TLS: --mqtt-ca CA.PEM (довіряти лише цьому CA) або --mqtt-tls
+(системні CA); ім'я хоста з --mqtt має бути в SAN сертифіката брокера. Видати ключі: python service/keygen.py radar1 rf1 ac1.
 
 Heartbeat: кожен скан кожен справний датчик шле {"sensor_id": ..., "heartbeat": true}, навіть коли нічого не бачить.
 Так сервіс відрізняє «небо порожнє» від «датчик відмовив». Вимкнути: --no-heartbeat.
@@ -29,6 +30,7 @@ import json
 import math
 import os
 import random
+import ssl
 import sys
 import time
 import urllib.error
@@ -130,11 +132,21 @@ def clutter(rng, sensor):
 
 
 # ---------- мережа ----------
+def tls_context(ca=None):
+    """TLS для MQTT: сертифікат брокера й ім'я хоста перевіряються обов'язково, не нижче TLS 1.2. З ca довіряємо лише цьому CA
+    (PEM), без нього системному сховищу. Режиму «не перевіряти сертифікат» тут свідомо немає."""
+    ctx = ssl.create_default_context(cafile=ca) if ca else ssl.create_default_context()
+    ctx.minimum_version = ssl.TLSVersion.TLSv1_2
+    return ctx
+
+
 class MqttPublisher:
     """Мінімальний клієнт MQTT 3.1.1 (лише CONNECT і PUBLISH QoS 0), щоб емулятор лишався без залежностей."""
 
-    def __init__(self, host, port=1883, username=None, password=None, client_id="dronewatch-emulator"):
+    def __init__(self, host, port=1883, username=None, password=None, client_id="dronewatch-emulator", tls=None):
+        """tls: ssl.SSLContext (див. tls_context) або None для відкритого зʼєднання."""
         self.args = (host, port, username, password, client_id)
+        self.tls = tls
         self.sock = None
         self._connect()
 
@@ -144,6 +156,12 @@ class MqttPublisher:
         if self.sock:
             self.close()
         self.sock = socket.create_connection((host, port), timeout=5)
+        if self.tls:   # server_hostname вмикає перевірку імені хоста проти SAN сертифіката
+            try:
+                self.sock = self.tls.wrap_socket(self.sock, server_hostname=host)
+            except OSError:
+                self.sock.close()
+                raise
         flags = 0x02  # clean session
         payload = self._str(client_id)
         if username:
@@ -154,7 +172,10 @@ class MqttPublisher:
         ack = self.sock.recv(4)
         if len(ack) < 4 or ack[0] != 0x20 or ack[3] != 0:
             hint = {4: "хибні логін чи пароль", 5: "користувача немає або немає прав"}.get(ack[3] if len(ack) == 4 else None)
-            raise OSError(f"брокер відхилив підключення (CONNACK {ack.hex()}{': ' + hint if hint else ''})")
+            if not ack:   # брокер закрив зʼєднання, нічого не відповівши
+                hint = "брокер закрив зʼєднання без відповіді; найчастіше це порт з TLS, а клієнт без нього (--mqtt-ca CA.PEM)" if not self.tls \
+                    else "брокер закрив зʼєднання без відповіді"
+            raise OSError(f"брокер відхилив підключення (CONNACK {ack.hex() or 'порожній'}{': ' + hint if hint else ''})")
 
     @staticmethod
     def _str(s):
@@ -236,6 +257,8 @@ def main():
     ap.add_argument("--loop", action="store_true", help="повторювати сценарій безкінечно")
     ap.add_argument("--mqtt", metavar="HOST[:PORT]", help="слати події в MQTT-брокер замість HTTP")
     ap.add_argument("--topic", default="dronewatch/events", help="префікс топіка MQTT; події йдуть у <префікс>/<sensor_id>")
+    ap.add_argument("--mqtt-ca", metavar="CA.PEM", help="шифрувати MQTT (TLS) і довіряти лише цьому CA; ім'я хоста перевіряється")
+    ap.add_argument("--mqtt-tls", action="store_true", help="шифрувати MQTT (TLS) і довіряти системним CA")
     ap.add_argument("--mqtt-user")
     ap.add_argument("--mqtt-password")
     ap.add_argument("--dry-run", action="store_true", help="друкувати події, не надсилаючи")
@@ -269,16 +292,23 @@ def main():
         host, _, port = a.mqtt.partition(":")
         port = int(port or 1883)
         try:
+            tls = tls_context(a.mqtt_ca) if (a.mqtt_ca or a.mqtt_tls) else None
+        except (OSError, ssl.SSLError) as e:
+            sys.exit(f"Не вдалося прочитати CA «{a.mqtt_ca}»: {e}")
+        if not tls and (keys or a.mqtt_user):
+            print("Увага: MQTT без TLS, ключі й паролі йдуть відкритим текстом (--mqtt-ca CA.PEM або --mqtt-tls)")
+        try:
             if a.mqtt_user:   # один спільний логін на всіх (шлюз), як раніше
-                shared = MqttPublisher(host, port, a.mqtt_user, a.mqtt_password)
+                shared = MqttPublisher(host, port, a.mqtt_user, a.mqtt_password, tls=tls)
                 pubs = {s["id"]: shared for s in sensors}
             else:             # брокер з ACL: кожен датчик це окремий користувач (ім'я = id датчика, пароль = його ключ)
                 for s in sensors:
                     k = keys.get(s["id"])
-                    pubs[s["id"]] = MqttPublisher(host, port, s["id"] if k else None, k, client_id=s["id"] if k else "emulator-" + s["id"])
+                    pubs[s["id"]] = MqttPublisher(host, port, s["id"] if k else None, k,
+                                                  client_id=s["id"] if k else "emulator-" + s["id"], tls=tls)
         except OSError as e:
             sys.exit(f"MQTT-брокер недоступний ({a.mqtt}): {e}")
-        print(f"Події йдуть у MQTT {a.mqtt}, топіки {a.topic}/<sensor_id>")
+        print(f"Події йдуть у MQTT {a.mqtt}{' (TLS)' if tls else ''}, топіки {a.topic}/<sensor_id>")
 
     while True:
         targets = SCENARIOS[a.scenario](rng, a.count)

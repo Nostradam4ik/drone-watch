@@ -198,7 +198,7 @@ function render(msg) {
   mq.hidden = !msg.mqtt;
   if (msg.mqtt) {
     const idle = msg.mqtt.connected && msg.mqtt.idle_s > 10;   // зʼєднання є, а подій немає: типовий симптом хибної ACL брокера
-    mq.textContent = "MQTT " + msg.mqtt.host + (!msg.mqtt.connected ? " — немає звʼязку" : idle ? " — подій немає " + Math.round(msg.mqtt.idle_s) + " с (перевірте ACL)" : "");
+    mq.textContent = "MQTT " + msg.mqtt.host + (msg.mqtt.tls ? " · TLS" : " · без шифрування") + (!msg.mqtt.connected ? " — немає звʼязку" : idle ? " — подій немає " + Math.round(msg.mqtt.idle_s) + " с (перевірте ACL)" : "");
     mq.className = "badge " + (msg.mqtt.connected && !idle ? "live" : "off");
   }
 

@@ -79,10 +79,12 @@ class AlertsCfg(BaseModel):
 
 class MqttCfg(BaseModel):
     host: str
-    port: int = Field(1883, ge=1, le=65535)
+    port: int = Field(1883, ge=1, le=65535)   # з TLS брокер зазвичай слухає 8883
     topic: str = "dronewatch/events/#"
     username: str | None = None
     password: str | None = None
+    tls: bool = False                         # шифрувати зʼєднання; сертифікат і ім'я хоста перевіряються завжди
+    ca_cert: str | None = None                # довіряти лише цьому CA (PEM); задання ca_cert вмикає TLS
 
 
 class Config(BaseModel):
