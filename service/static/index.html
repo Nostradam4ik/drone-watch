@@ -196,7 +196,11 @@ function render(msg) {
 
   const mq = document.getElementById("mqtt");
   mq.hidden = !msg.mqtt;
-  if (msg.mqtt) { mq.textContent = "MQTT " + msg.mqtt.host + (msg.mqtt.connected ? "" : " — немає звʼязку"); mq.className = "badge " + (msg.mqtt.connected ? "live" : "off"); }
+  if (msg.mqtt) {
+    const idle = msg.mqtt.connected && msg.mqtt.idle_s > 10;   // зʼєднання є, а подій немає: типовий симптом хибної ACL брокера
+    mq.textContent = "MQTT " + msg.mqtt.host + (!msg.mqtt.connected ? " — немає звʼязку" : idle ? " — подій немає " + Math.round(msg.mqtt.idle_s) + " с (перевірте ACL)" : "");
+    mq.className = "badge " + (msg.mqtt.connected && !idle ? "live" : "off");
+  }
 
   renderSensors(msg.sensors || []);
   const st = msg.stats, ov = document.getElementById("overload"), shed = st.events_dropped + st.tracks_capped + st.bearings_truncated;

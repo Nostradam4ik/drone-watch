@@ -14,7 +14,9 @@
     DRONEWATCH_KEYS="radar1=К1,rf1=К2,ac1=К3" python emulate.py   # те саме через оточення (не потрапляє в історію команд)
 
 Ключі: HTTP шле їх у заголовку X-API-Key (окремий запит на кожен датчик: ключ належить одному датчику),
-MQTT кладе в поле "key" кожної події. Видати ключі: python service/keygen.py radar1 rf1 ac1.
+MQTT кладе в поле "key" кожної події і підключається до брокера з логіном = id датчика та паролем = ключ датчика
+(по з'єднанню на датчик: ACL брокера дозволяє датчику писати лише у власний топік). --mqtt-user/--mqtt-password
+задають один спільний логін на всіх датчиків (шлюз). Видати ключі: python service/keygen.py radar1 rf1 ac1.
 
 Heartbeat: кожен скан кожен справний датчик шле {"sensor_id": ..., "heartbeat": true}, навіть коли нічого не бачить.
 Так сервіс відрізняє «небо порожнє» від «датчик відмовив». Вимкнути: --no-heartbeat.
@@ -132,7 +134,15 @@ class MqttPublisher:
     """Мінімальний клієнт MQTT 3.1.1 (лише CONNECT і PUBLISH QoS 0), щоб емулятор лишався без залежностей."""
 
     def __init__(self, host, port=1883, username=None, password=None, client_id="dronewatch-emulator"):
+        self.args = (host, port, username, password, client_id)
+        self.sock = None
+        self._connect()
+
+    def _connect(self):
         import socket
+        host, port, username, password, client_id = self.args
+        if self.sock:
+            self.close()
         self.sock = socket.create_connection((host, port), timeout=5)
         flags = 0x02  # clean session
         payload = self._str(client_id)
@@ -143,7 +153,8 @@ class MqttPublisher:
         self._send(0x10, var + payload)
         ack = self.sock.recv(4)
         if len(ack) < 4 or ack[0] != 0x20 or ack[3] != 0:
-            raise OSError(f"брокер відхилив підключення (CONNACK {ack.hex()})")
+            hint = {4: "хибні логін чи пароль", 5: "користувача немає або немає прав"}.get(ack[3] if len(ack) == 4 else None)
+            raise OSError(f"брокер відхилив підключення (CONNACK {ack.hex()}{': ' + hint if hint else ''})")
 
     @staticmethod
     def _str(s):
@@ -160,7 +171,12 @@ class MqttPublisher:
         self.sock.sendall(bytes([first]) + bytes(enc) + body)
 
     def publish(self, topic, obj):
-        self._send(0x30, self._str(topic) + json.dumps(obj, ensure_ascii=False).encode("utf-8"))
+        packet = self._str(topic) + json.dumps(obj, ensure_ascii=False).encode("utf-8")
+        try:
+            self._send(0x30, packet)
+        except OSError:
+            self._connect()   # брокер розірвав з'єднання (перезапуск, витіснення): одна спроба перепідключитися
+            self._send(0x30, packet)
 
     def close(self):
         try:
@@ -248,11 +264,18 @@ def main():
     if not keys and not a.dry_run:
         print("Увага: ключів датчиків не задано; сервіс у live-режимі з автентифікацією відхилить усі події "
               "(--key ДАТЧИК=КЛЮЧ або DRONEWATCH_KEYS)")
-    pub = None
+    pubs = {}   # id датчика -> MQTT-з'єднання
     if a.mqtt and not a.dry_run:
         host, _, port = a.mqtt.partition(":")
+        port = int(port or 1883)
         try:
-            pub = MqttPublisher(host, int(port or 1883), a.mqtt_user, a.mqtt_password)
+            if a.mqtt_user:   # один спільний логін на всіх (шлюз), як раніше
+                shared = MqttPublisher(host, port, a.mqtt_user, a.mqtt_password)
+                pubs = {s["id"]: shared for s in sensors}
+            else:             # брокер з ACL: кожен датчик це окремий користувач (ім'я = id датчика, пароль = його ключ)
+                for s in sensors:
+                    k = keys.get(s["id"])
+                    pubs[s["id"]] = MqttPublisher(host, port, s["id"] if k else None, k, client_id=s["id"] if k else "emulator-" + s["id"])
         except OSError as e:
             sys.exit(f"MQTT-брокер недоступний ({a.mqtt}): {e}")
         print(f"Події йдуть у MQTT {a.mqtt}, топіки {a.topic}/<sensor_id>")
@@ -283,12 +306,12 @@ def main():
                     print(json.dumps(e, ensure_ascii=False))
             elif events:
                 try:
-                    if pub:
+                    if pubs:
                         for s in sensors:  # одна публікація на датчик за скан (масив подій)
                             batch = [e for e in events if e["sensor_id"] == s["id"]]
                             if batch:   # ключ додаємо лише в момент відправки: у dry-run і виводі його немає
                                 k = keys.get(s["id"])
-                                pub.publish(f"{a.topic}/{s['id']}", [{**e, "key": k} for e in batch] if k else batch)
+                                pubs[s["id"]].publish(f"{a.topic}/{s['id']}", [{**e, "key": k} for e in batch] if k else batch)
                         sent += len(events)
                     else:
                         for s in sensors:   # ключ належить одному датчику, тож окремий запит на кожен
@@ -314,8 +337,8 @@ def main():
         print(f"Сценарій завершено: надіслано {sent}, відхилено {rejected}")
         if not a.loop:
             break
-    if pub:
-        pub.close()
+    for conn in {id(c): c for c in pubs.values()}.values():
+        conn.close()
 
 
 if __name__ == "__main__":

@@ -1,0 +1,13 @@
+# ACL брокера. Усе, чого тут не дозволено, заборонено; анонімів немає (allow_anonymous false у mosquitto.conf).
+#
+# Датчик (користувач = id датчика) може ПИСАТИ лише у власний топік dronewatch/events/<id>: %u це ім'я користувача.
+# Читати йому нічого не можна: ні події інших датчиків, ні #, ні $SYS. Тож ключі й події одного датчика не бачить інший.
+pattern write dronewatch/events/%u
+
+# Сервіс лише читає події всіх датчиків.
+user dronewatch-service
+topic read dronewatch/events/#
+
+# Healthcheck контейнера: єдине, що йому треба, це час роботи брокера.
+user healthcheck
+topic read $SYS/broker/uptime
