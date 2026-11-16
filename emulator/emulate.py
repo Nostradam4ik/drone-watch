@@ -17,7 +17,9 @@
 MQTT кладе в поле "key" кожної події і підключається до брокера з логіном = id датчика та паролем = ключ датчика
 (по з'єднанню на датчик: ACL брокера дозволяє датчику писати лише у власний топік). --mqtt-user/--mqtt-password
 задають один спільний логін на всіх датчиків (шлюз). TLS: --mqtt-ca CA.PEM (довіряти лише цьому CA) або --mqtt-tls
-(системні CA); ім'я хоста з --mqtt має бути в SAN сертифіката брокера. Видати ключі: python service/keygen.py radar1 rf1 ac1.
+(системні CA); ім'я хоста з --mqtt має бути в SAN сертифіката брокера.
+HTTPS до сервісу: --url https://ІМ'Я:8000 --ca CA.PEM (ім'я має бути в SAN сертифіката сервісу); сертифікат перевіряється
+завжди. Сервіс у режимі розробки без TLS: --url http://127.0.0.1:8000 (ключі підуть відкритим текстом). Видати ключі: python service/keygen.py radar1 rf1 ac1.
 
 Heartbeat: кожен скан кожен справний датчик шле {"sensor_id": ..., "heartbeat": true}, навіть коли нічого не бачить.
 Так сервіс відрізняє «небо порожнє» від «датчик відмовив». Вимкнути: --no-heartbeat.
@@ -207,12 +209,15 @@ class MqttPublisher:
             pass
 
 
+HTTPS_CONTEXT = None   # ssl.SSLContext для https://-адрес (встановлює main); для http:// не використовується
+
+
 def http(url, data=None, timeout=5, key=None):
     headers = {"Content-Type": "application/json"}
     if key:
         headers["X-API-Key"] = key
     req = urllib.request.Request(url, data=json.dumps(data).encode() if data is not None else None, headers=headers)
-    with urllib.request.urlopen(req, timeout=timeout) as r:
+    with urllib.request.urlopen(req, timeout=timeout, context=HTTPS_CONTEXT) as r:
         return json.load(r)
 
 
@@ -240,9 +245,11 @@ def parse_keys(items, env):
 
 
 def main():
+    global HTTPS_CONTEXT
     ap = argparse.ArgumentParser(description="Емулятор датчиків Drone Watch", formatter_class=argparse.RawDescriptionHelpFormatter,
                                  epilog=__doc__.split("Приклади:")[1])
-    ap.add_argument("--url", default="http://127.0.0.1:8000")
+    ap.add_argument("--url", default="https://127.0.0.1:8000", help="адреса сервісу; https:// з перевіркою сертифіката й імені хоста")
+    ap.add_argument("--ca", metavar="CA.PEM", help="для https://: довіряти лише цьому CA (інакше системним); для MQTT див. --mqtt-ca")
     ap.add_argument("--scenario", choices=SCENARIOS, default="cross")
     ap.add_argument("--count", type=int, default=8, help="кількість дронів (для swarm)")
     ap.add_argument("--duration", type=float, default=0, help="тривалість, с (0 = до кінця сценарію)")
@@ -265,12 +272,22 @@ def main():
     a = ap.parse_args()
 
     rng = random.Random(a.seed)
+    if a.url.startswith("https://"):   # сертифікат і ім'я хоста перевіряються завжди; режиму «не перевіряти» немає
+        try:
+            HTTPS_CONTEXT = tls_context(a.ca)
+        except (OSError, ssl.SSLError) as e:
+            sys.exit(f"Не вдалося прочитати CA «{a.ca}»: {e}")
     try:
         sensors = http(a.url + "/api/config")["sensors"]
         print(f"Підключено до {a.url}, датчиків: {[s['id'] for s in sensors]}")
     except (urllib.error.URLError, OSError) as e:
         if not a.dry_run:
-            sys.exit(f"Сервіс недоступний ({a.url}): {e}\nЗапустіть його або використайте --dry-run.")
+            hint = ""
+            if a.url.startswith("https://") and "WRONG_VERSION_NUMBER" in str(e):
+                hint = "\nСхоже, сервіс слухає відкритий HTTP (режим розробки): --url http://..."
+            elif a.url.startswith("http://") and "Connection" in type(getattr(e, "reason", e)).__name__:
+                hint = "\nЯкщо сервіс працює по HTTPS: --url https://... --ca CA.PEM"
+            sys.exit(f"Сервіс недоступний ({a.url}): {e}{hint}\nЗапустіть його або використайте --dry-run.")
         sensors = FALLBACK_SENSORS
         print("Сервіс недоступний, використовую вбудовані датчики (dry-run).")
     if a.only:
@@ -281,6 +298,8 @@ def main():
         sensors = [s for s in sensors if s["id"] in keep]
     bias = parse_bias(a.bias)
     keys = parse_keys(a.key, os.environ.get("DRONEWATCH_KEYS"))
+    if keys and a.url.startswith("http://") and not a.dry_run:
+        print("Увага: сервіс по відкритому HTTP, ключі датчиків (X-API-Key) ідуть відкритим текстом (https://... і --ca CA.PEM)")
     unknown_keys = set(keys) - {s["id"] for s in sensors}
     if unknown_keys:
         print(f"Увага: ключі для невідомих датчиків ігноруються: {sorted(unknown_keys)}")

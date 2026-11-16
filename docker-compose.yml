@@ -1,13 +1,15 @@
 # Запуск:  docker compose up --build
 # З емулятором датчиків:  docker compose --profile demo-sensors up --build
-# Дашборд: http://localhost:8000     Брокер MQTT: localhost:8883 (лише TLS), топіки dronewatch/events/<sensor_id>
+# Дашборд: https://localhost:8000     Брокер MQTT: localhost:8883 (лише TLS), топіки dronewatch/events/<sensor_id>
 #
-# Обидва порти прив'язані до 127.0.0.1. Події датчиків вимагають ключ (deploy/config.yaml), брокер закритий логінами й ACL
-# (deploy/mosquitto.*) і слухає лише TLS (сертифікати створює сервіс certs, приватних ключів у репозиторії немає). Логіни,
-# паролі й ключі датчиків — ДЕМО-секрети. Що лишилось відкритим: дашборд, WebSocket і HTTP API (/api/events) без шифрування.
+# Обидва порти прив'язані до 127.0.0.1 й обслуговують лише TLS: відкритих HTTP/MQTT-слухачів немає. Події датчиків вимагають
+# ключ (deploy/config.yaml), брокер закритий логінами й ACL (deploy/mosquitto.*). Сертифікати створює сервіс certs
+# (приватних ключів у репозиторії немає), а їхній CA демонстраційний: браузер покаже попередження, доки не додати ca.crt
+# до довірених (docker compose cp service:/certs/ca.crt ./ca.crt) або не погодитися з ризиком для цієї демо-сторінки.
+# Логіни, паролі й ключі датчиків ДЕМО-секрети, тож публічні. Дашборд ще без входу за паролем.
 # Контейнери бачать один одного по мережі Docker, тож емулятору це не заважає. Щоб приймати датчики з мережі, замініть
-# демо-секрети своїми, поставте HTTPS перед сервісом, і лише тоді змініть "127.0.0.1:" на "0.0.0.0:" (або адресу інтерфейсу).
-# Свої сертифікати брокера замість демо: див. service/README.md, розділ про TLS.
+# демо-секрети й сертифікати своїми, і лише тоді змініть "127.0.0.1:" на "0.0.0.0:" (або адресу інтерфейсу).
+# Свої сертифікати замість демо: див. service/README.md, розділи про TLS і HTTPS.
 services:
   certs:   # одноразово (і при перевипуску) створює CA й сертифікат брокера в томах; приватних ключів у репозиторії немає
     image: alpine/openssl
@@ -16,6 +18,7 @@ services:
       - ./deploy/gen-certs.sh:/gen-certs.sh:ro
       - certs-ca:/out/ca              # публічний ca.crt: його читають брокер, сервіс і емулятор
       - certs-server:/out/server      # server.crt і server.key: бачить лише брокер
+      - certs-http:/out/http          # http.crt і http.key: бачить лише сервіс (HTTPS API, дашборд, WebSocket)
     restart: "no"
 
   mosquitto:
@@ -51,6 +54,9 @@ services:
     ports: ["127.0.0.1:8000:8000"]
     environment:
       CONFIG: /config/config.yaml
+      TLS_CERT_FILE: /tls/http.crt       # HTTPS: без цих двох змінних serve.py не стартує (fail-closed)
+      TLS_KEY_FILE: /tls/http.key
+      TLS_CA_FILE: /certs/ca.crt         # лише для healthcheck: перевіряє сертифікат сервісу так само суворо, як клієнти
       MQTT_HOST: mosquitto
       MQTT_PORT: 8883
       MQTT_CA_CERT: /certs/ca.crt      # з цим CA сервіс перевіряє сертифікат і ім'я хоста брокера
@@ -60,7 +66,9 @@ services:
       - ./deploy/config.yaml:/config/config.yaml:ro
       - incidents:/data          # журнал тривог переживає перезапуск
       - certs-ca:/certs:ro       # лише публічний ca.crt
+      - certs-http:/tls:ro       # сертифікат і ключ сервісу: лише він їх бачить
     depends_on:
+      certs: {condition: service_completed_successfully}
       mosquitto: {condition: service_healthy}
     restart: unless-stopped
 
@@ -71,7 +79,7 @@ services:
       - certs-ca:/certs:ro
     environment:   # ДЕМО-ключі, їм відповідають key_sha256 у deploy/config.yaml. Не використовуйте за межами локальної демонстрації
       DRONEWATCH_KEYS: "radar1=4v5RcNVejeP6hcZ3KgCBQch-CfEPHFq9qlCFkg6aTGI,rf1=CSG2LwD69wOqgdQxZkof6yJHdTKocB7w_UuLJ1E0CAs,ac1=Gm_V2dz2EwmK0VvEQfTdODAmEWoMVixM8SpnlJc6DSY"
-    command: ["--url", "http://service:8000", "--mqtt", "mosquitto:8883", "--mqtt-ca", "/certs/ca.crt", "--scenario", "swarm", "--count", "8", "--loop"]
+    command: ["--url", "https://service:8000", "--ca", "/certs/ca.crt", "--mqtt", "mosquitto:8883", "--mqtt-ca", "/certs/ca.crt", "--scenario", "swarm", "--count", "8", "--loop"]
     depends_on:
       service: {condition: service_healthy}
     restart: unless-stopped
@@ -80,3 +88,4 @@ volumes:
   incidents:
   certs-ca:
   certs-server:
+  certs-http:
