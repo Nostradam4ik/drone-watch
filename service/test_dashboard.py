@@ -118,18 +118,14 @@ def test_session_store_is_bounded():
 def test_login_limiter():
     clock = Clock()
     lim = LoginLimiter(max_failures=3, window_s=100, clock=clock)
-    assert lim.retry_after("ip1") == 0
-    for _ in range(3):
-        lim.record_failure("ip1")
-    assert 99 <= lim.retry_after("ip1") <= 100 and lim.retry_after("ip2") == 0, "ліміт на адресу, а не глобальний"
+    assert [lim.attempt("ip1") for _ in range(3)] == [0, 0, 0], "перші max_failures спроб дозволені"
+    assert 99 <= lim.attempt("ip1") <= 100 and lim.attempt("ip2") == 0, "ліміт на адресу, а не глобальний"
     clock.now += 60
-    assert 39 <= lim.retry_after("ip1") <= 40
+    assert 39 <= lim.attempt("ip1") <= 40
     clock.now += 41
-    assert lim.retry_after("ip1") == 0, "після вікна можна знову"
-    for _ in range(3):
-        lim.record_failure("ip1")
+    assert lim.attempt("ip1") == 0, "після вікна можна знову"
     lim.reset("ip1")
-    assert lim.retry_after("ip1") == 0, "успішний вхід скидає лічильник"
+    assert [lim.attempt("ip1") for _ in range(3)] == [0, 0, 0], "успішний вхід скидає лічильник"
 
 
 def test_login_limiter_memory_is_bounded():
@@ -137,8 +133,27 @@ def test_login_limiter_memory_is_bounded():
     lim = LoginLimiter(max_failures=3, window_s=10, clock=clock, max_keys=50)
     for i in range(500):
         clock.now += 1
-        lim.record_failure(f"ip{i}")
-    assert len(lim._failures) <= 60, len(lim._failures)
+        lim.attempt(f"ip{i}")
+    assert len(lim._attempts) <= 60, len(lim._attempts)
+
+
+def test_limiter_cannot_be_bypassed_by_a_parallel_burst():
+    """Регрес із перевірки безпеки: «перевірити ліміт, потім записати невдачу» дозволяло залпу з 40 запитів пройти повністю."""
+    import threading
+    lim = LoginLimiter(max_failures=8, window_s=300)
+    go, allowed, lock = threading.Barrier(40), [], threading.Lock()
+
+    def worker():
+        go.wait()
+        if lim.attempt("1.2.3.4") == 0:
+            with lock:
+                allowed.append(1)
+    threads = [threading.Thread(target=worker) for _ in range(40)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert len(allowed) == 8, f"дозволено {len(allowed)} замість 8"
 
 
 # ---------- веб-шар ----------
@@ -316,6 +331,35 @@ def test_brute_force_is_limited():
     assert _login(c).status_code == 429, "навіть правильний пароль не годиться, поки діє блокування"
     clock.now += 301
     assert _login(c).status_code == 200
+
+
+def test_parallel_login_burst_cannot_exceed_the_limit():
+    """Через HTTP, із повільною перевіркою пароля (як scrypt): скільки запитів дійшло до перевірки пароля."""
+    made = _client(max_failures=8)
+    if not made:
+        return
+    import threading
+    import time as _time
+    from concurrent.futures import ThreadPoolExecutor
+    c, m, _ = made
+    users, checked, lock = m.app.state.access.users, [], threading.Lock()
+    original = users.authenticate
+
+    def slow(name, password):
+        with lock:
+            checked.append(1)
+        _time.sleep(0.05)
+        return original(name, password)
+    users.authenticate = slow
+    barrier = threading.Barrier(30)
+
+    def hit(i):
+        barrier.wait()
+        return c.post("/api/login", json={"username": "alice", "password": f"wrong-guess-{i}-xxxxx"}).status_code
+    with ThreadPoolExecutor(30) as pool:
+        codes = list(pool.map(hit, range(30)))
+    assert len(checked) <= 8, f"до перевірки пароля дійшло {len(checked)} запитів, ліміт 8"
+    assert codes.count(401) <= 8 and codes.count(429) >= 22, (codes.count(401), codes.count(429))
 
 
 def test_responses_carry_security_headers():

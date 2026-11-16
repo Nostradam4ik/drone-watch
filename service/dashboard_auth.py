@@ -127,34 +127,37 @@ class SessionStore:
 
 
 class LoginLimiter:
-    """Не більше `max_failures` невдалих входів за `window_s` із однієї адреси; далі відмова з підказкою, коли повторити."""
+    """Не більше `max_failures` спроб входу за `window_s` із однієї адреси; далі відмова з підказкою, коли повторити.
+
+    Спроба ЗАРАХОВУЄТЬСЯ ще до перевірки пароля (`attempt`), а успішний вхід її знімає (`reset`). Так має бути, бо перевірка
+    пароля дорога (десятки мс), а обробники входу виконуються паралельно в пулі потоків: якби спроба рахувалась лише після
+    невдачі, залп із N одночасних запитів усі разом пройшов би «перевірку ліміту» до того, як хоч одна невдача записана."""
 
     def __init__(self, *, max_failures: int = 8, window_s: float = 300.0, clock: Callable[[], float] = time.monotonic,
                  max_keys: int = 10_000) -> None:
         self.max_failures, self.window_s, self._clock, self._max_keys = max_failures, window_s, clock, max_keys
-        self._failures: dict[str, deque[float]] = {}
+        self._attempts: dict[str, deque[float]] = {}
         self._lock = threading.Lock()
 
     def _recent(self, key: str, now: float) -> deque[float]:
-        q = self._failures.get(key)
+        q = self._attempts.get(key)
         while q and q[0] <= now - self.window_s:
             q.popleft()
         return q if q is not None else deque()
 
-    def retry_after(self, key: str) -> float:
-        """0, якщо входити можна; інакше скільки секунд почекати."""
+    def attempt(self, key: str) -> float:
+        """Атомарно: або резервує спробу й повертає 0 (можна перевіряти пароль), або повертає, скільки секунд почекати."""
         with self._lock:
             now = self._clock()
             q = self._recent(key, now)
-            return max(0.0, q[0] + self.window_s - now) if len(q) >= self.max_failures else 0.0
-
-    def record_failure(self, key: str) -> None:
-        with self._lock:
-            now = self._clock()
-            if len(self._failures) >= self._max_keys:   # стеля памʼяті: прибираємо ключі без свіжих невдач
-                self._failures = {k: q for k in list(self._failures) if (q := self._recent(k, now))}
-            self._failures.setdefault(key, deque()).append(now)
+            if len(q) >= self.max_failures:
+                return max(0.0, q[0] + self.window_s - now)
+            if key not in self._attempts and len(self._attempts) >= self._max_keys:   # стеля памʼяті: прибираємо ключі без свіжих спроб
+                self._attempts = {k: r for k in list(self._attempts) if (r := self._recent(k, now))}
+            self._attempts.setdefault(key, deque()).append(now)
+            return 0.0
 
     def reset(self, key: str) -> None:
+        """Успішний вхід: усі спроби цієї адреси, зокрема щойно зарезервована, перестають рахуватись."""
         with self._lock:
-            self._failures.pop(key, None)
+            self._attempts.pop(key, None)

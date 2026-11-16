@@ -102,11 +102,11 @@ def login(body: LoginIn, request: Request) -> Response:
     if access.users is None or access.sessions is None or access.limiter is None:
         raise HTTPException(404, "Автентифікацію дашборда вимкнено")
     client = request.client.host if request.client else "?"
-    if wait := access.limiter.retry_after(client):
+    # Спроба резервується атомарно ДО перевірки пароля: інакше паралельний залп обходить ліміт (див. LoginLimiter)
+    if wait := access.limiter.attempt(client):
         log.warning("вхід заблоковано (забагато невдалих спроб) з %s", client)
         raise HTTPException(429, "Забагато невдалих спроб, спробуйте пізніше", headers={"Retry-After": str(math.ceil(wait))})
     if not access.users.authenticate(body.username, body.password):
-        access.limiter.record_failure(client)
         log.warning("невдалий вхід: ім'я %r з %s", body.username, client)   # %r екранує переноси рядків; пароля в лозі немає
         raise HTTPException(401, "Хибний логін або пароль")
     access.limiter.reset(client)
