@@ -2,10 +2,10 @@
 # З емулятором датчиків:  docker compose --profile demo-sensors up --build
 # Дашборд: http://localhost:8000     Брокер MQTT: localhost:1883, топіки dronewatch/events/<sensor_id>
 #
-# Обидва порти прив'язані до 127.0.0.1: у сервісу немає автентифікації (дашборд, WebSocket і /api/events відкриті),
-# а брокер у deploy/mosquitto.conf приймає анонімів без TLS. Контейнери бачать один одного по мережі Docker, тож
-# емулятору це не заважає. Щоб приймати датчики з мережі, спершу увімкніть автентифікацію й TLS, і лише тоді
-# змініть "127.0.0.1:" на "0.0.0.0:" (або на адресу потрібного інтерфейсу).
+# Обидва порти прив'язані до 127.0.0.1. Події датчиків уже вимагають ключ (deploy/config.yaml, ДЕМО-ключі), але дашборд
+# і WebSocket відкриті, брокер у deploy/mosquitto.conf приймає анонімів, а без TLS ключі йдуть відкритим текстом.
+# Контейнери бачать один одного по мережі Docker, тож емулятору це не заважає. Щоб приймати датчики з мережі, спершу
+# замініть демо-ключі своїми й увімкніть TLS, і лише тоді змініть "127.0.0.1:" на "0.0.0.0:" (або адресу потрібного інтерфейсу).
 services:
   mosquitto:
     image: eclipse-mosquitto:2
@@ -34,6 +34,8 @@ services:
   emulator:                      # лише з профілем demo-sensors
     profiles: ["demo-sensors"]
     build: ./emulator
+    environment:   # ДЕМО-ключі, їм відповідають key_sha256 у deploy/config.yaml. Не використовуйте за межами локальної демонстрації
+      DRONEWATCH_KEYS: "radar1=4v5RcNVejeP6hcZ3KgCBQch-CfEPHFq9qlCFkg6aTGI,rf1=CSG2LwD69wOqgdQxZkof6yJHdTKocB7w_UuLJ1E0CAs,ac1=Gm_V2dz2EwmK0VvEQfTdODAmEWoMVixM8SpnlJc6DSY"
     command: ["--url", "http://service:8000", "--mqtt", "mosquitto:1883", "--scenario", "swarm", "--count", "8", "--loop"]
     depends_on:
       service: {condition: service_healthy}

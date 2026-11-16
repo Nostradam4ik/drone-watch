@@ -9,7 +9,7 @@ from pathlib import Path
 from contextlib import closing
 from typing import Annotated, Optional
 
-from fastapi import Body, FastAPI, Request, WebSocket, WebSocketDisconnect
+from fastapi import Body, FastAPI, Header, Request, WebSocket, WebSocketDisconnect
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel, ConfigDict
@@ -17,6 +17,7 @@ from pydantic import BaseModel, ConfigDict
 import config
 from mqtt_in import MqttIngest
 from demo import DemoSource, make_sensors
+from auth import SensorAuth
 from engine import Engine, Zone
 
 log = logging.getLogger("dronewatch")
@@ -52,10 +53,14 @@ async def lifespan(app):
     cfg = config.load(os.environ.get("CONFIG", BASE / "config.yaml"))
     DEMO = cfg.mode == "demo"
     sensors = make_sensors() if DEMO else config.build_sensors(cfg)  # demo: датчики симулятора, інакше з конфігу
+    auth = SensorAuth({s.id: s.key_sha256 for s in cfg.sensors}) if not DEMO and cfg.auth.mode == "required" else None
+    if not DEMO and auth is None:
+        log.warning("автентифікацію датчиків вимкнено (auth.mode: disabled): будь-хто з доступом до /api/events чи брокера "
+                    "може підкидати події й підробляти heartbeat")
     engine = Engine(sensors, config.build_zones(cfg), db_path=DB_PATH, scan_dt=cfg.scan_dt,
                     min_age_s=cfg.alerts.min_age_s, require_radar=cfg.alerts.require_radar_in_cover,
                     max_coast=cfg.alerts.max_coast_scans, sensor_timeout_s=cfg.sensor_timeout_s,
-                    max_events_per_sensor=cfg.max_events_per_sensor_scan, max_tracks=cfg.max_tracks)
+                    max_events_per_sensor=cfg.max_events_per_sensor_scan, max_tracks=cfg.max_tracks, auth=auth)
     if DEMO:
         engine.calibration = {"done": True, "note": "еталонний політ + компенсація затримок"}
         demo_src = DemoSource(sensors)
@@ -153,7 +158,7 @@ def health():
     last = sh["last_ok"] if sh["last_ok"] is not None else sh["started"]
     scanning = scan_task is not None and not scan_task.done() and now - last <= stale_after
     lost = engine.degraded()
-    body = {"ok": scanning, "degraded": bool(lost), "lost_sensors": lost,
+    body = {"ok": scanning, "degraded": bool(lost), "lost_sensors": lost, "auth": engine.auth is not None,
             "mode": "demo" if DEMO else "live", "scans": engine.stats["scans"],
             "scan": {"errors": sh["errors"], "consecutive_errors": sh["consecutive"], "last_error": sh["last_error"],
                      "last_ok_age_s": round(now - sh["last_ok"], 1) if sh["last_ok"] is not None else None},
@@ -173,9 +178,15 @@ def state():
 
 
 @app.post("/api/events")
-def post_events(events: Annotated[list[Detection], Body(max_length=MAX_HTTP_BATCH)]):
-    ok, bad = engine.ingest([e.model_dump() for e in events])
-    return {"accepted": ok, "rejected": bad}
+def post_events(events: Annotated[list[Detection], Body(max_length=MAX_HTTP_BATCH)],
+                x_api_key: Annotated[str | None, Header()] = None):
+    """Ключ датчика в заголовку X-API-Key (не в тілі: тіла частіше потрапляють у логи). Ключ належить одному датчику:
+    події інших датчиків у цьому ж запиті відхиляються. 401, якщо жодної події не прийнято через ключ."""
+    r = engine.ingest_detailed([{**e.model_dump(), "key": x_api_key} for e in events])
+    if r.unauthorized and not r.accepted:
+        return JSONResponse({"detail": "відсутній або хибний ключ датчика (заголовок X-API-Key)"}, status_code=401,
+                            headers={"WWW-Authenticate": "ApiKey"})
+    return {"accepted": r.accepted, "rejected": r.rejected, "unauthorized": r.unauthorized}
 
 
 @app.get("/api/incidents")

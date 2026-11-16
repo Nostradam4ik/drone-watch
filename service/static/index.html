@@ -62,6 +62,7 @@
   <span id="mqtt" class="badge" hidden></span>
   <span id="sens" class="badge"></span>
   <span id="overload" class="badge off" hidden></span>
+  <span id="denied" class="badge off" hidden></span>
   <span class="stat">Треків: <b id="s-tracks">0</b></span>
   <span class="stat">Кандидатів: <b id="s-tent">0</b></span>
   <span class="stat">Подій: <b id="s-ev">0</b></span>
@@ -199,6 +200,9 @@ function render(msg) {
 
   renderSensors(msg.sensors || []);
   const st = msg.stats, ov = document.getElementById("overload"), shed = st.events_dropped + st.tracks_capped + st.bearings_truncated;
+  const dn = document.getElementById("denied");
+  dn.hidden = !st.events_unauthorized;   // події без ключа: або хибно налаштований датчик, або чужий намагається підкинути дані
+  if (st.events_unauthorized) dn.textContent = "без чинного ключа: " + st.events_unauthorized + " подій";
   ov.hidden = !shed;
   if (shed) ov.textContent = "перевантаження: відкинуто " + st.events_dropped + " подій" + (st.tracks_capped ? ", треків " + st.tracks_capped : "");
 

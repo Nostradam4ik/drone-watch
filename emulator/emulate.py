@@ -10,6 +10,11 @@
     python emulate.py --scenario hover --only radar1,rf1     # без акустики (імітація відмови датчика)
     python emulate.py --scenario cross --bias rf1=3          # RF «довертає» на 3° (перевірка калібрування)
     python emulate.py --scenario cross --dry-run             # лише показати події, нічого не слати
+    python emulate.py --key radar1=КЛЮЧ --key rf1=КЛЮЧ ...   # ключі датчиків (сервіс у live вимагає ключ на кожен датчик)
+    DRONEWATCH_KEYS="radar1=К1,rf1=К2,ac1=К3" python emulate.py   # те саме через оточення (не потрапляє в історію команд)
+
+Ключі: HTTP шле їх у заголовку X-API-Key (окремий запит на кожен датчик: ключ належить одному датчику),
+MQTT кладе в поле "key" кожної події. Видати ключі: python service/keygen.py radar1 rf1 ac1.
 
 Heartbeat: кожен скан кожен справний датчик шле {"sensor_id": ..., "heartbeat": true}, навіть коли нічого не бачить.
 Так сервіс відрізняє «небо порожнє» від «датчик відмовив». Вимкнути: --no-heartbeat.
@@ -20,6 +25,7 @@ Heartbeat: кожен скан кожен справний датчик шле {
 import argparse
 import json
 import math
+import os
 import random
 import sys
 import time
@@ -164,9 +170,11 @@ class MqttPublisher:
             pass
 
 
-def http(url, data=None, timeout=5):
-    req = urllib.request.Request(url, data=json.dumps(data).encode() if data is not None else None,
-                                 headers={"Content-Type": "application/json"})
+def http(url, data=None, timeout=5, key=None):
+    headers = {"Content-Type": "application/json"}
+    if key:
+        headers["X-API-Key"] = key
+    req = urllib.request.Request(url, data=json.dumps(data).encode() if data is not None else None, headers=headers)
     with urllib.request.urlopen(req, timeout=timeout) as r:
         return json.load(r)
 
@@ -183,6 +191,17 @@ def parse_bias(items):
     return out
 
 
+def parse_keys(items, env):
+    """--key radar1=КЛЮЧ (можна кілька) і/або DRONEWATCH_KEYS="radar1=К1,rf1=К2". Прапорці перекривають оточення."""
+    out = {}
+    for item in [x for x in (env or "").split(",") if x.strip()] + list(items or []):
+        sid, sep, key = item.strip().partition("=")
+        if not sep or not sid or not key:
+            sys.exit("ключ датчика: очікується ІМ'Я=КЛЮЧ (повідомлення не містить введеного значення: це міг бути сам ключ)")
+        out[sid] = key
+    return out
+
+
 def main():
     ap = argparse.ArgumentParser(description="Емулятор датчиків Drone Watch", formatter_class=argparse.RawDescriptionHelpFormatter,
                                  epilog=__doc__.split("Приклади:")[1])
@@ -195,6 +214,7 @@ def main():
     ap.add_argument("--clutter", type=float, default=0.3, help="середня кількість хибних детекцій за скан на датчик")
     ap.add_argument("--only", help="емулювати лише ці датчики (через кому), решта «відмовила»")
     ap.add_argument("--bias", action="append", help="систематична похибка: rf1=3 або radar1=8,1,0.5")
+    ap.add_argument("--key", action="append", metavar="ДАТЧИК=КЛЮЧ", help="ключ датчика (повторювати для кожного); див. також DRONEWATCH_KEYS")
     ap.add_argument("--no-heartbeat", action="store_true", help="не слати heartbeat (поведінка старих датчиків)")
     ap.add_argument("--seed", type=int, default=1)
     ap.add_argument("--loop", action="store_true", help="повторювати сценарій безкінечно")
@@ -221,6 +241,13 @@ def main():
             sys.exit(f"Невідомі датчики в --only: {sorted(unknown)}")
         sensors = [s for s in sensors if s["id"] in keep]
     bias = parse_bias(a.bias)
+    keys = parse_keys(a.key, os.environ.get("DRONEWATCH_KEYS"))
+    unknown_keys = set(keys) - {s["id"] for s in sensors}
+    if unknown_keys:
+        print(f"Увага: ключі для невідомих датчиків ігноруються: {sorted(unknown_keys)}")
+    if not keys and not a.dry_run:
+        print("Увага: ключів датчиків не задано; сервіс у live-режимі з автентифікацією відхилить усі події "
+              "(--key ДАТЧИК=КЛЮЧ або DRONEWATCH_KEYS)")
     pub = None
     if a.mqtt and not a.dry_run:
         host, _, port = a.mqtt.partition(":")
@@ -259,13 +286,21 @@ def main():
                     if pub:
                         for s in sensors:  # одна публікація на датчик за скан (масив подій)
                             batch = [e for e in events if e["sensor_id"] == s["id"]]
-                            if batch:
-                                pub.publish(f"{a.topic}/{s['id']}", batch)
+                            if batch:   # ключ додаємо лише в момент відправки: у dry-run і виводі його немає
+                                k = keys.get(s["id"])
+                                pub.publish(f"{a.topic}/{s['id']}", [{**e, "key": k} for e in batch] if k else batch)
                         sent += len(events)
                     else:
-                        r = http(a.url + "/api/events", events)
-                        sent += r["accepted"]
-                        rejected += r["rejected"]
+                        for s in sensors:   # ключ належить одному датчику, тож окремий запит на кожен
+                            batch = [e for e in events if e["sensor_id"] == s["id"]]
+                            if batch:
+                                r = http(a.url + "/api/events", batch, key=keys.get(s["id"]))
+                                sent += r["accepted"]
+                                rejected += r["rejected"]
+                except urllib.error.HTTPError as e:
+                    if e.code == 401:
+                        sys.exit("Сервіс відхилив ключ датчика (401). Перевірте --key / DRONEWATCH_KEYS і key_sha256 у конфігу сервісу.")
+                    print(f"  помилка відправки: {e}")
                 except (urllib.error.URLError, OSError) as e:
                     print(f"  помилка відправки: {e}")
             if not a.dry_run and el - last_report >= 10:

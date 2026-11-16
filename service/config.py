@@ -28,6 +28,12 @@ class Bias(BaseModel):
     elevation_deg: float = 0.0
 
 
+class AuthCfg(BaseModel):
+    """required: події без чинного ключа свого датчика відкидаються (за замовчуванням у live). disabled: явна відмова
+    від автентифікації (довірена ізольована мережа); сервіс пише про це попередження при старті."""
+    mode: Literal["required", "disabled"] = "required"
+
+
 class SensorCfg(BaseModel):
     id: str = Field(min_length=1)
     type: Literal["radar", "rf", "acoustic"]
@@ -36,6 +42,19 @@ class SensorCfg(BaseModel):
     noise: Noise = Noise()
     latency_s: float = Field(0.0, ge=0)
     bias: Bias = Bias()
+    key_sha256: str | None = Field(None, description="SHA-256 ключа датчика (hex); ключ видає python keygen.py <id>")
+
+    @field_validator("key_sha256")
+    @classmethod
+    def _key_hash(cls, v):
+        if v is None:
+            return v
+        v = v.strip().lower()
+        if len(v) != 64 or any(c not in "0123456789abcdef" for c in v):
+            raise ValueError("потрібен SHA-256 у hex (64 символи), у лапках; згенеруйте: python keygen.py <id>")
+        if set(v) == {"0"}:
+            raise ValueError("це заглушка з прикладу, жоден ключ їй не відповідає; згенеруйте справжній: python keygen.py <id>")
+        return v
 
     @field_validator("position")
     @classmethod
@@ -78,6 +97,7 @@ class Config(BaseModel):
     zones: list[ZoneCfg] = []
     alerts: AlertsCfg = AlertsCfg()
     mqtt: MqttCfg | None = None
+    auth: AuthCfg = AuthCfg()
 
     @model_validator(mode="after")
     def _check(self):
@@ -92,6 +112,11 @@ class Config(BaseModel):
                                  "інакше трекеру нема з чого визначити позицію")
             if not self.zones:
                 raise ValueError("не описано жодної зони: тривоги не буде за чим оцінювати")
+            if self.auth.mode == "required":
+                keyless = [s.id for s in self.sensors if not s.key_sha256]
+                if keyless:
+                    raise ValueError(f"немає key_sha256 для датчиків {keyless}: автентифікація обовʼязкова. Згенеруйте ключі "
+                                     f"(python keygen.py {' '.join(keyless)}) або свідомо вимкніть: auth: {{mode: disabled}}")
         return self
 
 

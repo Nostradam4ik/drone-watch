@@ -1,5 +1,10 @@
 # Конфігурація сервісу в docker-compose. Змініть датчики й зони на свої.
 # Адресу брокера задає змінна MQTT_HOST у docker-compose.yml.
+#
+# ДЕМО-КЛЮЧІ ДАТЧИКІВ. key_sha256 нижче відповідають ключам, що лежать у docker-compose.yml (сервіс emulator), тобто
+# вони публічні, як і весь цей репозиторій: так стенд працює одразу після `docker compose up`. Для будь-чого, окрім
+# локальної демонстрації, згенеруйте свої (python service/keygen.py radar1 rf1 ac1), замініть тут хеші й видайте
+# кожен ключ лише своєму датчику.
 mode: live
 scan_dt: 0.5
 sensor_timeout_s: 5   # тиша довше за це = датчик відмовив (емулятор шле heartbeat кожен скан)
@@ -13,18 +18,21 @@ sensors:
     max_range: 1500
     noise: {range_m: 5, azimuth_deg: 0.7, elevation_deg: 1.5}
     latency_s: 0.1
+    key_sha256: "40bc1a2ade19ee4629588e5d5b10674c50e0e178a54c6fea6d7f8b99d3314fff"
   - id: rf1
     type: rf
     position: [400, -300]
     max_range: 1800
     noise: {azimuth_deg: 5}
     latency_s: 0.3
+    key_sha256: "168f535e4bdfb5f79534a7907ab1a5ac085b4b0001be3b644adef1c91142d679"
   - id: ac1
     type: acoustic
     position: [-300, 200]
     max_range: 700
     noise: {azimuth_deg: 10}
     latency_s: 0.5
+    key_sha256: "9594f53087f0a4f60f9b1ceca2f5dac54d6493cca3578caa854ef5ee276d18d8"
 
 zones:
   - {name: "Буферна зона",  radius_m: 600, level: WARNING}

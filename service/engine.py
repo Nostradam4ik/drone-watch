@@ -15,7 +15,7 @@ import sqlite3
 import sys
 import threading
 import time
-from collections import Counter
+from collections import Counter, namedtuple
 from pathlib import Path
 
 import numpy as np
@@ -27,6 +27,8 @@ LEVELS = {"NONE": 0, "WARNING": 1, "CRITICAL": 2}
 STALE_S = 2.0          # події старші за це відкидаються; події з майбутнього (розбіжність годинників) теж, понад цей допуск
 RANGE_SLACK = 1.5      # радар може трохи перебрати max_range (шум, повільне згасання), але не вдвічі
 OK, WAITING, LOST = "OK", "WAITING", "LOST"   # стан здоровʼя датчика
+# accepted: прийняті детекції й heartbeat; rejected: усе відхилене (невалідне, понад стелю, без ключа); unauthorized: частина rejected
+IngestResult = namedtuple("IngestResult", "accepted rejected unauthorized")
 
 
 def compass_to_math(deg):
@@ -50,11 +52,12 @@ class Zone:
 
 class Engine:
     def __init__(self, sensors, zones, db_path=":memory:", scan_dt=0.5, min_age_s=5.0, require_radar=True, max_coast=2,
-                 sensor_timeout_s=5.0, clock=time.time, max_events_per_sensor=150, max_tracks=200):
+                 sensor_timeout_s=5.0, clock=time.time, max_events_per_sensor=150, max_tracks=200, auth=None):
         # min_age_s: тривога лише для треку, підтвердженого щонайменше стільки секунд (відсів короткоживучих хибних)
         # require_radar: у зоні радара тривога лише з радарним підтвердженням; max_coast: скільки сканів без детекцій трек ще «живий»
         self.min_age_s, self.require_radar, self.max_coast = min_age_s, require_radar, max_coast
         self.sensor_timeout_s, self.clock = sensor_timeout_s, clock   # clock підміняється в тестах
+        self.auth = auth   # SensorAuth або None (автентифікація вимкнена: демо, довірена мережа)
         # Стелі проти потопу подій: понад них події відкидаються й рахуються, але скан лишається в межах бюджету часу.
         self.max_events_per_sensor, self.max_tracks = max_events_per_sensor, max_tracks
         self.sensors = {s.name: s for s in sensors}
@@ -70,7 +73,7 @@ class Engine:
         self.lock = threading.Lock()
         self.max_level = {}      # track_id -> найвищий рівень, що вже дав тривогу
         self.alerts = []         # в памʼяті останні; повний журнал у SQLite
-        self.stats = {"events_in": 0, "events_rejected": 0, "events_dropped": 0, "heartbeats": 0, "scans": 0,
+        self.stats = {"events_in": 0, "events_rejected": 0, "events_unauthorized": 0, "events_dropped": 0, "heartbeats": 0, "scans": 0,
                       "scan_errors": 0, "tracks_capped": 0, "bearings_truncated": 0}
         self.calibration = {"done": False, "note": "не виконано"}
         self.db = sqlite3.connect(db_path, check_same_thread=False)
@@ -95,16 +98,26 @@ class Engine:
             self.stats[key] += n
 
     def ingest(self, events):
-        """Валідує події й кладе у буфер до наступного скану. Повертає (прийнято, відхилено).
-        Відхилені = невалідні + відкинуті стелею (окремо вони в stats: events_rejected / events_dropped).
+        """Те саме, що ingest_detailed, але повертає (прийнято, відхилено): для старих викликів і тестів."""
+        r = self.ingest_detailed(events)
+        return r.accepted, r.rejected
+
+    def ingest_detailed(self, events):
+        """Автентифікує, валідує події й кладе у буфер до наступного скану. Повертає IngestResult.
+        Автентифікація тут, в одному місці, для всіх джерел (HTTP, MQTT): подія без чинного ключа свого датчика
+        відкидається ДО будь-чого іншого й не зараховується навіть як heartbeat. Ключ лежить у event["key"] і в буфер не потрапляє.
+        Відхилені = невалідні + відкинуті стелею + без ключа (окремо вони в stats).
         Валідація йде поза замком, у буфер і лічильники пакет потрапляє одним захопленням замка."""
         now = self.clock()
-        beats, parsed, bad, dropped = [], [], 0, 0
+        beats, parsed, bad, dropped, denied = [], [], 0, 0, 0
         taken = Counter()   # підказка без замка: не валідуємо більше за стелю від одного датчика в пакеті
         for e in events:
             sid = e.get("sensor_id")
             if not isinstance(sid, str):   # з MQTT може прийти що завгодно, зокрема нехешований список: це не повинно валити ingest
                 bad += 1
+                continue
+            if self.auth is not None and not self.auth.verify(sid, e.get("key")):
+                denied += 1
                 continue
             if e.get("heartbeat"):
                 if sid in self.sensors:
@@ -137,7 +150,8 @@ class Engine:
             self.stats["heartbeats"] += len(beats)
             self.stats["events_rejected"] += bad
             self.stats["events_dropped"] += dropped
-        return ok + len(beats), bad + dropped
+            self.stats["events_unauthorized"] += denied
+        return IngestResult(ok + len(beats), bad + dropped + denied, denied)
 
     def _mark(self, sensor_id, now):
         """Датчик озвався. Викликати лише під self.lock."""
