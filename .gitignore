@@ -1,0 +1,12 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# Локальні дані та журнали (журнал інцидентів живе у volume Docker або в DB_PATH)
+*.db
+*.log
+
+# Артефакти інструментів
+.playwright-mcp/

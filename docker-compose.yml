@@ -1,0 +1,38 @@
+# Запуск:  docker compose up --build
+# З емулятором датчиків:  docker compose --profile demo-sensors up --build
+# Дашборд: http://localhost:8000     Брокер MQTT: localhost:1883, топіки dronewatch/events/<sensor_id>
+services:
+  mosquitto:
+    image: eclipse-mosquitto:2
+    ports: ["1883:1883"]
+    volumes: ["./deploy/mosquitto.conf:/mosquitto/config/mosquitto.conf:ro"]
+    healthcheck:
+      test: ["CMD-SHELL", "mosquitto_sub -h 127.0.0.1 -t '$$SYS/broker/uptime' -C 1 -W 3 || exit 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+
+  service:
+    build: {context: ., dockerfile: service/Dockerfile}
+    ports: ["8000:8000"]
+    environment:
+      CONFIG: /config/config.yaml
+      MQTT_HOST: mosquitto
+    volumes:
+      - ./deploy/config.yaml:/config/config.yaml:ro
+      - incidents:/data          # журнал тривог переживає перезапуск
+    depends_on:
+      mosquitto: {condition: service_healthy}
+    restart: unless-stopped
+
+  emulator:                      # лише з профілем demo-sensors
+    profiles: ["demo-sensors"]
+    build: ./emulator
+    command: ["--url", "http://service:8000", "--mqtt", "mosquitto:1883", "--scenario", "swarm", "--count", "8", "--loop"]
+    depends_on:
+      service: {condition: service_healthy}
+    restart: unless-stopped
+
+volumes:
+  incidents:

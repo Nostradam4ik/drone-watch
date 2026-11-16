@@ -1,0 +1,36 @@
+# Конфігурація сервісу в docker-compose. Змініть датчики й зони на свої.
+# Адресу брокера задає змінна MQTT_HOST у docker-compose.yml.
+mode: live
+scan_dt: 0.5
+sensor_timeout_s: 5   # тиша довше за це = датчик відмовив (емулятор шле heartbeat кожен скан)
+max_events_per_sensor_scan: 150  # стелі проти потопу подій, пояснення в service/config.example.yaml
+max_tracks: 200
+
+sensors:
+  - id: radar1
+    type: radar
+    position: [0, 0]
+    max_range: 1500
+    noise: {range_m: 5, azimuth_deg: 0.7, elevation_deg: 1.5}
+    latency_s: 0.1
+  - id: rf1
+    type: rf
+    position: [400, -300]
+    max_range: 1800
+    noise: {azimuth_deg: 5}
+    latency_s: 0.3
+  - id: ac1
+    type: acoustic
+    position: [-300, 200]
+    max_range: 700
+    noise: {azimuth_deg: 10}
+    latency_s: 0.5
+
+zones:
+  - {name: "Буферна зона",  radius_m: 600, level: WARNING}
+  - {name: "Критична зона", radius_m: 250, level: CRITICAL}
+
+alerts:
+  min_age_s: 5
+  require_radar_in_cover: true
+  max_coast_scans: 2

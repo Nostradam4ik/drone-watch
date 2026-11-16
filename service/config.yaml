@@ -1,0 +1,12 @@
+# Активна конфігурація. Змініть mode на "live" і опишіть свої датчики, щоб відмовитися від симулятора.
+# Повний приклад із коментарями: config.example.yaml
+
+mode: demo          # demo = вбудований симулятор рою; датчики нижче в demo ігноруються
+
+zones:
+  - {name: "Буферна зона",  radius_m: 600, level: WARNING}
+  - {name: "Критична зона", radius_m: 250, level: CRITICAL}
+
+alerts:
+  min_age_s: 5
+  require_radar_in_cover: true
