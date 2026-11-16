@@ -323,6 +323,70 @@ def test_http_batch_limit_and_incidents_clamp():
         assert len(client.get("/api/incidents?limit=-1").json()) == 1, "limit=-1 раніше віддавав усю таблицю"
 
 
+def _radar_event(eng, **override):
+    return {"sensor_id": "radar1", "ts": eng.clock(), "azimuth_deg": 90.0, "range_m": 500.0, "elevation_deg": 5.0, **override}
+
+
+def test_untrusted_fields_are_rejected():
+    """Регрес із перевірки безпеки: NaN/Infinity, нефізичні значення й ts з майбутнього не мають доходити до фільтра."""
+    nan, inf = float("nan"), float("inf")
+    bad_events = {
+        "azimuth NaN": {"azimuth_deg": nan}, "azimuth inf": {"azimuth_deg": inf},
+        "ts NaN": {"ts": nan}, "ts inf": {"ts": inf},
+        "range NaN": {"range_m": nan}, "range inf": {"range_m": inf},
+        "range 0": {"range_m": 0.0}, "range negative": {"range_m": -500.0},
+        "range 5x max": {"range_m": 7500.0},
+        "elevation 1e9": {"elevation_deg": 1e9}, "elevation -91": {"elevation_deg": -91.0}, "elevation NaN": {"elevation_deg": nan},
+        "ts hour ahead": {"ts": BASE + 3600}, "ts hour behind": {"ts": BASE - 3600},
+        "ts string nan": {"ts": "nan"}, "azimuth string": {"azimuth_deg": "північ"}, "azimuth None": {"azimuth_deg": None},
+    }
+    for label, patch in bad_events.items():
+        eng = Engine(default_sensors(), [Zone("z", 600, "WARNING")], clock=Clock())
+        assert eng.ingest([_radar_event(eng, **patch)]) == (0, 1), f"прийнято: {label}"
+        eng.tick()
+        assert eng.tracker.tracks == [] and eng.stats["events_rejected"] == 1, label
+
+    eng = Engine(default_sensors(), [Zone("z", 600, "WARNING")], clock=Clock())
+    assert eng.ingest([_radar_event(eng)]) == (1, 0), "нормальна подія має проходити"
+    assert eng.ingest([_radar_event(eng, ts=eng.clock() + 1.0)]) == (1, 0), "дрібний зсув годинників (1 с) допустимий"
+    assert eng.ingest([_radar_event(eng, range_m=1500 * 1.4)]) == (1, 0), "радар може трохи перебрати max_range"
+    assert eng.ingest([_radar_event(eng, elevation_deg=-3.0)]) == (1, 0), "від'ємна елевація можлива (ціль нижче радара)"
+    eng.tick()
+    assert all(np.isfinite(t.x).all() and np.isfinite(t.P).all() for t in eng.tracker.tracks)
+
+    rf = {"sensor_id": "rf1", "ts": eng.clock(), "azimuth_deg": 10.0}
+    assert eng.ingest([rf, {**rf, "azimuth_deg": float("nan")}]) == (1, 1), "для пеленга теж перевіряється азимут"
+
+
+def test_non_string_sensor_id_does_not_crash_ingest():
+    """З MQTT може прийти {"sensor_id": []}: раніше це був TypeError (нехешований тип) у ingest."""
+    eng = Engine(default_sensors(), [Zone("z", 600, "WARNING")], clock=Clock())
+    events = [{"sensor_id": [], "ts": eng.clock(), "azimuth_deg": 1.0}, {"sensor_id": {"a": 1}, "heartbeat": True},
+              {"sensor_id": None, "heartbeat": True}, {"sensor_id": 7}, {}]
+    assert eng.ingest(events) == (0, 5)
+
+
+def test_http_rejects_nan_and_infinity():
+    app = _app_with_engine()
+    if app is None:
+        return
+    try:
+        from fastapi.testclient import TestClient
+    except ImportError as e:
+        print("skip: no httpx:", e)
+        return
+    client = TestClient(app.app, raise_server_exceptions=False)   # дивимось на відповідь, а не на виняток сервера
+    headers = {"Content-Type": "application/json"}
+    ts = time.time()
+    for body in ('[{"sensor_id":"rf1","ts":%f,"azimuth_deg":NaN}]' % ts, '[{"sensor_id":"rf1","ts":Infinity,"azimuth_deg":1}]',
+                 '[{"sensor_id":"radar1","ts":%f,"azimuth_deg":1,"range_m":-Infinity,"elevation_deg":1}]' % ts):
+        r = client.post("/api/events", content=body, headers=headers)
+        assert r.status_code == 422, (body, r.status_code)
+        assert "input" not in r.text and "NaN" not in r.text, "відповідь не має відлунювати значення"
+    ok = client.post("/api/events", content='[{"sensor_id":"rf1","ts":%f,"azimuth_deg":1.5}]' % ts, headers=headers)
+    assert ok.status_code == 200 and ok.json()["accepted"] == 1
+
+
 if __name__ == "__main__":
     for name, fn in sorted(globals().items()):
         if name.startswith("test_"):

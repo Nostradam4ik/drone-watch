@@ -1,10 +1,15 @@
 # Запуск:  docker compose up --build
 # З емулятором датчиків:  docker compose --profile demo-sensors up --build
 # Дашборд: http://localhost:8000     Брокер MQTT: localhost:1883, топіки dronewatch/events/<sensor_id>
+#
+# Обидва порти прив'язані до 127.0.0.1: у сервісу немає автентифікації (дашборд, WebSocket і /api/events відкриті),
+# а брокер у deploy/mosquitto.conf приймає анонімів без TLS. Контейнери бачать один одного по мережі Docker, тож
+# емулятору це не заважає. Щоб приймати датчики з мережі, спершу увімкніть автентифікацію й TLS, і лише тоді
+# змініть "127.0.0.1:" на "0.0.0.0:" (або на адресу потрібного інтерфейсу).
 services:
   mosquitto:
     image: eclipse-mosquitto:2
-    ports: ["1883:1883"]
+    ports: ["127.0.0.1:1883:1883"]
     volumes: ["./deploy/mosquitto.conf:/mosquitto/config/mosquitto.conf:ro"]
     healthcheck:
       test: ["CMD-SHELL", "mosquitto_sub -h 127.0.0.1 -t '$$SYS/broker/uptime' -C 1 -W 3 || exit 1"]
@@ -15,7 +20,7 @@ services:
 
   service:
     build: {context: ., dockerfile: service/Dockerfile}
-    ports: ["8000:8000"]
+    ports: ["127.0.0.1:8000:8000"]
     environment:
       CONFIG: /config/config.yaml
       MQTT_HOST: mosquitto

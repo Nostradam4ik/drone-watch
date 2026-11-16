@@ -9,9 +9,10 @@ from pathlib import Path
 from contextlib import closing
 from typing import Annotated, Optional
 
-from fastapi import Body, FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import Body, FastAPI, Request, WebSocket, WebSocketDisconnect
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, JSONResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 
 import config
 from mqtt_in import MqttIngest
@@ -27,6 +28,7 @@ DB_PATH = os.environ.get("DB_PATH", str(BASE / "incidents.db"))
 
 
 class Detection(BaseModel):
+    model_config = ConfigDict(allow_inf_nan=False)   # JSON-літерали NaN/Infinity Python приймає, а фільтру вони шкодять: 422
     sensor_id: str
     ts: Optional[float] = None             # обовʼязковий для детекції (рушій відхилить без нього), не потрібен для heartbeat
     azimuth_deg: Optional[float] = None   # обовʼязковий для детекції, не потрібен для heartbeat
@@ -76,6 +78,13 @@ async def lifespan(app):
 
 
 app = FastAPI(title="Drone Watch", lifespan=lifespan)
+
+
+@app.exception_handler(RequestValidationError)
+async def validation_error(request: Request, exc: RequestValidationError):
+    """422 без значень, що не пройшли перевірку. Стандартна відповідь їх відлунює (`input`), а NaN/Infinity Starlette
+    не вміє серіалізувати в JSON: клієнт отримував 500 замість 422. Заодно не повертаємо відправнику його ж дані."""
+    return JSONResponse({"detail": [{"loc": e["loc"], "msg": e["msg"], "type": e["type"]} for e in exc.errors()]}, status_code=422)
 
 
 def _scan_task_done(task):

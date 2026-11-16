@@ -24,7 +24,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "fusion_proto"))
 from tracker import Tracker  # noqa: E402
 
 LEVELS = {"NONE": 0, "WARNING": 1, "CRITICAL": 2}
-STALE_S = 2.0          # події старші за це відкидаються
+STALE_S = 2.0          # події старші за це відкидаються; події з майбутнього (розбіжність годинників) теж, понад цей допуск
+RANGE_SLACK = 1.5      # радар може трохи перебрати max_range (шум, повільне згасання), але не вдвічі
 OK, WAITING, LOST = "OK", "WAITING", "LOST"   # стан здоровʼя датчика
 
 
@@ -102,6 +103,9 @@ class Engine:
         taken = Counter()   # підказка без замка: не валідуємо більше за стелю від одного датчика в пакеті
         for e in events:
             sid = e.get("sensor_id")
+            if not isinstance(sid, str):   # з MQTT може прийти що завгодно, зокрема нехешований список: це не повинно валити ingest
+                bad += 1
+                continue
             if e.get("heartbeat"):
                 if sid in self.sensors:
                     beats.append(sid)
@@ -141,16 +145,24 @@ class Engine:
         self.heard.add(sensor_id)
 
     def _to_internal(self, e, now):
+        """Подія -> (датчик, вимірювання) або None. Вхід недовірений (HTTP, MQTT): NaN/Infinity у JSON, нефізичні значення
+        й мітки часу з майбутнього відхиляються тут, а не доходять до фільтра (один NaN робив трек з NaN у стані)."""
         s = self.sensors.get(e.get("sensor_id"))
+        if s is None:
+            return None
         try:
-            if s is None or now - float(e["ts"]) > STALE_S:
+            ts, az_deg = float(e["ts"]), float(e["azimuth_deg"])
+            if not (math.isfinite(ts) and math.isfinite(az_deg)) or not -STALE_S <= now - ts <= STALE_S:
                 return None
-            az = compass_to_math(float(e["azimuth_deg"]))
+            az = compass_to_math(az_deg)
             if s.kind == "radar":
-                z = np.array([float(e["range_m"]), az, math.radians(float(e["elevation_deg"]))])
+                rng, el_deg = float(e["range_m"]), float(e["elevation_deg"])
+                if not (math.isfinite(rng) and math.isfinite(el_deg)) or not 0 < rng <= s.max_range * RANGE_SLACK or abs(el_deg) > 90:
+                    return None
+                z = np.array([rng, az, math.radians(el_deg)])
             else:
                 z = np.array([az])
-        except (KeyError, TypeError, ValueError):
+        except (KeyError, TypeError, ValueError, OverflowError):
             return None
         z[1 if s.kind == "radar" else 0] = (z[1 if s.kind == "radar" else 0] + math.pi) % (2 * math.pi) - math.pi
         return (s.name, z)
