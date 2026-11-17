@@ -10,6 +10,7 @@ import math
 import os
 import sqlite3
 import time
+import uuid
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager, closing
 from dataclasses import dataclass, field
@@ -30,7 +31,7 @@ from dronewatch.service.ai.llm import MistralClient
 from dronewatch.service.ai.rag import IncidentIndex
 from dronewatch.service.auth import SensorAuth
 from dronewatch.service.dashboard_auth import LoginLimiter, SessionStore, Users
-from dronewatch.service.dashboard_web import DashboardAccess, current_user, get_access, require_user
+from dronewatch.service.dashboard_web import DashboardAccess, current_user, require_user
 from dronewatch.service.demo import DemoSource, make_sensors
 from dronewatch.service.engine import Engine, SensorStatus
 from dronewatch.service.mqtt_in import MqttIngest
@@ -229,10 +230,16 @@ async def scan_step(app: FastAPI, rt: Runtime) -> None:
             if done:
                 rt.engine.reset()
                 rt.demo_src.restart()
-        rt.engine.tick()
+        new_alerts = rt.engine.tick()
         payload = {"type": "state", **rt.engine.state(truth), "alerts": rt.engine.alerts[:30],
                    "mqtt": rt.mqtt.status() if rt.mqtt else None}
         await broadcast(rt, getattr(app.state, "access", None) or DashboardAccess(), payload)
+        if rt.ai is not None:
+            for alert in new_alerts:
+                try:
+                    rt.ai.index.index(str(uuid.uuid4()), {**alert, "sensors": ",".join(alert["sensors"])})
+                except AiUnavailable as e:   # RAG-індексація необов'язкова: Qdrant/Mistral лежать — трекінг іде далі
+                    log.warning("AI: не вдалося проіндексувати інцидент у Qdrant: %s", e)
     except Exception as e:  # CancelledError сюди не потрапляє (це BaseException), тож зупинка сервісу працює
         sh.errors += 1
         sh.consecutive += 1
@@ -333,15 +340,17 @@ class AskResponse(BaseModel):
     tool_calls: list[dict[str, Any]]
 
 
-@app.post("/api/ai/ask", dependencies=[Depends(require_user)], response_model=None)
-def ask_ai(body: AskRequest, request: Request, rt: RuntimeDep) -> AskResponse | JSONResponse:
+@app.post("/api/ai/ask", response_model=None)
+def ask_ai(body: AskRequest, rt: RuntimeDep, user: Annotated[str, Depends(require_user)]) -> AskResponse | JSONResponse:
     """Чат-агент оператора: читає живий стан і минулі інциденти через тули, нічого не пише в систему.
-    503, якщо AI вимкнено чи недоступний — трекінг дронів від цього не залежить."""
+    503, якщо AI вимкнено чи недоступний — трекінг дронів від цього не залежить.
+
+    Ключ ліміту запитів — user з require_user (уже перевірена сесія), а не сире значення cookie: інакше клієнт
+    обходив би ліміт, просто надсилаючи щоразу нове значення dw_session (особливо легко, коли вхід вимкнено й
+    cookie взагалі не звіряється з жодним сховищем сесій)."""
     if rt.ai is None:
         return JSONResponse({"detail": "AI-асистент вимкнено або недоступний"}, status_code=503)
-    access = get_access(request)
-    key = access.token(request) or "anon"
-    if wait := rt.ai.limiter.attempt(key):
+    if wait := rt.ai.limiter.attempt(user):
         raise HTTPException(429, "Забагато запитів до AI-асистента, спробуйте пізніше",
                             headers={"Retry-After": str(math.ceil(wait))})
     try:

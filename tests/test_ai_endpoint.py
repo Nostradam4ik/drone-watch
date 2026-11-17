@@ -85,3 +85,19 @@ def test_ask_rate_limited_after_many_requests():
         client.post("/api/ai/ask", json={"question": "що?"})
     r = client.post("/api/ai/ask", json={"question": "що?"})
     assert r.status_code == 429 and "Retry-After" in r.headers
+
+
+def test_ask_rate_limit_cannot_be_bypassed_by_rotating_the_session_cookie():
+    """Коли вхід вимкнено (demo), сире значення кукі ще не перевірене — якщо ключ ліміту береться прямо з нього,
+    клієнт обходить ліміт, просто відправляючи щоразу нове значення cookie. Ключ має братись з user (require_user),
+    тобто з уже перевіреної автентифікації, а не з неперевіреного заголовка клієнта."""
+    rt = app.Runtime(engine=Engine(default_sensors(), [Zone("z", 100, "WARNING")]),
+                     ai=_ai_runtime(_StubLlm(responses=[ChatResult(content="ок", tool_calls=[]) for _ in range(20)])))
+    app.app.state.runtime = rt
+    app.app.state.access = DashboardAccess()   # вхід вимкнено: будь-яке значення dw_session "проходить" як анонім
+    client = TestClient(app.app, raise_server_exceptions=False)
+    statuses = []
+    for i in range(15):
+        client.cookies.set("dw_session", f"forged-{i}")
+        statuses.append(client.post("/api/ai/ask", json={"question": "що?"}).status_code)
+    assert 429 in statuses, "обертання кукі не повинно обходити ліміт запитів до AI"
