@@ -8,7 +8,8 @@ export PYTHONUTF8=1 PYTHONIOENCODING=utf-8   # кирилиця у виводі 
 PY=$(command -v python3 || command -v python)
 URL=${URL:-https://localhost:8000}
 tmp=$(mktemp -d)
-trap 'rm -rf "$tmp"' EXIT
+STACK_PAUSED=
+trap 'rm -rf "$tmp"; [ -z "$STACK_PAUSED" ] || dc start service emulator >/dev/null 2>&1' EXIT
 # Git Bash на Windows інакше підміняє шляхи контейнера (/mosquitto/...) на свої; для curl і tmp-шляхів підміна, навпаки, потрібна
 dc() { MSYS_NO_PATHCONV=1 docker compose "$@"; }
 fail() { echo "ПРОВАЛ: $*" >&2; exit 1; }
@@ -64,5 +65,36 @@ rc=0; pub || rc=$?
 rc=0; pub -u rf1 -P wrong-password || rc=$?
 [ "$rc" = 5 ] || fail "хибний пароль мав дати код 5, а дав $rc"
 ok "брокер: із ключем пускає, без логіна й із хибним паролем відмовляє"
+
+# 5. ACL: датчик пише лише у власний топік і нічого не читає. Брокер мовчки відкидає заборонену публікацію й нічого не
+#    доставляє на заборонену підписку, тож за кодом виходу цього не видно: дивимось, що реально прийшло до читача.
+#    Читач = логін сервісу (єдиний, кому дозволено читати dronewatch/events/#). Брокер має use_username_as_clientid, тож
+#    другий клієнт із тим самим іменем витісняє живого (і повідомлення губляться): на час кроку зупиняємо емулятор і сервіс,
+#    а наприкінці (навіть при збої) запускаємо знову.
+#    Ролі: rf1 пише у свій топік (має дійти) і в топік ac1 (не має); ac1 пише у свій (контроль, що читач бачить чужі події);
+#    radar1 підписується на все (не має отримати нічого, хоча трафік є).
+SVC_PW=$(grep -oE 'MQTT_PASSWORD: *"[^"]+"' docker-compose.yml | sed -E 's/.*: *"//; s/"$//')
+[ -n "$SVC_PW" ] || fail "не знайдено MQTT_PASSWORD сервісу в docker-compose.yml"
+sensor_key() { grep -oE 'DRONEWATCH_KEYS: *"[^"]+"' docker-compose.yml | grep -oE "$1=[^,\"]+" | cut -d= -f2; }
+AC1_KEY=$(sensor_key ac1); RADAR_KEY=$(sensor_key radar1)
+[ -n "$AC1_KEY" ] && [ -n "$RADAR_KEY" ] || fail "не знайдено демо-ключі ac1 або radar1 у docker-compose.yml"
+nonce=$(date +%s)$RANDOM
+dc stop emulator service >/dev/null 2>&1; STACK_PAUSED=1
+dc exec -T -e SVC_PW="$SVC_PW" -e RF1_KEY="$RF1_KEY" -e AC1_KEY="$AC1_KEY" -e RADAR_KEY="$RADAR_KEY" -e NONCE="$nonce" \
+   mosquitto sh -s > "$tmp/acl.out" 2>/dev/null <<'SHEOF' || true
+B="-h 127.0.0.1 -p 8883 --cafile /mosquitto/certs-ca/ca.crt"
+mosquitto_sub $B -u dronewatch-service -P "$SVC_PW" -t 'dronewatch/events/#' -v -W 6 </dev/null | sed 's/^/SVC: /' &
+mosquitto_sub $B -u radar1 -P "$RADAR_KEY" -t 'dronewatch/events/#' -v -W 6 </dev/null | sed 's/^/RADAR1: /' &
+sleep 2
+mosquitto_pub $B -u rf1 -P "$RF1_KEY" -t dronewatch/events/rf1 -m "own-$NONCE"
+mosquitto_pub $B -u rf1 -P "$RF1_KEY" -t dronewatch/events/ac1 -m "foreign-$NONCE"
+mosquitto_pub $B -u ac1 -P "$AC1_KEY" -t dronewatch/events/ac1 -m "ac1-$NONCE"
+wait
+SHEOF
+grep -q "^SVC: dronewatch/events/rf1 own-$nonce" "$tmp/acl.out" || fail "ACL: власна публікація rf1 не дійшла до сервісу (позитивний контроль)"
+grep -q "^SVC: dronewatch/events/ac1 ac1-$nonce" "$tmp/acl.out" || fail "ACL: публікація ac1 не дійшла до сервісу (позитивний контроль)"
+grep -q "foreign-$nonce" "$tmp/acl.out" && fail "ACL: rf1 зміг записати в топік чужого датчика ac1"
+grep -q '^RADAR1:' "$tmp/acl.out" && fail "ACL: radar1 отримав повідомлення, хоча читати датчикам заборонено"
+ok "ACL: датчик пише лише у свій топік і нічого не читає (сервіс бачить події всіх датчиків)"
 
 echo "Стенд працює."
