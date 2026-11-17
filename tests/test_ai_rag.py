@@ -48,3 +48,33 @@ def test_search_wraps_raw_qdrant_errors_as_ai_unavailable():
     idx = IncidentIndex("unused", _fake_embed(4), client=_BrokenQdrantClient())
     with pytest.raises(AiUnavailable):
         idx.search("щось")
+
+
+def test_concurrent_index_calls_on_fresh_index_do_not_lose_incidents():
+    """Фінальний рев'ю: check-then-create на колекції без замка — кілька потоків одночасно бачать «колекції
+    нема» й усі намагаються її створити; усі, крім першого, падали з AiUnavailable('already exists'), і той
+    інцидент губився з майбутнього RAG-пошуку. На щойно піднятому стенді перші тривоги йдуть саме так."""
+    import threading
+    import time
+
+    def _slow_embed(texts: list[str]) -> list[list[float]]:
+        time.sleep(0.05)   # розширює вікно гонки: усі потоки встигають побачити «колекції нема» до її створення
+        return _fake_embed(4)(texts)
+
+    idx = IncidentIndex("unused", _slow_embed, client=QdrantClient(location=":memory:"))
+    errors: list[Exception] = []
+    barrier = threading.Barrier(5)
+
+    def worker(i: int) -> None:
+        barrier.wait()
+        try:
+            idx.index(str(i), {"track_id": i, "zone": "A", "level": "WARNING", "speed": 1.0, "sensors": "radar1", "ts": float(i)})
+        except Exception as e:
+            errors.append(e)
+
+    threads = [threading.Thread(target=worker, args=(i,)) for i in range(5)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert not errors, f"індексація не повинна падати через паралельне створення колекції: {errors}"

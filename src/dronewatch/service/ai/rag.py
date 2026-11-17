@@ -5,6 +5,7 @@
 Колекція створюється лениво (перший реальний index()/search()), ніколи при старті сервісу: розмір вектора не
 знаємо заздалегідь (залежить від моделі ембедингів), а чіпати мережу під час lifespan суперечить принципу
 «AI недоступний не повинен заважати старту сервісу»."""
+import threading
 import uuid
 from collections.abc import Callable
 from typing import Any
@@ -23,23 +24,40 @@ def incident_text(row: dict[str, Any]) -> str:
 class IncidentIndex:
     def __init__(self, qdrant_url: str, embed: Callable[[list[str]], list[list[float]]], *,
                  collection: str = "incidents", client: QdrantClient | None = None) -> None:
-        self._client = client or QdrantClient(url=qdrant_url)
+        # check_compatibility=False: за замовчуванням конструктор QdrantClient сам ходить у мережу перевірити
+        # версію сервера — для нас це мережевий виклик у build_ai()/lifespan, саме те, чого AI-шар обіцяє не
+        # робити при старті сервісу. Лінива колекція (нижче) все одно перевірить реальну доступність при першому
+        # справжньому index()/search().
+        self._client = client or QdrantClient(url=qdrant_url, check_compatibility=False)
         self._embed = embed
         self._collection = collection
         self._ensured = False
+        # check collection_exists() потім create_collection() — дві окремі мережеві дії без цього замка: кілька
+        # паралельних index() на щойно піднятому стенді (саме тоді, коли це найбільше шкодить) усі бачать
+        # «колекції нема» й намагаються створити, і всі, крім першого, падали з «already exists» — інцидент
+        # губився з майбутнього RAG-пошуку, хоча embed() для нього вже відбувся.
+        self._ensure_lock = threading.Lock()
 
     def _ensure_collection(self) -> None:
         if self._ensured:
             return
-        try:
-            if not self._client.collection_exists(self._collection):
-                dim = len(self._embed(["."])[0])
-                self._client.create_collection(self._collection, vectors_config=VectorParams(size=dim, distance=Distance.COSINE))
-        except AiUnavailable:
-            raise
-        except Exception as e:   # непередбачена помилка самого клієнта Qdrant (мережа, протокол) — не лише embed
-            raise AiUnavailable(f"Qdrant: не вдалося підготувати колекцію «{self._collection}»: {e}") from e
-        self._ensured = True
+        with self._ensure_lock:
+            if self._ensured:
+                return
+            try:
+                if not self._client.collection_exists(self._collection):
+                    dim = len(self._embed(["."])[0])
+                    try:
+                        self._client.create_collection(self._collection,
+                                                        vectors_config=VectorParams(size=dim, distance=Distance.COSINE))
+                    except Exception:
+                        if not self._client.collection_exists(self._collection):
+                            raise   # справді не вдалося, а не просто «хтось інший устиг» — тут замок уже не допоможе
+            except AiUnavailable:
+                raise
+            except Exception as e:   # непередбачена помилка самого клієнта Qdrant (мережа, протокол) — не лише embed
+                raise AiUnavailable(f"Qdrant: не вдалося підготувати колекцію «{self._collection}»: {e}") from e
+            self._ensured = True
 
     def index(self, point_id: str, row: dict[str, Any]) -> None:
         text = incident_text(row)

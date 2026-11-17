@@ -371,7 +371,8 @@ def ask_ai(body: AskRequest, rt: RuntimeDep, user: Annotated[str, Depends(requir
                             headers={"Retry-After": str(math.ceil(wait))})
     try:
         result = agent.ask(body.question, llm=rt.ai.llm, rt=rt, index=rt.ai.index, max_iterations=rt.ai.max_iterations)
-    except AiUnavailable:
+    except AiUnavailable as e:   # лог без ключа/секретів — текст помилки формує сам AI-шар (llm.py/rag.py)
+        log.warning("AI: /api/ai/ask не вдався: %s", e)
         return JSONResponse({"detail": "AI-асистент вимкнено або недоступний"}, status_code=503)
     return AskResponse(answer=result.answer, tool_calls=result.tool_calls)
 

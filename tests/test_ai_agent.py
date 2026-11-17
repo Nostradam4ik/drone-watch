@@ -64,6 +64,29 @@ def test_ask_unknown_tool_name_becomes_tool_error_not_crash():
     assert result.answer == "ясно"
 
 
+def test_ask_bad_tool_arguments_from_model_do_not_crash():
+    """Фінальний рев'ю: get_incidents({"limit": "5"}) падав TypeError (min("5", 1000)) -> 500 у /api/ai/ask.
+    Аргументи тулів — вихід LLM, тобто недовірений вхід; будь-яка помилка самого тулу має стати текстом помилки
+    для моделі, а не впасти назовні з ask()."""
+    scripted = _ScriptedLlm([
+        ChatResult(content=None, tool_calls=[ToolCall(id="1", name="get_incidents", args={"limit": "5"})]),
+        ChatResult(content="ясно", tool_calls=[]),
+    ])
+    result = agent.ask("...", llm=scripted, rt=_runtime(), index=_FakeIndex(), max_iterations=4)
+    assert result.answer == "ясно"
+    tool_message = next(m for m in scripted.calls[1] if m["role"] == "tool")
+    assert "error" in tool_message["content"]
+
+
+def test_ask_caps_total_tool_calls_per_request():
+    """max_iterations обмежує кількість ходів, але не кількість tool_calls в одному ході — модель, що просить
+    десятки паралельних викликів за хід, інакше необмежено накручує платні ембединги й затримку за один /ask."""
+    many_calls_per_turn = [ToolCall(id=str(i), name="get_state", args={}) for i in range(agent.MAX_TOOL_CALLS_PER_ASK + 5)]
+    scripted = _ScriptedLlm([ChatResult(content=None, tool_calls=many_calls_per_turn)])
+    result = agent.ask("...", llm=scripted, rt=_runtime(), index=_FakeIndex(), max_iterations=4)
+    assert len(result.tool_calls) == agent.MAX_TOOL_CALLS_PER_ASK
+
+
 def test_tool_result_travels_as_tool_role_message_not_folded_into_prompt():
     scripted = _ScriptedLlm([
         ChatResult(content=None, tool_calls=[ToolCall(id="1", name="get_state", args={})]),

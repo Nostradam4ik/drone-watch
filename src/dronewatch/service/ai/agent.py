@@ -19,6 +19,11 @@ SYSTEM_PROMPT = (
 )
 
 
+MAX_TOOL_CALLS_PER_ASK = 20   # стеля на всі виклики тулів за один /api/ai/ask (не лише на ходи): модель може
+                              # попросити десятки паралельних викликів за один хід, а кожен — платний ембединг
+                              # чи мережевий запит. Без цієї стелі rate-limit на запити цього не ловить.
+
+
 @dataclass(frozen=True, slots=True)
 class AgentAnswer:
     answer: str
@@ -36,10 +41,15 @@ def ask(question: str, *, llm: "MistralClient", rt: "Runtime", index: "IncidentI
             {"id": c.id, "type": "function", "function": {"name": c.name, "arguments": json.dumps(c.args, ensure_ascii=False)}}
             for c in result.tool_calls]})
         for call in result.tool_calls:
+            if len(trace) >= MAX_TOOL_CALLS_PER_ASK:
+                return AgentAnswer(answer="Забагато звернень до інструментів за один запит, спробуйте уточнити питання.",
+                                   tool_calls=trace)
             trace.append({"name": call.name, "args": call.args})
+            # args — вихід LLM, тобто недовірений вхід: будь-яка помилка самого тулу (хибний тип/відсутній
+            # обов'язковий параметр, збій БД) стає текстом помилки для моделі, а не падає з ask() назовні.
             try:
-                tool_result = call_tool(call.name, call.args, rt=rt, index=index)
-            except KeyError:
-                tool_result = {"error": f"невідомий інструмент {call.name}"}
+                tool_result: Any = call_tool(call.name, call.args, rt=rt, index=index)
+            except Exception as e:
+                tool_result = {"error": f"інструмент {call.name} не спрацював: {e}"}
             messages.append({"role": "tool", "tool_call_id": call.id, "content": json.dumps(tool_result, ensure_ascii=False)})
     return AgentAnswer(answer="Не вдалося сформувати відповідь за відведену кількість кроків.", tool_calls=trace)

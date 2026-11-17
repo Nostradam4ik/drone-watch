@@ -78,6 +78,15 @@ def test_ask_mistral_outage_mid_request_returns_503():
     assert r.status_code == 503
 
 
+def test_ask_mistral_outage_is_logged(caplog):
+    """Фінальний рев'ю: раніше AiUnavailable у /api/ai/ask ковтався мовчки — на живому показі збій ключа/мережі
+    був би не діагностований жодним рядком у логах, лише непояснюваним "AI недоступний" для оператора."""
+    client = _client(ai=_ai_runtime(_StubLlm(raises=True)), logged_in=True)
+    with caplog.at_level("WARNING", logger="dronewatch"):
+        client.post("/api/ai/ask", json={"question": "що зараз?"})
+    assert any("ai" in r.message.lower() or "down" in r.message.lower() for r in caplog.records)
+
+
 def test_ask_rate_limited_after_many_requests():
     client = _client(ai=_ai_runtime(_StubLlm(responses=[ChatResult(content="ок", tool_calls=[]) for _ in range(20)])),
                      logged_in=True)

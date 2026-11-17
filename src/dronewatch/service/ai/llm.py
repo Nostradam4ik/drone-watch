@@ -61,9 +61,11 @@ class MistralClient:
         calls = []
         for c in raw_calls:
             try:
-                args = json.loads(c["function"]["arguments"])
+                raw_args = c["function"]["arguments"]
+                # Схема Mistral/OpenAI допускає arguments і JSON-рядком, і вже готовим обʼєктом
+                args = json.loads(raw_args) if isinstance(raw_args, str) else dict(raw_args)
                 calls.append(ToolCall(id=c["id"], name=c["function"]["name"], args=args))
-            except (KeyError, TypeError, json.JSONDecodeError) as e:
+            except (KeyError, TypeError, ValueError, json.JSONDecodeError) as e:
                 raise AiUnavailable("Mistral chat: не вдалося розібрати tool_call") from e
         return ChatResult(content=message.get("content"), tool_calls=calls)
 

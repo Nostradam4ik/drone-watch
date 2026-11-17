@@ -40,6 +40,17 @@ def test_chat_raises_ai_unavailable_on_non_2xx():
         _client(handler).chat([{"role": "user", "content": "hi"}])
 
 
+def test_chat_accepts_tool_arguments_already_given_as_object():
+    """Фінальний рев'ю: схема Mistral/OpenAI дозволяє function.arguments бути і JSON-рядком, і вже готовим
+    об'єктом; якщо обробляти лише рядок, об'єкт ламає кожен виклик тулу 503-кою ще до того, як агент встигне
+    щось зробити."""
+    def handler(request):
+        return httpx.Response(200, json={"choices": [{"message": {"content": None, "tool_calls": [
+            {"id": "call_1", "function": {"name": "get_state", "arguments": {"limit": 5}}}]}}]})
+    result = _client(handler).chat([{"role": "user", "content": "hi"}], tools=[])
+    assert result.tool_calls == [ToolCall(id="call_1", name="get_state", args={"limit": 5})]
+
+
 def test_chat_raises_ai_unavailable_on_malformed_tool_arguments():
     def handler(request):
         return httpx.Response(200, json={"choices": [{"message": {"content": None, "tool_calls": [
