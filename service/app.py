@@ -9,11 +9,6 @@ from contextlib import asynccontextmanager, closing
 from pathlib import Path
 from typing import Annotated
 
-from fastapi import Body, Depends, FastAPI, Header, Request, WebSocket, WebSocketDisconnect
-from fastapi.exceptions import RequestValidationError
-from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
-from pydantic import BaseModel, ConfigDict
-
 import config
 import dashboard_web
 from auth import SensorAuth
@@ -21,7 +16,11 @@ from dashboard_auth import LoginLimiter, SessionStore, Users
 from dashboard_web import DashboardAccess, current_user, require_user
 from demo import DemoSource, make_sensors
 from engine import Engine
+from fastapi import Body, Depends, FastAPI, Header, Request, WebSocket, WebSocketDisconnect
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 from mqtt_in import MqttIngest
+from pydantic import BaseModel, ConfigDict
 
 log = logging.getLogger("dronewatch")
 BASE = Path(__file__).resolve().parent

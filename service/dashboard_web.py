@@ -14,12 +14,11 @@ from pathlib import Path
 from typing import Annotated
 from urllib.parse import urlsplit
 
+from dashboard_auth import MAX_PASSWORD_LEN, LoginLimiter, SessionStore, Users
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.requests import HTTPConnection, Request
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, Response
 from pydantic import BaseModel, ConfigDict, Field
-
-from dashboard_auth import MAX_PASSWORD_LEN, LoginLimiter, SessionStore, Users
 
 log = logging.getLogger("dronewatch.dashboard")
 STATIC = Path(__file__).resolve().parent / "static"

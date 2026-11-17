@@ -1,18 +1,14 @@
 """Завантаження і перевірка config.yaml: датчики, зони, параметри тривог."""
 import math
-import sys
 from pathlib import Path
 from typing import Literal
 
 import numpy as np
 import yaml
+from dashboard_auth import parse_hash
+from engine import Zone
+from models import Sensor
 from pydantic import BaseModel, Field, ValidationError, field_validator, model_validator
-
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "fusion_proto"))
-from models import Sensor  # noqa: E402
-
-from dashboard_auth import parse_hash  # noqa: E402
-from engine import Zone  # noqa: E402
 
 
 class Noise(BaseModel):

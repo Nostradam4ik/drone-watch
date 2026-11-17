@@ -8,13 +8,12 @@ import time
 import types
 from pathlib import Path
 
+import pytest
+
 HERE = Path(__file__).resolve().parent
-sys.path.insert(0, str(HERE.parent / "fusion_proto"))
-sys.path.insert(0, str(HERE))
-sys.path.insert(0, str(HERE.parent / "emulator"))
-from auth import SensorAuth, hash_key  # noqa: E402
-from engine import Engine, Zone  # noqa: E402
-from sim import default_sensors  # noqa: E402
+from auth import SensorAuth, hash_key
+from engine import Engine, Zone
+from sim import default_sensors
 
 KEYS = {"radar1": "radar-key-" + "a" * 30, "rf1": "rf-key-" + "b" * 30, "ac1": "ac-key-" + "c" * 30}
 
@@ -88,12 +87,11 @@ def test_unauthorized_flood_is_cheap_and_does_not_fill_buffer():
 
 def _client():
     try:
-        from fastapi.testclient import TestClient
         import app
         import test_health
+        from fastapi.testclient import TestClient
     except ImportError as e:
-        print("skip: service deps missing:", e)
-        return None, None
+        pytest.skip(f"залежності відсутні: {e}")
     m = test_health._app_with_engine()
     m.engine.auth = make_auth()
     return TestClient(m.app, raise_server_exceptions=False), m
@@ -101,8 +99,6 @@ def _client():
 
 def test_http_requires_key_per_sensor():
     c, m = _client()
-    if c is None:
-        return
     ev = lambda sid, **kw: {k: v for k, v in det(sid, **kw).items() if k != "key"}   # у тілі ключа немає: він у заголовку
     h = lambda key: {"X-API-Key": key} if key else {}
 
@@ -128,8 +124,6 @@ def test_http_requires_key_per_sensor():
 
 def test_keys_never_appear_in_responses_or_logs():
     c, m = _client()
-    if c is None:
-        return
     records = []
     handler = logging.Handler()
     handler.emit = records.append
@@ -151,8 +145,7 @@ def test_mqtt_events_carry_key_in_payload():
     try:
         from mqtt_in import MqttIngest
     except ImportError as e:
-        print("skip: no paho:", e)
-        return
+        pytest.skip(f"залежності відсутні: {e}")
     eng = make_engine()
     ing = MqttIngest(eng, "localhost")
     msg = lambda payload, topic="dronewatch/events/rf1": types.SimpleNamespace(
@@ -185,8 +178,7 @@ def test_config_is_fail_closed():
     try:
         import config  # noqa: F401
     except ImportError as e:
-        print("skip: no pydantic/yaml:", e)
-        return
+        pytest.skip(f"залежності відсутні: {e}")
 
     def rejects(text, fragment):
         try:
@@ -214,8 +206,7 @@ def test_deploy_demo_keys_match_compose():
     try:
         import yaml
     except ImportError as e:
-        print("skip: no yaml:", e)
-        return
+        pytest.skip(f"залежності відсутні: {e}")
     root = HERE.parent
     env = yaml.safe_load((root / "docker-compose.yml").read_text(encoding="utf-8"))["services"]["emulator"]["environment"]["DRONEWATCH_KEYS"]
     keys = dict(item.split("=", 1) for item in env.split(","))
@@ -265,8 +256,7 @@ def test_mqtt_topic_must_match_sensor_id():
     try:
         from mqtt_in import MqttIngest
     except ImportError as e:
-        print("skip: no paho:", e)
-        return
+        pytest.skip(f"залежності відсутні: {e}")
     eng = make_engine()
     ing = MqttIngest(eng, "localhost")
     msg = lambda payload, topic: types.SimpleNamespace(payload=json.dumps(payload).encode(), topic=topic)
@@ -284,8 +274,7 @@ def test_mqtt_reports_refused_connection_and_subscription_without_leaking_passwo
     try:
         from mqtt_in import MqttIngest
     except ImportError as e:
-        print("skip: no paho:", e)
-        return
+        pytest.skip(f"залежності відсутні: {e}")
     ing = MqttIngest(make_engine(), "broker", 1883, username="dronewatch-service", password="SUPER-SECRET-PW")
     records, handler = [], logging.Handler()
     handler.emit = records.append
@@ -318,8 +307,7 @@ def test_mqtt_idle_shows_connected_but_silent():
     try:
         from mqtt_in import MqttIngest
     except ImportError as e:
-        print("skip: no paho:", e)
-        return
+        pytest.skip(f"залежності відсутні: {e}")
     ing = MqttIngest(make_engine(), "broker")
     assert ing.status() == {"host": "broker:1883", "connected": False, "idle_s": None, "tls": False}
 
@@ -371,8 +359,7 @@ def test_broker_files_match_demo_stack():
     try:
         import yaml
     except ImportError as e:
-        print("skip: no yaml:", e)
-        return
+        pytest.skip(f"залежності відсутні: {e}")
     root = HERE.parent
     compose = yaml.safe_load((root / "docker-compose.yml").read_text(encoding="utf-8"))
     sensor_keys = dict(i.split("=", 1) for i in compose["services"]["emulator"]["environment"]["DRONEWATCH_KEYS"].split(","))
@@ -404,8 +391,3 @@ def test_broker_files_match_demo_stack():
     assert per_user == {"dronewatch-service": ["topic read dronewatch/events/#"], "healthcheck": ["topic read $SYS/broker/uptime"]}
 
 
-if __name__ == "__main__":
-    for name, fn in sorted(globals().items()):
-        if name.startswith("test_"):
-            fn()
-            print("ok ", name)

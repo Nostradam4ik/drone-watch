@@ -2,7 +2,14 @@
 
 Локальна розробка (з цієї папки; Python 3.12 і `pip install -r requirements.txt`), демо-режим по відкритому HTTP:
 
-    python -m uvicorn app:app --port 8000
+    PYTHONPATH=../fusion_proto python -m uvicorn app:app --port 8000      # PowerShell: $env:PYTHONPATH="..\fusion_proto"
+
+`fusion_proto` лежить поруч і не є пакетом, тож шлях до нього задається змінною `PYTHONPATH` (у Docker це `ENV` в образі), а не
+через `sys.path` у коді. Тести й лінтер налаштовані в кореневому `pyproject.toml`:
+
+    pip install -e ".[dev]"      # залежності сервісу й pytest, ruff, mypy
+    pytest                       # усі тести з кореня репозиторію (шляхи імпорту бере з pyproject)
+    ruff check .                 # лінтер
 
 Далі відкрити http://127.0.0.1:8000. Це лише для localhost: ключі й стан ідуть без шифрування.
 
@@ -18,7 +25,7 @@ https://localhost:8000. Вхід у дашборд: користувач `demo`,
 - [config.yaml](config.yaml): активний конфіг. За замовчуванням `mode: demo` (вбудований симулятор рою).
 - [config.example.yaml](config.example.yaml): приклад бойового режиму з коментарями до кожного поля.
 
-Свій конфіг: `CONFIG=шлях\до\файлу.yaml python -m uvicorn app:app --port 8000`.
+Свій конфіг: `CONFIG=шлях\до\файлу.yaml PYTHONPATH=../fusion_proto python -m uvicorn app:app --port 8000`.
 У `mode: live` симулятора немає, події приходять на `POST /api/events`.
 У `mode: demo` блок `sensors` ігнорується (датчики бере симулятор), зони й параметри тривог читаються з конфігу.
 
@@ -260,8 +267,8 @@ TLS можна поставити перед сервісом reverse proxy (ngi
 і `ln det S` рахуються раз на пару «трек × датчик» і весь рядок вартостей однією матричною операцією) це близько 0,03 с;
 стелі можна піднімати (див. таблицю в `config.example.yaml`). Нормальний рій стелі не зачіпають.
 
-**Заміряйте скан на цільовому залізі** перед тим, як підіймати стелі: `python flood_bench.py --config ../deploy/config.yaml`
+**Заміряйте скан на цільовому залізі** перед тим, як підіймати стелі: `PYTHONPATH=fusion_proto:service python service/flood_bench.py --config deploy/config.yaml`
 прогонить найгірший потоп (випадкові детекції від усіх датчиків, утричі більше за стелю) і скаже, чи вкладається скан у `scan_dt`
-(код виходу 1, якщо ні). `python flood_bench.py --sweep` друкує таблицю «скан залежно від стель».
+(код виходу 1, якщо ні). `... python service/flood_bench.py --sweep` друкує таблицю «скан залежно від стель».
 
-Тести: `python test_health.py` (фейковий годинник, секунди замість хвилин). Алгоритм fusion лежить у `../fusion_proto`.
+Тести: `pytest` із кореня (фейковий годинник, секунди замість хвилин). Алгоритм fusion лежить у `../fusion_proto`.

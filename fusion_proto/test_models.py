@@ -2,7 +2,6 @@
 import time
 
 import numpy as np
-
 from models import Sensor
 from sim import default_sensors, simulate, swarm_targets
 from tracker import Tracker
@@ -142,8 +141,3 @@ def test_gating_speed():
     assert t_new < t_old / 5
 
 
-if __name__ == "__main__":
-    for name, fn in sorted(globals().items()):
-        if name.startswith("test_"):
-            fn()
-            print("ok ", name)

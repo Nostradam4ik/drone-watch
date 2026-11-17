@@ -1,10 +1,11 @@
 """Карта зверху: істинні траєкторії, confirmed-треки (живі та coasting), датчики."""
 import argparse
+
 import matplotlib
+
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
-
 from run import SCENARIOS
 from sim import default_sensors, simulate
 from tracker import Tracker

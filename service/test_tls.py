@@ -8,19 +8,17 @@ import json
 import logging
 import socket
 import ssl
-import sys
 import tempfile
 import threading
 import time
 from pathlib import Path
 
+import pytest
+
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parent
-sys.path.insert(0, str(ROOT / "fusion_proto"))
-sys.path.insert(0, str(HERE))
-sys.path.insert(0, str(ROOT / "emulator"))
-from engine import Engine, Zone  # noqa: E402
-from sim import default_sensors  # noqa: E402
+from engine import Engine, Zone
+from sim import default_sensors
 
 PASSWORD = "UNIQUE-BROKER-PASSWORD-7731"
 
@@ -28,13 +26,14 @@ PASSWORD = "UNIQUE-BROKER-PASSWORD-7731"
 # ---------- допоміжне: PKI і фейковий брокер ----------
 def make_pki(directory, names=("localhost", "127.0.0.1"), cn="test CA"):
     """CA + серверний сертифікат із SAN=names. Повертає (ca.pem, server.pem, server.key)."""
+    pytest.importorskip("cryptography")
     from cryptography import x509
     from cryptography.hazmat.primitives import hashes, serialization
     from cryptography.hazmat.primitives.asymmetric import ec
     from cryptography.x509.oid import ExtendedKeyUsageOID, NameOID
 
     name = lambda c: x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, c)])
-    now = datetime.datetime.now(datetime.timezone.utc)
+    now = datetime.datetime.now(datetime.UTC)
     window = dict(not_valid_before=now - datetime.timedelta(days=1), not_valid_after=now + datetime.timedelta(days=1))
 
     def build(subject, issuer, pub, signer, extensions):
@@ -167,29 +166,22 @@ def _wait(cond, timeout=6.0):
     return False
 
 
-def _skip_without_cryptography():
+def _optional_module(name: str):
     try:
-        import cryptography  # noqa: F401
-        return False
+        return __import__(name)
     except ImportError:
-        print("skip: no cryptography")
-        return True
+        return None
 
 
 # ---------- тести ----------
 def test_client_contexts_verify_by_default():
     """І в сервісі, і в емуляторі: перевірка сертифіката й імені хоста обов'язкова, не нижче TLS 1.2, довіра лише вказаному CA."""
-    if _skip_without_cryptography():
-        return
     import emulate
     with tempfile.TemporaryDirectory() as d:
         ca, _, _ = make_pki(d)
         contexts = [("емулятор", emulate.tls_context(str(ca)))]
-        try:
-            import mqtt_in
+        if (mqtt_in := _optional_module("mqtt_in")) is not None:   # сервісна половина потребує paho; емуляторна ні
             contexts.append(("сервіс", mqtt_in.tls_context(str(ca))))
-        except ImportError as e:
-            print("skip service half: no paho:", e)
         for who, ctx in contexts:
             assert ctx.verify_mode == ssl.CERT_REQUIRED and ctx.check_hostname, who
             assert ctx.minimum_version >= ssl.TLSVersion.TLSv1_2, who
@@ -204,8 +196,6 @@ def test_client_contexts_verify_by_default():
 
 
 def test_emulator_publisher_over_tls():
-    if _skip_without_cryptography():
-        return
     import emulate
     with tempfile.TemporaryDirectory() as d:
         ca, crt, key = make_pki(d)
@@ -224,8 +214,6 @@ def test_emulator_publisher_over_tls():
 
 def test_plaintext_client_cannot_reach_a_tls_broker_and_leaks_nothing():
     """Відкритий клієнт проти TLS-порту: зʼєднання не встановлюється, а логін і пароль брокер не бачить."""
-    if _skip_without_cryptography():
-        return
     import emulate
     with tempfile.TemporaryDirectory() as d:
         _, crt, key = make_pki(d)
@@ -244,8 +232,6 @@ def test_plaintext_client_cannot_reach_a_tls_broker_and_leaks_nothing():
 
 
 def test_untrusted_and_mismatched_certificates_are_rejected():
-    if _skip_without_cryptography():
-        return
     import emulate
     with tempfile.TemporaryDirectory() as d:
         ca, crt, key = make_pki(d)
@@ -272,13 +258,10 @@ def test_untrusted_and_mismatched_certificates_are_rejected():
 
 def test_service_mqtt_over_tls_receives_events():
     """Справжній MqttIngest (paho) із TLS: підключення, підписка, прийом події, довіра лише своєму CA."""
-    if _skip_without_cryptography():
-        return
     try:
         from mqtt_in import MqttIngest
     except ImportError as e:
-        print("skip: no paho:", e)
-        return
+        pytest.skip(f"залежності відсутні: {e}")
     with tempfile.TemporaryDirectory() as d:
         ca, crt, key = make_pki(d)
         other_ca, _, _ = make_pki(d, cn="other CA")
@@ -326,8 +309,7 @@ def test_demo_stack_is_tls_only_and_ships_no_private_keys():
     try:
         import yaml
     except ImportError as e:
-        print("skip: no yaml:", e)
-        return
+        pytest.skip(f"залежності відсутні: {e}")
     conf = [l.split("#")[0].strip() for l in (ROOT / "deploy" / "mosquitto.conf").read_text(encoding="utf-8").splitlines()]
     assert "listener 8883" in conf and not any(l.startswith("listener 1883") for l in conf), "відкритого слухача бути не повинно"
     for required in ("cafile /mosquitto/certs-ca/ca.crt", "certfile /mosquitto/certs-server/server.crt",
@@ -361,8 +343,3 @@ def test_demo_stack_is_tls_only_and_ships_no_private_keys():
     assert not offenders, f"у репозиторії є приватні ключі: {offenders}"
 
 
-if __name__ == "__main__":
-    for name, fn in sorted(globals().items()):
-        if name.startswith("test_"):
-            fn()
-            print("ok ", name)

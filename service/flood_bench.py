@@ -4,11 +4,13 @@
 Потоп = випадкові детекції від усіх датчиків (збій датчика або навмисна атака), у кілька разів більше за стелю.
 Саме такий випадок визначає, які max_events_per_sensor_scan і max_tracks можна безпечно ставити в конфіг.
 
-Приклади (з папки service):
-    python flood_bench.py                                  # стелі за замовчуванням, датчики з sim
-    python flood_bench.py --config ../deploy/config.yaml   # стелі, датчики й scan_dt з бойового конфігу (потрібні pyyaml, pydantic)
-    python flood_bench.py --max-events 300 --max-tracks 500
-    python flood_bench.py --sweep                          # таблиця: скан залежно від стель
+Потрібен PYTHONPATH із fusion_proto і service (бібліотеки не пакет): PYTHONPATH=fusion_proto:service (у PowerShell розділювач ;).
+
+Приклади (з кореня репозиторію):
+    python service/flood_bench.py                           # стелі за замовчуванням, датчики з sim
+    python service/flood_bench.py --config deploy/config.yaml # стелі, датчики й scan_dt з бойового конфігу (потрібні pyyaml, pydantic)
+    python service/flood_bench.py --max-events 300 --max-tracks 500
+    python service/flood_bench.py --sweep                  # таблиця: скан залежно від стель
 
 Код виходу 1, якщо найгірший скан довший за --budget (за замовчуванням scan_dt): зручно для перевірки на цільовому залізі.
 """
@@ -16,13 +18,9 @@ import argparse
 import random
 import sys
 import time
-from pathlib import Path
 
-HERE = Path(__file__).resolve().parent
-sys.path.insert(0, str(HERE.parent / "fusion_proto"))
-sys.path.insert(0, str(HERE))
-from engine import Engine, Zone  # noqa: E402
-from sim import default_sensors  # noqa: E402
+from engine import Engine, Zone
+from sim import default_sensors
 
 sys.stdout.reconfigure(encoding="utf-8")
 

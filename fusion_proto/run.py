@@ -5,7 +5,6 @@ import time
 
 import numpy as np
 from scipy.optimize import linear_sum_assignment
-
 from sim import default_sensors, default_targets, reference_flight_calibration, simulate, swarm_targets
 from tracker import Tracker
 

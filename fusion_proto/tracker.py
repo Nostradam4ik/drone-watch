@@ -1,10 +1,10 @@
 """Трекер: EKF + gating за Махаланобісом + Hungarian + життєвий цикл M/N."""
-from collections import deque, defaultdict
+from collections import defaultdict, deque
+
 import numpy as np
+from models import cv_matrices
 from scipy.optimize import linear_sum_assignment
 from scipy.stats import chi2
-
-from models import cv_matrices
 
 GATE_P = 0.999
 BIG = 1e9

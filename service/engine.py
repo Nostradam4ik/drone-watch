@@ -12,16 +12,12 @@ Heartbeat (рекомендовано): {"sensor_id": "radar1", "heartbeat": tru
 """
 import math
 import sqlite3
-import sys
 import threading
 import time
 from collections import Counter, namedtuple
-from pathlib import Path
 
 import numpy as np
-
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "fusion_proto"))
-from tracker import Tracker  # noqa: E402
+from tracker import Tracker
 
 LEVELS = {"NONE": 0, "WARNING": 1, "CRITICAL": 2}
 STALE_S = 2.0          # події старші за це відкидаються; події з майбутнього (розбіжність годинників) теж, понад цей допуск

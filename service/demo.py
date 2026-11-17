@@ -1,15 +1,9 @@
 """Демо-джерело: симулятор датчиків, що шле події в Engine тим самим шляхом, що й реальні адаптери."""
 import math
-import sys
 import time
-from pathlib import Path
 
-import numpy as np
-
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "fusion_proto"))
-from sim import default_sensors, reference_flight_calibration, simulate, swarm_targets  # noqa: E402
-
-from engine import math_to_compass  # noqa: E402
+from engine import math_to_compass
+from sim import default_sensors, reference_flight_calibration, simulate, swarm_targets
 
 
 def make_sensors():

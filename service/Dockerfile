@@ -6,7 +6,8 @@ RUN pip install --no-cache-dir -r service/requirements.txt
 COPY fusion_proto fusion_proto
 COPY service service
 WORKDIR /app/service
-ENV DB_PATH=/data/incidents.db PYTHONUNBUFFERED=1
+# fusion_proto лежить поруч із service і не є пакетом: шлях імпорту задаємо тут, а не через sys.path у коді
+ENV DB_PATH=/data/incidents.db PYTHONUNBUFFERED=1 PYTHONPATH=/app/fusion_proto
 RUN mkdir -p /data
 EXPOSE 8000
 # HTTPS: сертифікат і ключ сервісу задаються TLS_CERT_FILE / TLS_KEY_FILE (див. docker-compose.yml); без них сервіс не стартує

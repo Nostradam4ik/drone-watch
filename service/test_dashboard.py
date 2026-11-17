@@ -8,13 +8,12 @@ import sys
 import tempfile
 from pathlib import Path
 
+import pytest
+
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parent
-sys.path.insert(0, str(ROOT / "fusion_proto"))
-sys.path.insert(0, str(HERE))
-sys.path.insert(0, str(ROOT / "emulator"))
-import dashboard_auth as da  # noqa: E402
-from dashboard_auth import LoginLimiter, SessionStore, Users  # noqa: E402
+import dashboard_auth as da
+from dashboard_auth import LoginLimiter, SessionStore, Users
 
 PASSWORD = "Correct-Horse-Battery-42"
 # scrypt із меншим N лише для швидкості тестів: формат і перевірка ті самі, що з продакшн-параметрами
@@ -159,11 +158,10 @@ def test_limiter_cannot_be_bypassed_by_a_parallel_burst():
 # ---------- веб-шар ----------
 def _client(base_url="http://testserver", *, auth=True, ttl=60, max_failures=8):
     try:
-        from fastapi.testclient import TestClient
         import test_health
+        from fastapi.testclient import TestClient
     except ImportError as e:
-        print("skip: немає залежностей сервісу:", e)
-        return None
+        pytest.skip(f"залежності відсутні: {e}")
     m = test_health._app_with_engine()
     m.DB_PATH = _temp_incidents_db()   # інакше /api/incidents створить порожній service/incidents.db
     clock = Clock()
@@ -194,8 +192,6 @@ def _login(client, **overrides):
 
 def test_everything_is_closed_without_a_session():
     made = _client()
-    if not made:
-        return
     c, m, _ = made
     r = c.get("/")
     assert r.status_code == 303 and r.headers["location"] == "/login"
@@ -217,8 +213,6 @@ def test_everything_is_closed_without_a_session():
 
 def test_login_session_logout_flow():
     made = _client()
-    if not made:
-        return
     c, m, _ = made
     wrong = _login(c, password="wrong-password-123")
     unknown = _login(c, username="nobody")
@@ -252,16 +246,12 @@ def test_login_session_logout_flow():
 
 def test_cookie_is_secure_over_https():
     made = _client("https://testserver")
-    if not made:
-        return
     c, _, _ = made
     assert "secure" in _login(c).headers["set-cookie"].lower()
 
 
 def test_session_expires():
     made = _client(ttl=60)
-    if not made:
-        return
     c, _, clock = made
     assert _login(c).status_code == 200 and c.get("/api/state").status_code == 200
     clock.now += 61
@@ -271,8 +261,6 @@ def test_session_expires():
 
 def test_expired_session_closes_its_websocket():
     made = _client(ttl=60)
-    if not made:
-        return
     c, m, clock = made
 
     class FakeWs:
@@ -298,8 +286,6 @@ def test_expired_session_closes_its_websocket():
 
 def test_csrf_and_origin_protection():
     made = _client()
-    if not made:
-        return
     c, m, _ = made
     form = c.post("/api/login", data=LOGIN)   # так відправляє форма з чужого сайту
     assert form.status_code == 415 and not c.cookies
@@ -321,8 +307,6 @@ def test_csrf_and_origin_protection():
 
 def test_brute_force_is_limited():
     made = _client(max_failures=5)
-    if not made:
-        return
     c, _, clock = made
     for _ in range(5):
         assert _login(c, password="wrong-password-123").status_code == 401
@@ -336,8 +320,6 @@ def test_brute_force_is_limited():
 def test_parallel_login_burst_cannot_exceed_the_limit():
     """Через HTTP, із повільною перевіркою пароля (як scrypt): скільки запитів дійшло до перевірки пароля."""
     made = _client(max_failures=8)
-    if not made:
-        return
     import threading
     import time as _time
     from concurrent.futures import ThreadPoolExecutor
@@ -364,8 +346,6 @@ def test_parallel_login_burst_cannot_exceed_the_limit():
 
 def test_responses_carry_security_headers():
     made = _client()
-    if not made:
-        return
     c, _, _ = made
     for r in (c.get("/login"), c.get("/api/state"), c.get("/api/health"), _login(c)):
         assert r.headers["cache-control"] == "no-store" and r.headers["x-content-type-options"] == "nosniff"
@@ -375,8 +355,6 @@ def test_responses_carry_security_headers():
 
 def test_logs_never_contain_passwords_and_are_injection_safe():
     made = _client()
-    if not made:
-        return
     c, _, _ = made
     records, handler = [], logging.Handler()
     handler.emit = records.append
@@ -399,8 +377,6 @@ def test_logs_never_contain_passwords_and_are_injection_safe():
 
 def test_auth_disabled_keeps_everything_open_as_before():
     made = _client(auth=False)
-    if not made:
-        return
     c, _, _ = made
     for path in ("/", "/api/state", "/api/config", "/api/sensors", "/api/incidents"):
         assert c.get(path).status_code == 200, path
@@ -413,8 +389,6 @@ def test_auth_disabled_keeps_everything_open_as_before():
 def test_a_dashboard_session_does_not_grant_sensor_access():
     """Дашборд і датчики мають різні облікові дані: оператор не може слати події, датчик не може читати стан."""
     made = _client()
-    if not made:
-        return
     c, m, _ = made
     from test_auth import KEYS, det, make_auth
     m.engine.auth = make_auth()
@@ -449,8 +423,7 @@ def test_dashboard_config_is_fail_closed():
     try:
         import config  # noqa: F401
     except ImportError as e:
-        print("skip: немає pydantic/yaml:", e)
-        return
+        pytest.skip(f"залежності відсутні: {e}")
 
     def rejects(dashboard, fragment):
         try:
@@ -480,8 +453,7 @@ def test_build_access_follows_mode_and_config():
         import app
         import config  # noqa: F401
     except ImportError as e:
-        print("skip: немає залежностей сервісу:", e)
-        return
+        pytest.skip(f"залежності відсутні: {e}")
     assert not app.build_dashboard_access(_load("mode: demo\n")).enabled
     assert not app.build_dashboard_access(_load(LIVE.format(dashboard="dashboard: {auth: disabled}"))).enabled
     on = app.build_dashboard_access(_load(LIVE.format(dashboard=f'dashboard: {{users: [{{name: alice, password_hash: "{FAST}"}}]}}')))
@@ -493,8 +465,7 @@ def test_demo_stack_has_a_working_dashboard_user():
     try:
         import yaml
     except ImportError as e:
-        print("skip: no yaml:", e)
-        return
+        pytest.skip(f"залежності відсутні: {e}")
     compose = yaml.safe_load((ROOT / "docker-compose.yml").read_text(encoding="utf-8"))["services"]
     password = compose["emulator"]["environment"]["DRONEWATCH_DASHBOARD_PASSWORD"]
     users = yaml.safe_load((ROOT / "deploy" / "config.yaml").read_text(encoding="utf-8"))["dashboard"]["users"]
@@ -529,16 +500,16 @@ def test_keygen_dashboard_user():
 # ---------- справжній HTTPS + емулятор ----------
 def test_real_https_login_cookie_and_emulator():
     try:
-        import cryptography, uvicorn  # noqa: F401
         import app  # noqa: F401
+        import cryptography  # noqa: F401
+        import uvicorn
         from websockets.sync.client import connect
     except ImportError as e:
-        print("skip: немає залежностей:", e)
-        return
-    import emulate
-    import ssl
+        pytest.skip(f"залежності відсутні: {e}")
     import urllib.error
     import urllib.request
+
+    import emulate
     from dashboard_web import DashboardAccess
     from test_https import HttpsServer
     from test_tls import make_pki
@@ -585,8 +556,3 @@ def test_real_https_login_cookie_and_emulator():
             srv.stop()
 
 
-if __name__ == "__main__":
-    for name, fn in sorted(globals().items()):
-        if name.startswith("test_"):
-            fn()
-            print("ok ", name)

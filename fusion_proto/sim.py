@@ -1,6 +1,5 @@
 """Симулятор: траєкторії цілей, шум датчиків, пропуски, хибні детекції, bias і затримки."""
 import numpy as np
-
 from models import Sensor
 
 

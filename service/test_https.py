@@ -2,7 +2,6 @@
 
 Інтеграційні тести піднімають справжній сервіс (uvicorn) із реальним сертифікатом і ганяють проти нього справжні клієнти:
 емулятор, healthcheck.py і WebSocket. Потрібні cryptography, fastapi і uvicorn; без них відповідні тести пропускаються."""
-import json
 import os
 import socket
 import ssl
@@ -14,13 +13,12 @@ import time
 import urllib.error
 from pathlib import Path
 
+import pytest
+
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parent
-sys.path.insert(0, str(ROOT / "fusion_proto"))
-sys.path.insert(0, str(HERE))
-sys.path.insert(0, str(ROOT / "emulator"))
-from test_auth import KEYS, make_auth  # noqa: E402
-from test_tls import make_pki  # noqa: E402
+from test_auth import KEYS, make_auth
+from test_tls import make_pki
 
 
 class HttpsServer:
@@ -51,12 +49,12 @@ class HttpsServer:
 
 def _deps():
     try:
-        import cryptography, uvicorn  # noqa: F401
         import app  # noqa: F401  (потребує fastapi, paho, yaml: ті самі залежності, що й у сервісу)
+        import cryptography  # noqa: F401
+        import uvicorn
         return True
     except ImportError as e:
-        print("skip: немає залежностей:", e)
-        return False
+        pytest.skip(f"залежності відсутні: {e}")
 
 
 def _wait(cond, timeout=5.0):
@@ -73,8 +71,7 @@ def test_launcher_refuses_to_start_without_tls():
     try:
         import serve
     except ImportError as e:
-        print("skip: немає uvicorn:", e)
-        return
+        pytest.skip(f"залежності відсутні: {e}")
     with tempfile.TemporaryDirectory() as d:
         crt, key = Path(d, "c.crt"), Path(d, "c.key")
         crt.write_text("x")
@@ -106,8 +103,7 @@ def test_launcher_insecure_mode_is_explicit_and_loud():
     try:
         import serve
     except ImportError as e:
-        print("skip: немає uvicorn:", e)
-        return
+        pytest.skip(f"залежності відсутні: {e}")
     import io
     from contextlib import redirect_stderr
     err = io.StringIO()
@@ -118,8 +114,6 @@ def test_launcher_insecure_mode_is_explicit_and_loud():
 
 # ---------- справжній HTTPS-сервер ----------
 def test_https_api_dashboard_and_clients():
-    if not _deps():
-        return
     import emulate
     with tempfile.TemporaryDirectory() as d:
         ca, crt, key = make_pki(d, names=("localhost", "127.0.0.1", "service"))
@@ -162,15 +156,11 @@ def test_https_api_dashboard_and_clients():
             # 4. дашборд і WebSocket по TLS
             html = urllib.request.urlopen(base + "/", context=emulate.HTTPS_CONTEXT, timeout=5).read().decode("utf-8")
             assert "Drone Watch" in html and 'location.protocol === "https:" ? "wss://"' in html, "фронтенд має сам обирати wss під https"
-            try:
-                from websockets.sync.client import connect
-            except ImportError:
-                print("skip WebSocket: немає websockets")
-            else:
-                with connect(f"wss://127.0.0.1:{srv.port}/ws", ssl=emulate.HTTPS_CONTEXT, open_timeout=5) as ws:
-                    ws.send("hi")
-                    assert _wait(lambda: len(srv.app.clients) == 1), "WebSocket по TLS не зареєструвався"
-                    assert srv.app.clients, "клієнт має бути в списку розсилки"
+            connect = pytest.importorskip("websockets.sync.client").connect
+            with connect(f"wss://127.0.0.1:{srv.port}/ws", ssl=emulate.HTTPS_CONTEXT, open_timeout=5) as ws:
+                ws.send("hi")
+                assert _wait(lambda: len(srv.app.clients) == 1), "WebSocket по TLS не зареєструвався"
+                assert srv.app.clients, "клієнт має бути в списку розсилки"
         finally:
             emulate.HTTPS_CONTEXT = None
             srv.stop()
@@ -191,8 +181,6 @@ def test_https_api_dashboard_and_clients():
 
 
 def test_healthcheck_script_verifies_the_certificate():
-    if not _deps():
-        return
     with tempfile.TemporaryDirectory() as d:
         ca, crt, key = make_pki(d)
         other_ca, _, _ = make_pki(d, cn="other CA")
@@ -220,8 +208,7 @@ def test_demo_stack_serves_https_only():
     try:
         import yaml
     except ImportError as e:
-        print("skip: no yaml:", e)
-        return
+        pytest.skip(f"залежності відсутні: {e}")
     compose = yaml.safe_load((ROOT / "docker-compose.yml").read_text(encoding="utf-8"))
     sv = compose["services"]
     env = sv["service"]["environment"]
@@ -249,8 +236,3 @@ def test_demo_stack_serves_https_only():
     assert "HTTP_SANS" in script and "http.key" in script and "DNS:service" in script, "генератор має видавати сертифікат сервісу"
 
 
-if __name__ == "__main__":
-    for name, fn in sorted(globals().items()):
-        if name.startswith("test_"):
-            fn()
-            print("ok ", name)

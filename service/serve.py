@@ -3,8 +3,8 @@
 
     TLS_CERT_FILE=/tls/http.crt TLS_KEY_FILE=/tls/http.key python serve.py
 
-(Назва не run.py навмисне: fusion_proto/run.py уже є, а сервісні модулі додають fusion_proto у sys.path, тож `import run`
-віддавав би не той файл.)
+(Назва не run.py навмисне: fusion_proto/run.py уже є і лежить на PYTHONPATH разом із service, тож `import run` віддавав би
+не той файл.)
 
 HTTPS обслуговує все: дашборд, REST API, WebSocket (wss). Відкритого слухача немає. Ключі датчиків (X-API-Key), стан
 і тривоги ходять лише зашифрованим каналом.

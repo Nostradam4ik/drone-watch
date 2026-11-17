@@ -9,12 +9,10 @@ import time
 from pathlib import Path
 
 import numpy as np
-
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "fusion_proto"))
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-from demo import to_event  # noqa: E402
-from engine import Engine, Zone  # noqa: E402
-from sim import Target, default_sensors, simulate  # noqa: E402
+import pytest
+from demo import to_event
+from engine import Engine, Zone
+from sim import Target, default_sensors, simulate
 
 BASE = 1_000_000.0
 # дрон підлітає й зависає за 212 м від центру: у критичній зоні, у зоні покриття радара
@@ -114,8 +112,7 @@ def test_http_schema_accepts_heartbeat():
     try:
         from app import Detection
     except ImportError as e:
-        print("skip: service deps missing:", e)
-        return
+        pytest.skip(f"залежності відсутні: {e}")
     d = Detection(sensor_id="radar1", heartbeat=True)
     clock = Clock()
     eng = Engine(default_sensors(), [Zone("z", 100, "WARNING")], clock=clock)
@@ -138,8 +135,7 @@ def _app_with_engine():
     try:
         import app
     except ImportError as e:
-        print("skip: service deps missing:", e)
-        return None
+        pytest.skip(f"залежності відсутні: {e}")
     app.engine = Engine(default_sensors(), [Zone("z", 100, "WARNING")])
     app.demo_src = app.mqtt_ingest = None
     app.clients = {}
@@ -150,8 +146,6 @@ def _app_with_engine():
 
 def test_scan_error_does_not_stop_loop():
     app = _app_with_engine()
-    if app is None:
-        return
     real_tick, resets = app.engine.tick, []
     app.engine.reset = lambda: resets.append(1)
 
@@ -173,8 +167,6 @@ def test_scan_error_does_not_stop_loop():
 
 def test_health_reports_dead_scanning():
     app = _app_with_engine()
-    if app is None:
-        return
     asyncio.run(app.scan_step())
     assert app.health(user="тест")["ok"] is True
     app.scan_health["last_ok"] = time.time() - 100        # скани давно не йшли
@@ -299,13 +291,10 @@ def test_concurrent_ingest_tick_state_is_consistent():
 
 def test_http_batch_limit_and_incidents_clamp():
     app = _app_with_engine()
-    if app is None:
-        return
     try:
         from fastapi.testclient import TestClient
     except ImportError as e:
-        print("skip: no httpx:", e)
-        return
+        pytest.skip(f"залежності відсутні: {e}")
     client = TestClient(app.app)     # без with: lifespan (конфіг, цикл сканів) не запускається, engine підставлено вручну
     beat = {"sensor_id": "rf1", "heartbeat": True}
     r = client.post("/api/events", json=[beat] * app.MAX_HTTP_BATCH)
@@ -368,13 +357,10 @@ def test_non_string_sensor_id_does_not_crash_ingest():
 
 def test_http_rejects_nan_and_infinity():
     app = _app_with_engine()
-    if app is None:
-        return
     try:
         from fastapi.testclient import TestClient
     except ImportError as e:
-        print("skip: no httpx:", e)
-        return
+        pytest.skip(f"залежності відсутні: {e}")
     client = TestClient(app.app, raise_server_exceptions=False)   # дивимось на відповідь, а не на виняток сервера
     headers = {"Content-Type": "application/json"}
     ts = time.time()
@@ -387,8 +373,3 @@ def test_http_rejects_nan_and_infinity():
     assert ok.status_code == 200 and ok.json()["accepted"] == 1
 
 
-if __name__ == "__main__":
-    for name, fn in sorted(globals().items()):
-        if name.startswith("test_"):
-            fn()
-            print("ok ", name)

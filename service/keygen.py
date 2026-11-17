@@ -27,11 +27,9 @@ import os
 import re
 import secrets
 import sys
-from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-from auth import hash_key  # noqa: E402
-from dashboard_auth import MIN_PASSWORD_LEN, hash_password  # noqa: E402
+from auth import hash_key
+from dashboard_auth import MIN_PASSWORD_LEN, hash_password
 
 sys.stdout.reconfigure(encoding="utf-8")
 

@@ -1,0 +1,62 @@
+# Налаштування інструментів для всього репозиторію. Код лежить у трьох теках без спільного пакета (service, fusion_proto, emulator),
+# тож шляхи імпорту задаються тут (pytest), у Dockerfile (PYTHONPATH) і в README (локальний запуск), а не через sys.path у коді.
+#
+# Розробка:   pip install -e ".[dev]"   потім   pytest
+# Запуск скриптів напряму, наприклад flood_bench.py:   PYTHONPATH=fusion_proto:service   (у PowerShell розділювач ;)
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "dronewatch"
+version = "0.1.0"
+description = "Drone Watch: мультидатчикове виявлення дронів (fusion-трекер, сервіс, емулятор датчиків)"
+requires-python = ">=3.12"
+dynamic = ["dependencies"]
+
+[project.optional-dependencies]
+dev = ["pytest>=8", "httpx>=0.27", "cryptography>=42", "ruff>=0.6", "mypy>=1.10", "types-PyYAML"]
+
+[tool.setuptools]
+py-modules = []   # бібліотеки не публікуються: пакет потрібен лише щоб `pip install -e .` ставив залежності
+
+[tool.setuptools.dynamic]
+dependencies = { file = ["service/requirements.txt"] }
+
+[tool.pytest.ini_options]
+pythonpath = ["service", "fusion_proto", "emulator"]
+testpaths = ["service", "fusion_proto"]
+python_files = ["test_*.py"]
+addopts = "-ra"
+filterwarnings = [
+    "ignore:Using `httpx` with `starlette.testclient`:DeprecationWarning",
+    "ignore:.*starlette.testclient.*:DeprecationWarning",
+]
+
+[tool.ruff]
+target-version = "py312"
+line-length = 140
+extend-exclude = ["**/__pycache__"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "SIM", "C4", "PTH", "PIE", "RUF", "PT"]
+ignore = [
+    "RUF001", "RUF002", "RUF003",   # «двозначні» символи: хибні спрацювання на українських коментарях і рядках
+    "E402",                          # імпорти не нагорі: тести навмисно імпортують після налаштування середовища
+    "B905",                          # zip() без strict: розглядається окремо там, де довжини справді мають збігатися
+    "PT011", "PT018",                # занадто широкі правила для стилю цих тестів
+]
+
+[tool.ruff.lint.per-file-ignores]
+"**/test_*.py" = ["E501", "SIM117"]
+
+[tool.mypy]
+python_version = "3.12"
+ignore_missing_imports = true
+check_untyped_defs = true
+warn_unused_ignores = true
+no_implicit_optional = true
+mypy_path = "service:fusion_proto:emulator"
+explicit_package_bases = true
+exclude = ["test_.*\\.py$"]
