@@ -1,0 +1,55 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Тести (Python ${{ matrix.python }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+          cache: pip
+          cache-dependency-path: pyproject.toml
+      - name: Встановлення пакета з dev-залежностями
+        run: pip install -e ".[dev]"
+      - name: Лінтер
+        run: ruff check .
+      - name: Типи
+        run: mypy
+      - name: Тести
+        run: pytest
+
+  docker:
+    name: Збірка Docker-образів
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Образ сервісу
+        run: docker build -f docker/service.Dockerfile -t dronewatch-service .
+      - name: Образ емулятора
+        run: docker build -f docker/emulator.Dockerfile -t dronewatch-emulator .
+      - name: Сервіс стартує без TLS-змінних лише в fail-closed режимі
+        run: |
+          set +e
+          out=$(docker run --rm dronewatch-service 2>&1); code=$?
+          echo "$out"
+          [ "$code" -ne 0 ] && echo "$out" | grep -q "HTTPS не налаштовано"
