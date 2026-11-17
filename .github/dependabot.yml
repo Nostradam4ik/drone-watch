@@ -1,0 +1,35 @@
+# Dependabot: щотижня перевіряє залежності й відкриває pull request-и; CI (тести, збірка образів, повний стенд) їх перевіряє.
+version: 2
+updates:
+  # Python-залежності з pyproject.toml. Це застосунок, а не бібліотека, тож нижні межі (>=) піднімаємо до актуальних
+  # версій (increase): із «>=» сам Dependabot ніколи б не побачив застарілості.
+  - package-ecosystem: pip
+    directory: /
+    schedule: {interval: weekly, day: monday}
+    versioning-strategy: increase
+    open-pull-requests-limit: 5
+    groups:
+      python-minor-patch:
+        update-types: [minor, patch]
+    labels: [dependencies]
+
+  # Дії GitHub Actions у .github/workflows
+  - package-ecosystem: github-actions
+    directory: /
+    schedule: {interval: weekly, day: monday}
+    groups:
+      actions:
+        patterns: ["*"]
+    labels: [dependencies]
+
+  # Базові образи в Dockerfile (docker/service.Dockerfile, docker/emulator.Dockerfile)
+  - package-ecosystem: docker
+    directory: /docker
+    schedule: {interval: weekly, day: monday}
+    labels: [dependencies]
+
+  # Образи в docker-compose.yml (брокер eclipse-mosquitto, генератор сертифікатів alpine/openssl)
+  - package-ecosystem: docker-compose
+    directory: /
+    schedule: {interval: weekly, day: monday}
+    labels: [dependencies]
