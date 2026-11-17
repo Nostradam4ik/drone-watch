@@ -57,6 +57,25 @@ def _deps():
     return True
 
 
+def ws_session(url, ctx, headers=None, hold=None):
+    """Відкриває WebSocket по TLS, шле «hi» і, поки з'єднання відкрите, викликає hold(). Відмова сервера дає InvalidStatus.
+
+    Навмисно asyncio-клієнт, а не websockets.sync: синхронний клієнт читає й пише в один SSL-сокет із двох потоків, і поверх
+    TLS рукостискання до ~30 % спроб «зависає» до таймауту, хоча сервер відповів (сирий сокет і asyncio-клієнт: 0 збоїв із 30).
+    """
+    import asyncio
+
+    from websockets.asyncio.client import connect
+
+    async def run():
+        async with connect(url, ssl=ctx, open_timeout=5, additional_headers=headers) as ws:
+            await ws.send("hi")
+            if hold is not None:
+                await asyncio.to_thread(hold)
+
+    asyncio.run(run())
+
+
 def _wait(cond, timeout=5.0):
     end = time.time() + timeout
     while time.time() < end:
@@ -150,11 +169,12 @@ def test_https_api_dashboard_and_clients():
             # 4. дашборд і WebSocket по TLS
             html = urllib.request.urlopen(base + "/", context=emulate.HTTPS_CONTEXT, timeout=5).read().decode("utf-8")
             assert "Drone Watch" in html and 'location.protocol === "https:" ? "wss://"' in html, "фронтенд має сам обирати wss під https"
-            connect = pytest.importorskip("websockets.sync.client").connect
-            with connect(f"wss://127.0.0.1:{srv.port}/ws", ssl=emulate.HTTPS_CONTEXT, open_timeout=5) as ws:
-                ws.send("hi")
+            pytest.importorskip("websockets.asyncio.client")
+
+            def hold():
                 assert _wait(lambda: len(srv.rt.clients) == 1), "WebSocket по TLS не зареєструвався"
                 assert srv.rt.clients, "клієнт має бути в списку розсилки"
+            ws_session(f"wss://127.0.0.1:{srv.port}/ws", emulate.HTTPS_CONTEXT, hold=hold)
         finally:
             emulate.HTTPS_CONTEXT = None
             srv.stop()

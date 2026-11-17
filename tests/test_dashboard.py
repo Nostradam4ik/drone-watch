@@ -506,7 +506,6 @@ def test_real_https_login_cookie_and_emulator():
         pytest.importorskip(module)
     try:
         from websockets.exceptions import InvalidStatus
-        from websockets.sync.client import connect
     except ImportError as e:
         pytest.skip(f"залежності відсутні: {e}")
     import urllib.error
@@ -514,7 +513,7 @@ def test_real_https_login_cookie_and_emulator():
 
     from dronewatch.emulator import emulate
     from dronewatch.service.dashboard_web import DashboardAccess
-    from test_https import HttpsServer
+    from test_https import HttpsServer, ws_session
     from test_tls import make_pki
 
     with tempfile.TemporaryDirectory() as d:
@@ -540,11 +539,10 @@ def test_real_https_login_cookie_and_emulator():
             cookies = [c for c in processor.cookiejar if c.name == "dw_session"]
             assert cookies and cookies[0].secure, "під HTTPS cookie має бути Secure"
 
-            with connect(f"wss://127.0.0.1:{srv.port}/ws", ssl=ctx, open_timeout=5,
-                         additional_headers={"Cookie": f"dw_session={cookies[0].value}"}) as ws:
-                ws.send("hi")
-            with pytest.raises(InvalidStatus) as exc, connect(f"wss://127.0.0.1:{srv.port}/ws", ssl=ctx, open_timeout=5):
-                pass
+            url = f"wss://127.0.0.1:{srv.port}/ws"
+            ws_session(url, ctx, headers={"Cookie": f"dw_session={cookies[0].value}"})
+            with pytest.raises(InvalidStatus) as exc:
+                ws_session(url, ctx)
             assert exc.value.response.status_code == 403, "wss без cookie має відхилятися"
         finally:
             emulate.HTTPS_CONTEXT = None
