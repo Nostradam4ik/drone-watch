@@ -132,51 +132,71 @@ class _Task:  # заміна asyncio.Task для health()
         return self._done
 
 
-def _app_with_engine():
-    """Підготувати модуль app без запуску сервера. None, якщо немає залежностей сервісу."""
-    try:
-        import app
-    except ImportError as e:
-        pytest.skip(f"залежності відсутні: {e}")
-    app.engine = Engine(default_sensors(), [Zone("z", 100, "WARNING")])
-    app.demo_src = app.mqtt_ingest = None
-    app.clients = {}
-    app.scan_task = _Task()
-    app.scan_health.update(started=time.time(), last_ok=None, errors=0, consecutive=0, last_error=None)
-    return app
+def _runtime():
+    """Runtime зі справжнім рушієм і «живим» циклом скану, підставлений у застосунок без запуску сервера (lifespan)."""
+    app = pytest.importorskip("app")
+    rt = app.Runtime(engine=Engine(default_sensors(), [Zone("z", 100, "WARNING")]), scan_task=_Task())
+    app.app.state.runtime = rt
+    app.app.state.access = None   # вхід вимкнено
+    return rt
 
 
 def test_scan_error_does_not_stop_loop():
-    app = _app_with_engine()
-    real_tick, resets = app.engine.tick, []
-    app.engine.reset = lambda: resets.append(1)
+    app = pytest.importorskip("app")
+    rt = _runtime()
+    real_tick, resets = rt.engine.tick, []
+    rt.engine.reset = lambda: resets.append(1)
 
     def boom():
         raise RuntimeError("зіпсований стан")
-    app.engine.tick = boom
+    rt.engine.tick = boom
     for _ in range(app.SCAN_ERRORS_BEFORE_RESET):
-        asyncio.run(app.scan_step())            # виняток не виходить назовні
-    sh = app.scan_health
-    assert (sh["errors"], sh["consecutive"]) == (5, 5)
-    assert "RuntimeError" in sh["last_error"] and app.engine.stats["scan_errors"] == 5
+        asyncio.run(app.scan_step(app.app, rt))            # виняток не виходить назовні
+    sh = rt.scan
+    assert (sh.errors, sh.consecutive) == (5, 5)
+    assert "RuntimeError" in sh.last_error and rt.engine.stats["scan_errors"] == 5
     assert resets == [1], "після серії збоїв трекер має скинутися рівно раз"
 
-    app.engine.tick = real_tick                 # збій минув: скан знову проходить, лічильник серії скидається
-    asyncio.run(app.scan_step())
-    assert sh["consecutive"] == 0 and sh["errors"] == 5 and sh["last_ok"] is not None
-    assert app.health(user="тест")["ok"] is True
+    rt.engine.tick = real_tick                 # збій минув: скан знову проходить, лічильник серії скидається
+    asyncio.run(app.scan_step(app.app, rt))
+    assert sh.consecutive == 0 and sh.errors == 5 and sh.last_ok is not None
+    assert app.health(user="тест", rt=rt)["ok"] is True
 
 
 def test_health_reports_dead_scanning():
-    app = _app_with_engine()
-    asyncio.run(app.scan_step())
-    assert app.health(user="тест")["ok"] is True
-    app.scan_health["last_ok"] = time.time() - 100        # скани давно не йшли
-    r = app.health(user="тест")
+    app = pytest.importorskip("app")
+    rt = _runtime()
+    asyncio.run(app.scan_step(app.app, rt))
+    assert app.health(user="тест", rt=rt)["ok"] is True
+    rt.scan.last_ok = time.time() - 100        # скани давно не йшли
+    r = app.health(user="тест", rt=rt)
     assert r.status_code == 503 and b'"ok":false' in r.body
-    app.scan_health["last_ok"] = time.time()
-    app.scan_task = _Task(done=True)                      # цикл помер зовсім
-    assert app.health(user="тест").status_code == 503
+    rt.scan.last_ok = time.time()
+    rt.scan_task = _Task(done=True)            # цикл помер зовсім
+    assert app.health(user="тест", rt=rt).status_code == 503
+
+
+def test_service_without_runtime_answers_503_not_500():
+    """Раніше глобал engine був None до старту, і запит давав AttributeError (500). Тепер явне «ще не ініціалізовано»."""
+    app = pytest.importorskip("app")
+    from fastapi.testclient import TestClient
+    app.app.state.access = None
+    if hasattr(app.app.state, "runtime"):
+        del app.app.state.runtime
+    client = TestClient(app.app, raise_server_exceptions=False)
+    for path in ("/api/state", "/api/sensors", "/api/config", "/api/health"):
+        r = client.get(path)
+        assert r.status_code == 503 and "ініціалізовано" in r.text, path
+
+
+def test_two_runtimes_do_not_share_state():
+    """Суть переходу від глобалів до Runtime: два незалежні стани в одному процесі."""
+    app = pytest.importorskip("app")
+    a, b = app.Runtime(engine=Engine(default_sensors(), [])), app.Runtime(engine=Engine(default_sensors(), []))
+    a.engine.ingest([{"sensor_id": "rf1", "heartbeat": True}])
+    a.clients[object()] = "t"
+    a.scan.errors = 7
+    assert b.engine.sensor_status()["rf1"]["state"] == "WAITING" and not b.clients and b.scan.errors == 0
 
 
 def _flood(eng, sensor_id, n, rng=None):
@@ -292,11 +312,9 @@ def test_concurrent_ingest_tick_state_is_consistent():
 
 
 def test_http_batch_limit_and_incidents_clamp():
-    app = _app_with_engine()
-    try:
-        from fastapi.testclient import TestClient
-    except ImportError as e:
-        pytest.skip(f"залежності відсутні: {e}")
+    app = pytest.importorskip("app")
+    rt = _runtime()
+    from fastapi.testclient import TestClient
     client = TestClient(app.app)     # без with: lifespan (конфіг, цикл сканів) не запускається, engine підставлено вручну
     beat = {"sensor_id": "rf1", "heartbeat": True}
     r = client.post("/api/events", json=[beat] * app.MAX_HTTP_BATCH)
@@ -304,8 +322,8 @@ def test_http_batch_limit_and_incidents_clamp():
     assert client.post("/api/events", json=[beat] * (app.MAX_HTTP_BATCH + 1)).status_code == 422
 
     with tempfile.TemporaryDirectory() as d:
-        app.DB_PATH = str(Path(d) / "inc.db")
-        db = sqlite3.connect(app.DB_PATH)
+        rt.db_path = str(Path(d) / "inc.db")
+        db = sqlite3.connect(rt.db_path)
         db.execute("CREATE TABLE incidents (id INTEGER PRIMARY KEY, ts REAL)")
         db.executemany("INSERT INTO incidents (ts) VALUES (?)", [(i,) for i in range(5)])
         db.commit()
@@ -358,11 +376,9 @@ def test_non_string_sensor_id_does_not_crash_ingest():
 
 
 def test_http_rejects_nan_and_infinity():
-    app = _app_with_engine()
-    try:
-        from fastapi.testclient import TestClient
-    except ImportError as e:
-        pytest.skip(f"залежності відсутні: {e}")
+    app = pytest.importorskip("app")
+    _runtime()
+    from fastapi.testclient import TestClient
     client = TestClient(app.app, raise_server_exceptions=False)   # дивимось на відповідь, а не на виняток сервера
     headers = {"Content-Type": "application/json"}
     ts = time.time()

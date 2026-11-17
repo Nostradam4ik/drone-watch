@@ -165,14 +165,15 @@ def _client(base_url="http://testserver", *, auth=True, ttl=60, max_failures=8):
         from fastapi.testclient import TestClient
     except ImportError as e:
         pytest.skip(f"залежності відсутні: {e}")
-    m = test_health._app_with_engine()
-    m.DB_PATH = _temp_incidents_db()   # інакше /api/incidents створить порожній service/incidents.db
+    app = pytest.importorskip("app")
+    rt = test_health._runtime()
+    rt.db_path = _temp_incidents_db()   # інакше /api/incidents створить порожній service/incidents.db
     clock = Clock()
     from dashboard_web import DashboardAccess
-    m.app.state.access = (DashboardAccess(Users({"alice": FAST}), SessionStore(ttl, clock=clock),
+    app.app.state.access = (DashboardAccess(Users({"alice": FAST}), SessionStore(ttl, clock=clock),
                                           LoginLimiter(max_failures=max_failures, window_s=300, clock=clock))
                           if auth else DashboardAccess())
-    return TestClient(m.app, base_url=base_url, follow_redirects=False), m, clock
+    return TestClient(app.app, base_url=base_url, follow_redirects=False), rt, clock
 
 
 LOGIN = {"username": "alice", "password": PASSWORD}
@@ -195,7 +196,7 @@ def _login(client, **overrides):
 
 def test_everything_is_closed_without_a_session():
     made = _client()
-    c, m, _ = made
+    c, rt, _ = made
     r = c.get("/")
     assert r.status_code == 303 and r.headers["location"] == "/login"
     assert c.get("/login").status_code == 200 and "Увійти" in c.get("/login").text
@@ -211,12 +212,12 @@ def test_everything_is_closed_without_a_session():
             raise AssertionError("WebSocket без входу не мав відкритися")
     except WebSocketDisconnect:
         pass
-    assert not m.clients, "відхилений WebSocket не має потрапити в список розсилки"
+    assert not rt.clients, "відхилений WebSocket не має потрапити в список розсилки"
 
 
 def test_login_session_logout_flow():
     made = _client()
-    c, m, _ = made
+    c, rt, _ = made
     wrong = _login(c, password="wrong-password-123")
     unknown = _login(c, username="nobody")
     assert wrong.status_code == unknown.status_code == 401 and wrong.json() == unknown.json(), "не розкриваємо, чи існує ім'я"
@@ -239,7 +240,7 @@ def test_login_session_logout_flow():
     token = c.cookies.get("dw_session")
     with c.websocket_connect("/ws", headers={"cookie": f"dw_session={token}"}) as ws:
         ws.send_text("hi")
-        assert len(m.clients) == 1 and list(m.clients.values()) == [token]
+        assert len(rt.clients) == 1 and list(rt.clients.values()) == [token]
 
     out = c.post("/api/logout", json={})
     assert out.status_code == 200
@@ -263,7 +264,8 @@ def test_session_expires():
 
 
 def test_expired_session_closes_its_websocket():
-    _, m, clock = _client(ttl=60)
+    app = pytest.importorskip("app")
+    _, rt, clock = _client(ttl=60)
 
     class FakeWs:
         def __init__(self):
@@ -275,20 +277,20 @@ def test_expired_session_closes_its_websocket():
         async def close(self, code=1000):
             self.closed = code
 
-    token = m.app.state.access.sessions.create("alice")
+    token = app.app.state.access.sessions.create("alice")
     live, ghost = FakeWs(), FakeWs()
-    m.clients.update({live: token, ghost: "виданий-колись-токен"})
-    asyncio.run(m.scan_step())
+    rt.clients.update({live: token, ghost: "виданий-колись-токен"})
+    asyncio.run(app.scan_step(app.app, rt))
     assert live.sent and live.closed is None, "чинна сесія отримує стан"
-    assert not ghost.sent and ghost.closed == 1008 and ghost not in m.clients, "недійсна сесія не отримує нічого й закривається"
+    assert not ghost.sent and ghost.closed == 1008 and ghost not in rt.clients, "недійсна сесія не отримує нічого й закривається"
     clock.now += 61
-    asyncio.run(m.scan_step())
-    assert live.closed == 1008 and not m.clients, "сесія скінчилась: WebSocket закрито"
+    asyncio.run(app.scan_step(app.app, rt))
+    assert live.closed == 1008 and not rt.clients, "сесія скінчилась: WebSocket закрито"
 
 
 def test_csrf_and_origin_protection():
     made = _client()
-    c, m, _ = made
+    c, rt, _ = made
     form = c.post("/api/login", data=LOGIN)   # так відправляє форма з чужого сайту
     assert form.status_code == 415 and not c.cookies
     assert c.post("/api/login", json=LOGIN, headers={"origin": "https://evil.example"}).status_code == 403
@@ -303,7 +305,7 @@ def test_csrf_and_origin_protection():
             raise AssertionError("WebSocket з чужим Origin не мав відкритися")
     except WebSocketDisconnect:
         pass
-    assert not m.clients
+    assert not rt.clients
     assert _login(c, extra="поле").status_code == 422, "зайві поля в тілі входу відхиляються"
 
 
@@ -325,8 +327,8 @@ def test_parallel_login_burst_cannot_exceed_the_limit():
     import threading
     import time as _time
     from concurrent.futures import ThreadPoolExecutor
-    c, m, _ = made
-    users, checked, lock = m.app.state.access.users, [], threading.Lock()
+    c, _, _ = made
+    users, checked, lock = c.app.state.access.users, [], threading.Lock()
     original = users.authenticate
 
     def slow(name, password):
@@ -391,13 +393,13 @@ def test_auth_disabled_keeps_everything_open_as_before():
 def test_a_dashboard_session_does_not_grant_sensor_access():
     """Дашборд і датчики мають різні облікові дані: оператор не може слати події, датчик не може читати стан."""
     made = _client()
-    c, m, _ = made
+    c, rt, _ = made
     from test_auth import KEYS, det, make_auth
-    m.engine.auth = make_auth()
+    rt.engine.auth = make_auth()
     assert _login(c).status_code == 200
     body = [{k: v for k, v in det("rf1").items() if k != "key"}]
     assert c.post("/api/events", json=body).status_code == 401, "сесія оператора не замінює ключ датчика"
-    anonymous = c.__class__(m.app, base_url="http://testserver", follow_redirects=False)
+    anonymous = c.__class__(c.app, base_url="http://testserver", follow_redirects=False)
     assert anonymous.post("/api/events", json=body, headers={"X-API-Key": KEYS["rf1"]}).status_code == 200
     assert anonymous.get("/api/state").status_code == 401, "ключ датчика не відкриває дашборд"
 
@@ -516,7 +518,7 @@ def test_real_https_login_cookie_and_emulator():
     with tempfile.TemporaryDirectory() as d:
         ca, crt, key = make_pki(d, names=("localhost", "127.0.0.1", "service"))
         srv = HttpsServer(crt, key)
-        srv.app.app.state.access = DashboardAccess(Users({"alice": FAST}), SessionStore(300), LoginLimiter())
+        srv.api.state.access = DashboardAccess(Users({"alice": FAST}), SessionStore(300), LoginLimiter())
         try:
             base = f"https://127.0.0.1:{srv.port}"   # 127.0.0.1 (IP-SAN), не localhost: на Windows ::1 дає зайві ~2 с
             ctx = emulate.tls_context(str(ca))

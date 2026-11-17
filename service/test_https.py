@@ -28,13 +28,16 @@ class HttpsServer:
     def __init__(self, certfile, keyfile):
         import test_health
         import uvicorn
-        self.app = test_health._app_with_engine()
-        self.app.engine.auth = make_auth()
+
+        import app
+        self.rt = test_health._runtime()   # стан сервісу (рушій, клієнти, задача скану)
+        self.api = app.app                 # FastAPI-застосунок
+        self.rt.engine.auth = make_auth()
         s = socket.socket()
         s.bind(("127.0.0.1", 0))
         self.port = s.getsockname()[1]
         s.close()
-        self.server = uvicorn.Server(uvicorn.Config(self.app.app, host="127.0.0.1", port=self.port, ssl_certfile=str(certfile),
+        self.server = uvicorn.Server(uvicorn.Config(self.api, host="127.0.0.1", port=self.port, ssl_certfile=str(certfile),
                                                     ssl_keyfile=str(keyfile), lifespan="off", log_level="error"))
         self.thread = threading.Thread(target=self.server.run, daemon=True)
         self.thread.start()
@@ -125,7 +128,7 @@ def test_https_api_dashboard_and_clients():
             assert health["auth"] is True and health["ok"] is True
             ev = {"sensor_id": "rf1", "ts": time.time(), "azimuth_deg": 10.0}
             assert emulate.http(base + "/api/events", [ev], key=KEYS["rf1"])["accepted"] == 1
-            before = dict(srv.app.engine.stats)
+            before = dict(srv.rt.engine.stats)
 
             # 2. сертифікат від недовіреного CA: відхиляється ще до відправки запиту з ключем
             emulate.HTTPS_CONTEXT = emulate.tls_context(str(other_ca))
@@ -142,7 +145,7 @@ def test_https_api_dashboard_and_clients():
             else:
                 raise AssertionError("відкритий HTTP на TLS-порту має не працювати")
             time.sleep(0.3)
-            assert dict(srv.app.engine.stats) == before, "відкритий запит із ключем не мав дійти до застосунку"
+            assert dict(srv.rt.engine.stats) == before, "відкритий запит із ключем не мав дійти до застосунку"
 
             # 4. дашборд і WebSocket по TLS
             html = urllib.request.urlopen(base + "/", context=emulate.HTTPS_CONTEXT, timeout=5).read().decode("utf-8")
@@ -150,8 +153,8 @@ def test_https_api_dashboard_and_clients():
             connect = pytest.importorskip("websockets.sync.client").connect
             with connect(f"wss://127.0.0.1:{srv.port}/ws", ssl=emulate.HTTPS_CONTEXT, open_timeout=5) as ws:
                 ws.send("hi")
-                assert _wait(lambda: len(srv.app.clients) == 1), "WebSocket по TLS не зареєструвався"
-                assert srv.app.clients, "клієнт має бути в списку розсилки"
+                assert _wait(lambda: len(srv.rt.clients) == 1), "WebSocket по TLS не зареєструвався"
+                assert srv.rt.clients, "клієнт має бути в списку розсилки"
         finally:
             emulate.HTTPS_CONTEXT = None
             srv.stop()
@@ -185,7 +188,7 @@ def test_healthcheck_script_verifies_the_certificate():
             assert (bad.returncode == 1 and "SSLCertVerificationError" in bad.stderr) or "URLError" in bad.stderr, bad.stderr
             plain = run_check()   # без TLS_CERT_FILE іде по відкритому HTTP: на TLS-порту має не вийти
             assert plain.returncode == 1, "healthcheck по відкритому HTTP не мав «пройти» на TLS-порту"
-            srv.app.scan_task = type("T", (), {"done": lambda self: True})()   # сервіс живий, але цикл сканів помер: /api/health дає 503
+            srv.rt.scan_task = type("T", (), {"done": lambda self: True})()   # сервіс живий, але цикл сканів помер: /api/health дає 503
             dead = run_check(TLS_CERT_FILE="x", TLS_CA_FILE=str(ca))
             assert dead.returncode == 1, "503 від /api/health має робити контейнер unhealthy"
         finally:

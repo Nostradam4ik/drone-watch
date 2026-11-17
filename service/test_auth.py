@@ -87,17 +87,17 @@ def test_unauthorized_flood_is_cheap_and_does_not_fill_buffer():
 
 
 def _client():
-    pytest.importorskip("app")
+    app = pytest.importorskip("app")
     pytest.importorskip("fastapi.testclient")
     import test_health
     from fastapi.testclient import TestClient
-    m = test_health._app_with_engine()
-    m.engine.auth = make_auth()
-    return TestClient(m.app, raise_server_exceptions=False), m
+    rt = test_health._runtime()
+    rt.engine.auth = make_auth()
+    return TestClient(app.app, raise_server_exceptions=False), rt
 
 
 def test_http_requires_key_per_sensor():
-    c, m = _client()
+    c, rt = _client()
 
     def ev(sid, **kw):   # у тілі ключа немає: він у заголовку
         return {k: v for k, v in det(sid, **kw).items() if k != "key"}
@@ -123,7 +123,7 @@ def test_http_requires_key_per_sensor():
     smuggled = ev("rf1")
     smuggled["key"] = KEYS["rf1"]      # ключ у тілі ігнорується: лише заголовок
     assert c.post("/api/events", json=[smuggled]).status_code == 401
-    assert m.engine.stats["events_unauthorized"] == 5   # без ключа, хибний, чужий, ac1 у змішаному, ключ у тілі
+    assert rt.engine.stats["events_unauthorized"] == 5   # без ключа, хибний, чужий, ac1 у змішаному, ключ у тілі
 
 
 def test_keys_never_appear_in_responses_or_logs():
