@@ -1,5 +1,5 @@
 # Збирати з кореня репозиторію: docker build -f docker/service.Dockerfile .
-FROM python:3.12-slim
+FROM python:3.15-slim
 WORKDIR /app
 # Залежності беруться з pyproject.toml і ставляться окремим шаром: він перезбирається лише при зміні залежностей, а не коду
 COPY pyproject.toml .
