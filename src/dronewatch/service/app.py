@@ -279,13 +279,17 @@ def post_events(events: Annotated[list[Detection], Body(max_length=MAX_HTTP_BATC
     return {"accepted": r.accepted, "rejected": r.rejected, "unauthorized": r.unauthorized}
 
 
-@app.get("/api/incidents", dependencies=[Depends(require_user)])
-def incidents(rt: RuntimeDep, limit: int = 100) -> list[dict[str, Any]]:
+def read_incidents(db_path: str, limit: int = 100) -> list[dict[str, Any]]:
     # окреме з'єднання на запит, і його треба закривати (раніше воно витікало); LIMIT -1 у SQLite = «без ліміту», тож clamp знизу
-    with closing(sqlite3.connect(rt.db_path)) as db:
+    with closing(sqlite3.connect(db_path)) as db:
         db.row_factory = sqlite3.Row
         rows = db.execute("SELECT * FROM incidents ORDER BY id DESC LIMIT ?", (max(1, min(limit, 1000)),)).fetchall()
         return [dict(r) for r in rows]
+
+
+@app.get("/api/incidents", dependencies=[Depends(require_user)])
+def incidents(rt: RuntimeDep, limit: int = 100) -> list[dict[str, Any]]:
+    return read_incidents(rt.db_path, limit)
 
 
 @app.websocket("/ws")
