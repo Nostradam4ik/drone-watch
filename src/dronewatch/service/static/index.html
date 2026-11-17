@@ -29,7 +29,7 @@
             border-radius: 8px; padding: 8px 12px; font-size: 12px; color: var(--muted); display: grid; gap: 4px; }
   #legend i { display: inline-block; width: 10px; height: 10px; border-radius: 50%; margin-right: 6px; vertical-align: -1px; }
   #legend label { cursor: pointer; color: var(--text); }
-  aside { border-left: 1px solid var(--line); background: var(--panel); display: grid; grid-template-rows: auto 1fr auto auto; min-height: 0; }
+  aside { border-left: 1px solid var(--line); background: var(--panel); display: grid; grid-template-rows: auto 1fr auto auto auto; min-height: 0; }
   h2 { margin: 0; padding: 10px 16px; font-size: 12px; text-transform: uppercase; letter-spacing: .08em; color: var(--muted);
        border-bottom: 1px solid var(--line); }
   #alerts { overflow-y: auto; min-height: 0; }
@@ -49,6 +49,16 @@
   th, td { padding: 4px 8px; text-align: left; } th { color: var(--muted); font-weight: 500; position: sticky; top: 0; background: var(--panel); }
   tr.sel { background: #1b2a38; } tr { cursor: pointer; }
   td.NONE { color: var(--ok); } td.WARNING { color: var(--warn); } td.CRITICAL { color: var(--crit); }
+  #ai-box { border-top: 1px solid var(--line); display: grid; grid-template-rows: auto auto auto; max-height: 34vh; }
+  #ai-log { overflow-y: auto; padding: 6px 16px; display: grid; gap: 6px; min-height: 0; }
+  .ai-msg { font-size: 12px; padding: 4px 8px; border-radius: 6px; }
+  .ai-q { background: #1b2a38; color: var(--text); justify-self: end; max-width: 90%; }
+  .ai-a { background: #0b1117; border: 1px solid var(--line); color: var(--text); max-width: 90%; }
+  .ai-trace { color: var(--muted); font-size: 11px; margin-top: 4px; }
+  #ai-form { display: flex; gap: 6px; padding: 8px 16px; border-top: 1px solid var(--line); }
+  #ai-q-input { flex: 1; background: var(--bg); border: 1px solid var(--line); color: var(--text); border-radius: 6px; padding: 5px 8px; font: inherit; }
+  #ai-form button { background: var(--sensor); border: none; color: #0b1117; border-radius: 6px; padding: 5px 12px; font: inherit; cursor: pointer; font-weight: 600; }
+  #ai-form button:disabled { opacity: .5; cursor: default; }
   #toast { position: absolute; right: 12px; top: 12px; display: grid; gap: 6px; pointer-events: none; }
   .toast { background: #0b1117e6; border: 1px solid var(--crit); color: var(--text); padding: 8px 12px; border-radius: 8px; font-size: 13px; }
   .toast.WARNING { border-color: var(--warn); }
@@ -98,6 +108,14 @@
     <div>
       <h2>Активні треки</h2>
       <div id="tracks"><table><thead><tr><th>ID</th><th>Рівень</th><th>V, м/с</th><th>H, м</th><th>Датчики</th></tr></thead><tbody id="tbody"></tbody></table></div>
+    </div>
+    <div id="ai-box">
+      <h2>AI-асистент</h2>
+      <div id="ai-log"><div class="empty">Запитайте про стан чи минулі інциденти</div></div>
+      <form id="ai-form">
+        <input id="ai-q-input" maxlength="500" placeholder="Напр.: що зараз у Зоні A?" autocomplete="off">
+        <button type="submit">Запитати</button>
+      </form>
     </div>
   </aside>
 </main>
@@ -266,6 +284,13 @@ async function api(path) {
   return response.json();
 }
 
+async function apiPost(path, body) {
+  const response = await fetch(path, { method: "POST", credentials: "same-origin",
+    headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+  if (response.status === 401) { location.replace("/login"); throw new LoginRequired(); }
+  return response;
+}
+
 async function start() {
   cfg = await api("/api/config");
   const mode = document.getElementById("mode");
@@ -282,6 +307,37 @@ async function start() {
 document.getElementById("logout").addEventListener("click", async () => {
   await fetch("/api/logout", { method: "POST", credentials: "same-origin", headers: { "Content-Type": "application/json" }, body: "{}" });
   location.replace("/login");
+});
+
+document.getElementById("ai-form").addEventListener("submit", async e => {
+  e.preventDefault();
+  const input = document.getElementById("ai-q-input"), btn = e.target.querySelector("button");
+  const question = input.value.trim();
+  if (!question) return;
+  input.value = ""; btn.disabled = true;
+  const log = document.getElementById("ai-log");
+  const empty = log.querySelector(".empty"); if (empty) empty.remove();
+  const qEl = document.createElement("div"); qEl.className = "ai-msg ai-q"; qEl.textContent = question;
+  const aEl = document.createElement("div"); aEl.className = "ai-msg ai-a"; aEl.textContent = "…";
+  log.append(qEl, aEl);
+  log.scrollTop = log.scrollHeight;
+  try {
+    const r = await apiPost("/api/ai/ask", { question });
+    if (!r.ok) { aEl.textContent = "AI недоступний"; return; }
+    const body = await r.json();
+    aEl.textContent = body.answer || "(порожня відповідь)";
+    if (body.tool_calls && body.tool_calls.length) {
+      const trace = document.createElement("div"); trace.className = "ai-trace";
+      trace.textContent = "інструменти: " + body.tool_calls.map(c => c.name).join(", ");
+      aEl.appendChild(trace);
+    }
+  } catch (err) {
+    if (err instanceof LoginRequired) return;
+    aEl.textContent = "AI недоступний";
+  } finally {
+    btn.disabled = false;
+    log.scrollTop = log.scrollHeight;
+  }
 });
 
 function connect() {

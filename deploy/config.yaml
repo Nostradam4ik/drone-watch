@@ -50,3 +50,10 @@ alerts:
   min_age_s: 5
   require_radar_in_cover: true
   max_coast_scans: 2
+
+# AI-асистент оператора: безпечно лишати enabled: true навіть без ключа. Без MISTRAL_API_KEY у середовищі сервіс
+# все одно стартує, AI-асистент просто вимкнений (/api/ai/ask повертає 503). Щоб увімкнути:
+# MISTRAL_API_KEY=ваш_ключ docker compose --profile demo-sensors --profile ai up --build
+ai:
+  enabled: true
+  qdrant_url: http://qdrant:6333   # ім'я сервісу qdrant у мережі docker-compose (профіль ai)
