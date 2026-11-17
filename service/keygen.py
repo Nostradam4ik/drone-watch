@@ -23,6 +23,7 @@ import argparse
 import base64
 import getpass
 import hashlib
+import io
 import os
 import re
 import secrets
@@ -31,10 +32,11 @@ import sys
 from auth import hash_key
 from dashboard_auth import MIN_PASSWORD_LEN, hash_password
 
-sys.stdout.reconfigure(encoding="utf-8")
+if isinstance(sys.stdout, io.TextIOWrapper):   # у тестах (pytest) stdout підмінено і reconfigure немає
+    sys.stdout.reconfigure(encoding="utf-8")
 
 
-def mosquitto_hash(password, salt=None):
+def mosquitto_hash(password: str, salt: bytes | None = None) -> str:
     """Рядок хеша для файлу паролів Mosquitto 2.x: $7$101$<сіль base64>$<PBKDF2-HMAC-SHA512 base64>.
     Формат і число ітерацій (101) зафіксовані брокером; для випадкового 256-бітного ключа цього досить, але для паролів,
     які вигадала людина, це слабкий хеш: такі паролі в цей файл не кладіть."""
@@ -69,7 +71,7 @@ def dashboard_user(name: str, *, generate: bool, password_env: str | None) -> in
     return 0
 
 
-def main():
+def main() -> int:
     ap = argparse.ArgumentParser(description="Генератор ключів датчиків", epilog=__doc__.split("\n\n", 1)[1],
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("sensors", nargs="*", help="id датчиків з config.yaml")

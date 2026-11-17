@@ -10,6 +10,7 @@
     pip install -e ".[dev]"      # залежності сервісу й pytest, ruff, mypy
     pytest                       # усі тести з кореня репозиторію (шляхи імпорту бере з pyproject)
     ruff check .                 # лінтер
+    mypy                         # перевірка типів (код без тестів: service, fusion_proto, emulator)
 
 Далі відкрити http://127.0.0.1:8000. Це лише для localhost: ключі й стан ідуть без шифрування.
 

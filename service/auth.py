@@ -10,6 +10,7 @@
 """
 import hashlib
 import hmac
+from collections.abc import Mapping
 
 MAX_KEY_LEN = 256   # довший ключ відкидаємо без хешування: захист від великих «ключів» у кожній події
 
@@ -19,11 +20,11 @@ def hash_key(key: str) -> str:
 
 
 class SensorAuth:
-    def __init__(self, key_hashes):
+    def __init__(self, key_hashes: Mapping[str, str]) -> None:
         """key_hashes: {sensor_id: sha256 hex}."""
         self._hashes = {sid: bytes.fromhex(h) for sid, h in key_hashes.items()}
 
-    def verify(self, sensor_id, key) -> bool:
+    def verify(self, sensor_id: str, key: object) -> bool:
         if not isinstance(key, str) or not key or len(key) > MAX_KEY_LEN:
             return False
         digest = hashlib.sha256(key.encode("utf-8", "surrogatepass")).digest()   # хешуємо завжди, щоб час не видавав, чи є такий датчик

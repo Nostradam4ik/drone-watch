@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Емулятор датчиків Drone Watch: шле події на POST /api/events так, як це робив би справжній пристрій.
 
-Лише стандартна бібліотека Python 3.8+. Датчики (позиції, дальності) береться з GET /api/config сервісу,
+Лише стандартна бібліотека Python 3.10+. Датчики (позиції, дальності) береться з GET /api/config сервісу,
 тож емулятор завжди збігається з його конфігурацією.
 
 Приклади:
@@ -19,7 +19,8 @@ MQTT кладе в поле "key" кожної події і підключає�
 задають один спільний логін на всіх датчиків (шлюз). TLS: --mqtt-ca CA.PEM (довіряти лише цьому CA) або --mqtt-tls
 (системні CA); ім'я хоста з --mqtt має бути в SAN сертифіката брокера.
 HTTPS до сервісу: --url https://ІМ'Я:8000 --ca CA.PEM (ім'я має бути в SAN сертифіката сервісу); сертифікат перевіряється
-завжди. Сервіс у режимі розробки без TLS: --url http://127.0.0.1:8000 (ключі підуть відкритим текстом). Видати ключі: python service/keygen.py radar1 rf1 ac1.
+завжди. Сервіс у режимі розробки без TLS: --url http://127.0.0.1:8000 (ключі підуть відкритим текстом).
+Видати ключі: python service/keygen.py radar1 rf1 ac1.
 
 Вхід у дашборд: GET /api/config і /api/state за паролем, тож емулятор входить сам: --dashboard-user ІМ'Я і пароль у змінній
 DRONEWATCH_DASHBOARD_PASSWORD (не в аргументах: їх видно в списку процесів). Справжнім датчикам вхід у дашборд не потрібен:
@@ -36,15 +37,26 @@ import json
 import math
 import os
 import random
+import socket
 import ssl
 import sys
 import time
 import urllib.error
 import urllib.request
+from collections.abc import Callable, Sequence
+from dataclasses import dataclass
 from http.cookiejar import CookieJar
+from itertools import pairwise
+from typing import Any
 
-DEFAULT_NOISE = {"radar": (5.0, 0.7, 1.5), "rf": (None, 5.0, None), "acoustic": (None, 10.0, None)}  # м, °, °
-FALLBACK_SENSORS = [  # якщо сервіс недоступний (--dry-run без сервера)
+SensorInfo = dict[str, Any]     # {"id", "kind", "label", "pos", "max_range"} з /api/config
+Event = dict[str, Any]
+Point = tuple[float, float, float]
+Noise = tuple[float, float, float]   # дальність м, азимут °, елевація °; для пеленгових датчиків дальність і елевація не використовуються
+Bias = dict[str, tuple[float, float, float]]
+
+DEFAULT_NOISE: dict[str, Noise] = {"radar": (5.0, 0.7, 1.5), "rf": (0.0, 5.0, 0.0), "acoustic": (0.0, 10.0, 0.0)}
+FALLBACK_SENSORS: list[SensorInfo] = [  # якщо сервіс недоступний (--dry-run без сервера)
     {"id": "radar1", "kind": "radar", "label": "radar", "pos": [0, 0], "max_range": 1500},
     {"id": "rf1", "kind": "bearing", "label": "rf", "pos": [400, -300], "max_range": 1800},
     {"id": "ac1", "kind": "bearing", "label": "acoustic", "pos": [-300, 200], "max_range": 700},
@@ -55,36 +67,37 @@ FALLBACK_SENSORS = [  # якщо сервіс недоступний (--dry-run 
 class Target:
     """Рух по вершинах [(t, x, y, z), ...] з лінійною інтерполяцією."""
 
-    def __init__(self, name, wp):
+    def __init__(self, name: str, wp: Sequence[Sequence[float]]) -> None:
         self.name, self.wp = name, wp
 
-    def active(self, t):
+    def active(self, t: float) -> bool:
         return self.wp[0][0] <= t <= self.wp[-1][0]
 
-    def pos(self, t):
-        for a, b in zip(self.wp, self.wp[1:]):
+    def pos(self, t: float) -> Point:
+        for a, b in pairwise(self.wp):
             if a[0] <= t <= b[0]:
                 f = (t - a[0]) / (b[0] - a[0]) if b[0] > a[0] else 0.0
-                return tuple(a[k] + f * (b[k] - a[k]) for k in (1, 2, 3))
-        return tuple(self.wp[-1][1:])
+                return (a[1] + f * (b[1] - a[1]), a[2] + f * (b[2] - a[2]), a[3] + f * (b[3] - a[3]))
+        last = self.wp[-1]
+        return (last[1], last[2], last[3])
 
 
-def scenario_cross(rng, count):
+def scenario_cross(rng: random.Random, count: int) -> list[Target]:
     return [Target("cross", [(0, -900, 100, 70), (120, 900, 100, 70)])]
 
 
-def scenario_hover(rng, count):
+def scenario_hover(rng: random.Random, count: int) -> list[Target]:
     return [Target("hover", [(0, 600, 700, 60), (30, 250, 250, 60), (60, 250, 250, 60), (80, 800, 600, 120)])]
 
 
-def scenario_circle(rng, count):
+def scenario_circle(rng: random.Random, count: int) -> list[Target]:
     r, v, n = 400.0, 12.0, 36
     period = 2 * math.pi * r / v
     return [Target("circle", [(period * k / n, r * math.cos(2 * math.pi * k / n), r * math.sin(2 * math.pi * k / n), 80.0)
                               for k in range(n + 1)])]
 
 
-def scenario_swarm(rng, count):
+def scenario_swarm(rng: random.Random, count: int) -> list[Target]:
     """count дронів із різних боків через центр; шляхи перетинаються."""
     out = []
     for k in range(count):
@@ -100,38 +113,39 @@ def scenario_swarm(rng, count):
     return out
 
 
-SCENARIOS = {"cross": scenario_cross, "hover": scenario_hover, "circle": scenario_circle, "swarm": scenario_swarm}
+SCENARIOS: dict[str, Callable[[random.Random, int], list[Target]]] = {
+    "cross": scenario_cross, "hover": scenario_hover, "circle": scenario_circle, "swarm": scenario_swarm}
 
 
 # ---------- датчики ----------
-def compass(dx, dy):
+def compass(dx: float, dy: float) -> float:
     return math.degrees(math.atan2(dx, dy)) % 360.0
 
 
-def poisson(rng, lam):
-    L, k, p = math.exp(-lam), 0, 1.0
+def poisson(rng: random.Random, lam: float) -> int:
+    limit, k, p = math.exp(-lam), 0, 1.0
     while True:
         p *= rng.random()
-        if p <= L:
+        if p <= limit:
             return k
         k += 1
 
 
-def measure(rng, sensor, pos, bias, noise):
+def measure(rng: random.Random, sensor: SensorInfo, pos: Point, bias: Bias, noise: Noise) -> Event:
     """Одне вимірювання цілі датчиком: істина + bias + шум."""
     dx, dy, dz = pos[0] - sensor["pos"][0], pos[1] - sensor["pos"][1], pos[2]
     rng_h = math.hypot(dx, dy)
     sr, sa, se = noise
     b = bias.get(sensor["id"], (0.0, 0.0, 0.0))
-    e = {"azimuth_deg": (compass(dx, dy) + b[1] + rng.gauss(0, sa)) % 360.0}
+    e: Event = {"azimuth_deg": (compass(dx, dy) + b[1] + rng.gauss(0, sa)) % 360.0}
     if sensor["kind"] == "radar":
         e["range_m"] = math.hypot(rng_h, dz) + b[0] + rng.gauss(0, sr)
         e["elevation_deg"] = math.degrees(math.atan2(dz, rng_h)) + b[2] + rng.gauss(0, se)
     return e
 
 
-def clutter(rng, sensor):
-    e = {"azimuth_deg": rng.uniform(0, 360)}
+def clutter(rng: random.Random, sensor: SensorInfo) -> Event:
+    e: Event = {"azimuth_deg": rng.uniform(0, 360)}
     if sensor["kind"] == "radar":
         e["range_m"] = rng.uniform(50, sensor["max_range"])
         e["elevation_deg"] = rng.uniform(0, 30)
@@ -139,7 +153,7 @@ def clutter(rng, sensor):
 
 
 # ---------- мережа ----------
-def tls_context(ca=None):
+def tls_context(ca: str | None = None) -> ssl.SSLContext:
     """TLS для MQTT: сертифікат брокера й ім'я хоста перевіряються обов'язково, не нижче TLS 1.2. З ca довіряємо лише цьому CA
     (PEM), без нього системному сховищу. Режиму «не перевіряти сертифікат» тут свідомо немає."""
     ctx = ssl.create_default_context(cafile=ca) if ca else ssl.create_default_context()
@@ -150,25 +164,26 @@ def tls_context(ca=None):
 class MqttPublisher:
     """Мінімальний клієнт MQTT 3.1.1 (лише CONNECT і PUBLISH QoS 0), щоб емулятор лишався без залежностей."""
 
-    def __init__(self, host, port=1883, username=None, password=None, client_id="dronewatch-emulator", tls=None):
+    def __init__(self, host: str, port: int = 1883, username: str | None = None, password: str | None = None,
+                 client_id: str = "dronewatch-emulator", tls: ssl.SSLContext | None = None) -> None:
         """tls: ssl.SSLContext (див. tls_context) або None для відкритого зʼєднання."""
         self.args = (host, port, username, password, client_id)
         self.tls = tls
-        self.sock = None
+        self.sock: socket.socket | None = None
         self._connect()
 
-    def _connect(self):
-        import socket
+    def _connect(self) -> None:
         host, port, username, password, client_id = self.args
         if self.sock:
             self.close()
-        self.sock = socket.create_connection((host, port), timeout=5)
+        sock = socket.create_connection((host, port), timeout=5)
         if self.tls:   # server_hostname вмикає перевірку імені хоста проти SAN сертифіката
             try:
-                self.sock = self.tls.wrap_socket(self.sock, server_hostname=host)
+                sock = self.tls.wrap_socket(sock, server_hostname=host)
             except OSError:
-                self.sock.close()
+                sock.close()
                 raise
+        self.sock = sock
         flags = 0x02  # clean session
         payload = self._str(client_id)
         if username:
@@ -176,20 +191,23 @@ class MqttPublisher:
             payload += self._str(username) + (self._str(password) if password else b"")
         var = self._str("MQTT") + bytes([4, flags]) + (60).to_bytes(2, "big")
         self._send(0x10, var + payload)
-        ack = self.sock.recv(4)
+        ack = sock.recv(4)
         if len(ack) < 4 or ack[0] != 0x20 or ack[3] != 0:
-            hint = {4: "хибні логін чи пароль", 5: "користувача немає або немає прав"}.get(ack[3] if len(ack) == 4 else None)
+            hint = {4: "хибні логін чи пароль", 5: "користувача немає або немає прав"}.get(ack[3]) if len(ack) == 4 else None
             if not ack:   # брокер закрив зʼєднання, нічого не відповівши
-                hint = "брокер закрив зʼєднання без відповіді; найчастіше це порт з TLS, а клієнт без нього (--mqtt-ca CA.PEM)" if not self.tls \
-                    else "брокер закрив зʼєднання без відповіді"
+                hint = "брокер закрив зʼєднання без відповіді"
+                if not self.tls:
+                    hint += "; найчастіше це порт з TLS, а клієнт без нього (--mqtt-ca CA.PEM)"
             raise OSError(f"брокер відхилив підключення (CONNACK {ack.hex() or 'порожній'}{': ' + hint if hint else ''})")
 
     @staticmethod
-    def _str(s):
+    def _str(s: str) -> bytes:
         b = s.encode("utf-8")
         return len(b).to_bytes(2, "big") + b
 
-    def _send(self, first, body):
+    def _send(self, first: int, body: bytes) -> None:
+        if self.sock is None:
+            raise OSError("немає зʼєднання з брокером")
         n, enc = len(body), bytearray()
         while True:  # довжина тіла змінної довжини (по 7 біт)
             byte, n = n % 128, n // 128
@@ -198,7 +216,7 @@ class MqttPublisher:
                 break
         self.sock.sendall(bytes([first]) + bytes(enc) + body)
 
-    def publish(self, topic, obj):
+    def publish(self, topic: str, obj: Any) -> None:
         packet = self._str(topic) + json.dumps(obj, ensure_ascii=False).encode("utf-8")
         try:
             self._send(0x30, packet)
@@ -206,30 +224,32 @@ class MqttPublisher:
             self._connect()   # брокер розірвав з'єднання (перезапуск, витіснення): одна спроба перепідключитися
             self._send(0x30, packet)
 
-    def close(self):
+    def close(self) -> None:
         try:
             self._send(0xE0, b"")
-            self.sock.close()
+            if self.sock:
+                self.sock.close()
         except OSError:
             pass
 
 
-HTTPS_CONTEXT = None   # ssl.SSLContext для https://-адрес (встановлює main); для http:// не використовується
-_cache: tuple = (None, None)   # (контекст TLS, opener із cookie сесії дашборда)
+HTTPS_CONTEXT: ssl.SSLContext | None = None   # для https://-адрес (встановлює main); для http:// не використовується
+_cache: tuple[ssl.SSLContext | None, urllib.request.OpenerDirector | None] = (None, None)   # (контекст, opener із cookie сесії)
 
 
-def opener():
+def opener() -> urllib.request.OpenerDirector:
     """Один opener на контекст TLS: cookie сесії зберігається між запитами, а зміна контексту дає новий opener."""
     global _cache
     if _cache[1] is None or _cache[0] is not HTTPS_CONTEXT:
-        handlers = [urllib.request.HTTPCookieProcessor(CookieJar())]
+        handlers: list[urllib.request.BaseHandler] = [urllib.request.HTTPCookieProcessor(CookieJar())]
         if HTTPS_CONTEXT:
             handlers.append(urllib.request.HTTPSHandler(context=HTTPS_CONTEXT))
         _cache = (HTTPS_CONTEXT, urllib.request.build_opener(*handlers))
+    assert _cache[1] is not None
     return _cache[1]
 
 
-def http(url, data=None, timeout=5, key=None):
+def http(url: str, data: Any = None, timeout: float = 5, key: str | None = None) -> Any:
     headers = {"Content-Type": "application/json"}
     if key:
         headers["X-API-Key"] = key
@@ -238,21 +258,21 @@ def http(url, data=None, timeout=5, key=None):
         return json.load(r)
 
 
-def parse_bias(items):
+def parse_bias(items: list[str] | None) -> Bias:
     """--bias rf1=3  або  --bias radar1=8,1,0.5  (дальність м, азимут °, елевація °)."""
-    out = {}
+    out: Bias = {}
     for item in items or []:
         sid, _, vals = item.partition("=")
         v = [float(x) for x in vals.split(",")]
         if len(v) not in (1, 3):
             sys.exit(f"--bias {item}: потрібно одне число (азимут, °) або три (дальність м, азимут °, елевація °)")
-        out[sid] = (0.0, v[0], 0.0) if len(v) == 1 else tuple(v)
+        out[sid] = (0.0, v[0], 0.0) if len(v) == 1 else (v[0], v[1], v[2])
     return out
 
 
-def parse_keys(items, env):
+def parse_keys(items: list[str] | None, env: str | None) -> dict[str, str]:
     """--key radar1=КЛЮЧ (можна кілька) і/або DRONEWATCH_KEYS="radar1=К1,rf1=К2". Прапорці перекривають оточення."""
-    out = {}
+    out: dict[str, str] = {}
     for item in [x for x in (env or "").split(",") if x.strip()] + list(items or []):
         sid, sep, key = item.strip().partition("=")
         if not sep or not sid or not key:
@@ -261,10 +281,10 @@ def parse_keys(items, env):
     return out
 
 
-def main():
-    global HTTPS_CONTEXT
+# ---------- запуск ----------
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     ap = argparse.ArgumentParser(description="Емулятор датчиків Drone Watch", formatter_class=argparse.RawDescriptionHelpFormatter,
-                                 epilog=__doc__.split("Приклади:")[1])
+                                 epilog=(__doc__ or "").split("Приклади:")[1])
     ap.add_argument("--url", default="https://127.0.0.1:8000", help="адреса сервісу; https:// з перевіркою сертифіката й імені хоста")
     ap.add_argument("--ca", metavar="CA.PEM", help="для https://: довіряти лише цьому CA (інакше системним); для MQTT див. --mqtt-ca")
     ap.add_argument("--dashboard-user", metavar="ІМ'Я", help="логін у дашборд (пароль у змінній DRONEWATCH_DASHBOARD_PASSWORD)")
@@ -276,7 +296,8 @@ def main():
     ap.add_argument("--clutter", type=float, default=0.3, help="середня кількість хибних детекцій за скан на датчик")
     ap.add_argument("--only", help="емулювати лише ці датчики (через кому), решта «відмовила»")
     ap.add_argument("--bias", action="append", help="систематична похибка: rf1=3 або radar1=8,1,0.5")
-    ap.add_argument("--key", action="append", metavar="ДАТЧИК=КЛЮЧ", help="ключ датчика (повторювати для кожного); див. також DRONEWATCH_KEYS")
+    ap.add_argument("--key", action="append", metavar="ДАТЧИК=КЛЮЧ",
+                    help="ключ датчика (повторювати для кожного); див. також DRONEWATCH_KEYS")
     ap.add_argument("--no-heartbeat", action="store_true", help="не слати heartbeat (поведінка старих датчиків)")
     ap.add_argument("--seed", type=int, default=1)
     ap.add_argument("--loop", action="store_true", help="повторювати сценарій безкінечно")
@@ -287,47 +308,69 @@ def main():
     ap.add_argument("--mqtt-user")
     ap.add_argument("--mqtt-password")
     ap.add_argument("--dry-run", action="store_true", help="друкувати події, не надсилаючи")
-    a = ap.parse_args()
+    return ap.parse_args(argv)
 
-    rng = random.Random(a.seed)
-    if a.url.startswith("https://"):   # сертифікат і ім'я хоста перевіряються завжди; режиму «не перевіряти» немає
-        try:
-            HTTPS_CONTEXT = tls_context(a.ca)
-        except (OSError, ssl.SSLError) as e:
-            sys.exit(f"Не вдалося прочитати CA «{a.ca}»: {e}")
-    if a.dashboard_user and not a.dry_run:
-        password = os.environ.get("DRONEWATCH_DASHBOARD_PASSWORD")
-        if not password:
-            sys.exit("Для --dashboard-user потрібна змінна DRONEWATCH_DASHBOARD_PASSWORD (пароль не береться з аргументів)")
-        try:
-            http(a.url + "/api/login", {"username": a.dashboard_user, "password": password})
-        except urllib.error.HTTPError as e:
-            sys.exit(f"Вхід у дашборд не вдався: HTTP {e.code}" + (" (хибний логін або пароль)" if e.code == 401 else ""))
-        except (urllib.error.URLError, OSError) as e:
-            sys.exit(f"Сервіс недоступний ({a.url}): {e}")
+
+def configure_https(a: argparse.Namespace) -> None:
+    """Контекст TLS для https://-адреси: сертифікат і ім'я хоста перевіряються завжди, режиму «не перевіряти» немає."""
+    global HTTPS_CONTEXT
+    if not a.url.startswith("https://"):
+        return
     try:
-        sensors = http(a.url + "/api/config")["sensors"]
+        HTTPS_CONTEXT = tls_context(a.ca)
+    except (OSError, ssl.SSLError) as e:
+        sys.exit(f"Не вдалося прочитати CA «{a.ca}»: {e}")
+
+
+def dashboard_login(a: argparse.Namespace) -> None:
+    if not a.dashboard_user or a.dry_run:
+        return
+    password = os.environ.get("DRONEWATCH_DASHBOARD_PASSWORD")
+    if not password:
+        sys.exit("Для --dashboard-user потрібна змінна DRONEWATCH_DASHBOARD_PASSWORD (пароль не береться з аргументів)")
+    try:
+        http(a.url + "/api/login", {"username": a.dashboard_user, "password": password})
+    except urllib.error.HTTPError as e:
+        sys.exit(f"Вхід у дашборд не вдався: HTTP {e.code}" + (" (хибний логін або пароль)" if e.code == 401 else ""))
+    except (urllib.error.URLError, OSError) as e:
+        sys.exit(f"Сервіс недоступний ({a.url}): {e}")
+
+
+def connection_hint(url: str, e: OSError) -> str:
+    """Підказка, що робити, коли сервіс недоступний: найтиповіші помилки схеми (http/https) і входу."""
+    if isinstance(e, urllib.error.HTTPError) and e.code == 401:
+        return "\nСервіс вимагає вхід у дашборд: --dashboard-user ІМ'Я і змінна DRONEWATCH_DASHBOARD_PASSWORD"
+    if url.startswith("https://") and "WRONG_VERSION_NUMBER" in str(e):
+        return "\nСхоже, сервіс слухає відкритий HTTP (режим розробки): --url http://..."
+    if url.startswith("http://") and "Connection" in type(getattr(e, "reason", e)).__name__:
+        return "\nЯкщо сервіс працює по HTTPS: --url https://... --ca CA.PEM"
+    return ""
+
+
+def fetch_sensors(a: argparse.Namespace) -> list[SensorInfo]:
+    """Датчики з GET /api/config; без сервера лише з --dry-run беремо вбудовані."""
+    try:
+        sensors: list[SensorInfo] = http(a.url + "/api/config")["sensors"]
         print(f"Підключено до {a.url}, датчиків: {[s['id'] for s in sensors]}")
+        return sensors
     except (urllib.error.URLError, OSError) as e:
         if not a.dry_run:
-            hint = ""
-            if isinstance(e, urllib.error.HTTPError) and e.code == 401:
-                hint = "\nСервіс вимагає вхід у дашборд: --dashboard-user ІМ'Я і змінна DRONEWATCH_DASHBOARD_PASSWORD"
-            elif a.url.startswith("https://") and "WRONG_VERSION_NUMBER" in str(e):
-                hint = "\nСхоже, сервіс слухає відкритий HTTP (режим розробки): --url http://..."
-            elif a.url.startswith("http://") and "Connection" in type(getattr(e, "reason", e)).__name__:
-                hint = "\nЯкщо сервіс працює по HTTPS: --url https://... --ca CA.PEM"
-            sys.exit(f"Сервіс недоступний ({a.url}): {e}{hint}\nЗапустіть його або використайте --dry-run.")
-        sensors = FALLBACK_SENSORS
+            sys.exit(f"Сервіс недоступний ({a.url}): {e}{connection_hint(a.url, e)}\nЗапустіть його або використайте --dry-run.")
         print("Сервіс недоступний, використовую вбудовані датчики (dry-run).")
-    if a.only:
-        keep = set(a.only.split(","))
-        unknown = keep - {s["id"] for s in sensors}
-        if unknown:
-            sys.exit(f"Невідомі датчики в --only: {sorted(unknown)}")
-        sensors = [s for s in sensors if s["id"] in keep]
-    bias = parse_bias(a.bias)
-    keys = parse_keys(a.key, os.environ.get("DRONEWATCH_KEYS"))
+        return FALLBACK_SENSORS
+
+
+def select_sensors(sensors: list[SensorInfo], only: str | None) -> list[SensorInfo]:
+    if not only:
+        return sensors
+    keep = set(only.split(","))
+    unknown = keep - {s["id"] for s in sensors}
+    if unknown:
+        sys.exit(f"Невідомі датчики в --only: {sorted(unknown)}")
+    return [s for s in sensors if s["id"] in keep]
+
+
+def warn_about_keys(a: argparse.Namespace, keys: dict[str, str], sensors: list[SensorInfo]) -> None:
     if keys and a.url.startswith("http://") and not a.dry_run:
         print("Увага: сервіс по відкритому HTTP, ключі датчиків (X-API-Key) ідуть відкритим текстом (https://... і --ca CA.PEM)")
     unknown_keys = set(keys) - {s["id"] for s in sensors}
@@ -336,84 +379,129 @@ def main():
     if not keys and not a.dry_run:
         print("Увага: ключів датчиків не задано; сервіс у live-режимі з автентифікацією відхилить усі події "
               "(--key ДАТЧИК=КЛЮЧ або DRONEWATCH_KEYS)")
-    pubs = {}   # id датчика -> MQTT-з'єднання
-    if a.mqtt and not a.dry_run:
-        host, _, port = a.mqtt.partition(":")
-        port = int(port or 1883)
-        try:
-            tls = tls_context(a.mqtt_ca) if (a.mqtt_ca or a.mqtt_tls) else None
-        except (OSError, ssl.SSLError) as e:
-            sys.exit(f"Не вдалося прочитати CA «{a.mqtt_ca}»: {e}")
-        if not tls and (keys or a.mqtt_user):
-            print("Увага: MQTT без TLS, ключі й паролі йдуть відкритим текстом (--mqtt-ca CA.PEM або --mqtt-tls)")
-        try:
-            if a.mqtt_user:   # один спільний логін на всіх (шлюз), як раніше
-                shared = MqttPublisher(host, port, a.mqtt_user, a.mqtt_password, tls=tls)
-                pubs = {s["id"]: shared for s in sensors}
-            else:             # брокер з ACL: кожен датчик це окремий користувач (ім'я = id датчика, пароль = його ключ)
-                for s in sensors:
-                    k = keys.get(s["id"])
-                    pubs[s["id"]] = MqttPublisher(host, port, s["id"] if k else None, k,
-                                                  client_id=s["id"] if k else "emulator-" + s["id"], tls=tls)
-        except OSError as e:
-            sys.exit(f"MQTT-брокер недоступний ({a.mqtt}): {e}")
-        print(f"Події йдуть у MQTT {a.mqtt}{' (TLS)' if tls else ''}, топіки {a.topic}/<sensor_id>")
 
-    while True:
-        targets = SCENARIOS[a.scenario](rng, a.count)
-        end = a.duration or max(t.wp[-1][0] for t in targets)
-        print(f"Сценарій «{a.scenario}»: цілей {len(targets)}, {end:.0f} с")
-        t0, sent, rejected, last_report = time.time(), 0, 0, 0.0
-        while (el := time.time() - t0) <= end:
-            events = []
+
+def open_publishers(a: argparse.Namespace, sensors: list[SensorInfo], keys: dict[str, str]) -> dict[str, MqttPublisher]:
+    """MQTT-з'єднання по датчиках (id -> з'єднання); порожньо, якщо --mqtt не задано чи це dry-run."""
+    if not a.mqtt or a.dry_run:
+        return {}
+    host, _, port_text = a.mqtt.partition(":")
+    port = int(port_text or 1883)
+    try:
+        tls = tls_context(a.mqtt_ca) if (a.mqtt_ca or a.mqtt_tls) else None
+    except (OSError, ssl.SSLError) as e:
+        sys.exit(f"Не вдалося прочитати CA «{a.mqtt_ca}»: {e}")
+    if not tls and (keys or a.mqtt_user):
+        print("Увага: MQTT без TLS, ключі й паролі йдуть відкритим текстом (--mqtt-ca CA.PEM або --mqtt-tls)")
+    pubs: dict[str, MqttPublisher] = {}
+    try:
+        if a.mqtt_user:   # один спільний логін на всіх (шлюз), як раніше
+            shared = MqttPublisher(host, port, a.mqtt_user, a.mqtt_password, tls=tls)
+            pubs = {s["id"]: shared for s in sensors}
+        else:             # брокер з ACL: кожен датчик це окремий користувач (ім'я = id датчика, пароль = його ключ)
             for s in sensors:
-                noise = DEFAULT_NOISE[s["label"]]
-                for tg in targets:
-                    if not tg.active(el):
-                        continue
-                    p = tg.pos(el)
-                    if math.hypot(p[0] - s["pos"][0], p[1] - s["pos"][1]) > s["max_range"] or rng.random() > a.pd:
-                        continue
-                    events.append({"sensor_id": s["id"], "ts": time.time(), **measure(rng, s, p, bias, noise)})
-                for _ in range(poisson(rng, a.clutter)):
-                    events.append({"sensor_id": s["id"], "ts": time.time(), **clutter(rng, s)})
-            rng.shuffle(events)
-            if not a.no_heartbeat:
-                events += [{"sensor_id": s["id"], "heartbeat": True} for s in sensors]
-            if a.dry_run:
-                for e in events:
-                    print(json.dumps(e, ensure_ascii=False))
-            elif events:
-                try:
-                    if pubs:
-                        for s in sensors:  # одна публікація на датчик за скан (масив подій)
-                            batch = [e for e in events if e["sensor_id"] == s["id"]]
-                            if batch:   # ключ додаємо лише в момент відправки: у dry-run і виводі його немає
-                                k = keys.get(s["id"])
-                                pubs[s["id"]].publish(f"{a.topic}/{s['id']}", [{**e, "key": k} for e in batch] if k else batch)
-                        sent += len(events)
-                    else:
-                        for s in sensors:   # ключ належить одному датчику, тож окремий запит на кожен
-                            batch = [e for e in events if e["sensor_id"] == s["id"]]
-                            if batch:
-                                r = http(a.url + "/api/events", batch, key=keys.get(s["id"]))
-                                sent += r["accepted"]
-                                rejected += r["rejected"]
-                except urllib.error.HTTPError as e:
-                    if e.code == 401:
-                        sys.exit("Сервіс відхилив ключ датчика (401). Перевірте --key / DRONEWATCH_KEYS і key_sha256 у конфігу сервісу.")
-                    print(f"  помилка відправки: {e}")
-                except (urllib.error.URLError, OSError) as e:
-                    print(f"  помилка відправки: {e}")
-            if not a.dry_run and el - last_report >= 10:
-                last_report = el
-                try:
-                    st = http(a.url + "/api/state")
-                    print(f"  t={el:5.0f}с  надіслано={sent}  відхилено={rejected}  треків у сервісі={len([t for t in st['tracks'] if not t['coasting']])}")
-                except (urllib.error.URLError, OSError):
-                    pass
-            time.sleep(max(0.0, a.period - (time.time() - t0 - el)))
-        print(f"Сценарій завершено: надіслано {sent}, відхилено {rejected}")
+                k = keys.get(s["id"])
+                pubs[s["id"]] = MqttPublisher(host, port, s["id"] if k else None, k,
+                                              client_id=s["id"] if k else "emulator-" + s["id"], tls=tls)
+    except OSError as e:
+        sys.exit(f"MQTT-брокер недоступний ({a.mqtt}): {e}")
+    print(f"Події йдуть у MQTT {a.mqtt}{' (TLS)' if tls else ''}, топіки {a.topic}/<sensor_id>")
+    return pubs
+
+
+@dataclass(slots=True)
+class Totals:
+    sent: int = 0
+    rejected: int = 0
+
+
+def scan_events(a: argparse.Namespace, rng: random.Random, sensors: list[SensorInfo], targets: list[Target], bias: Bias,
+                el: float) -> list[Event]:
+    """Усі події одного скану: вимірювання цілей і хибні детекції (перемішані), далі heartbeat кожного датчика."""
+    events: list[Event] = []
+    for s in sensors:
+        noise = DEFAULT_NOISE[s["label"]]
+        for tg in targets:
+            if not tg.active(el):
+                continue
+            p = tg.pos(el)
+            if math.hypot(p[0] - s["pos"][0], p[1] - s["pos"][1]) > s["max_range"] or rng.random() > a.pd:
+                continue
+            events.append({"sensor_id": s["id"], "ts": time.time(), **measure(rng, s, p, bias, noise)})
+        for _ in range(poisson(rng, a.clutter)):
+            events.append({"sensor_id": s["id"], "ts": time.time(), **clutter(rng, s)})
+    rng.shuffle(events)
+    if not a.no_heartbeat:
+        events += [{"sensor_id": s["id"], "heartbeat": True} for s in sensors]
+    return events
+
+
+def send_scan(a: argparse.Namespace, sensors: list[SensorInfo], keys: dict[str, str], pubs: dict[str, MqttPublisher],
+              events: list[Event], totals: Totals) -> None:
+    """Надсилає події скану по датчиках: ключ належить одному датчику, тож окрема публікація чи запит на кожен.
+    Ключ додається лише в момент відправки, тому в dry-run і виводі його немає."""
+    try:
+        for s in sensors:
+            batch = [e for e in events if e["sensor_id"] == s["id"]]
+            if not batch:
+                continue
+            key = keys.get(s["id"])
+            if pubs:
+                pubs[s["id"]].publish(f"{a.topic}/{s['id']}", [{**e, "key": key} for e in batch] if key else batch)
+                totals.sent += len(batch)
+            else:
+                r = http(a.url + "/api/events", batch, key=key)
+                totals.sent += r["accepted"]
+                totals.rejected += r["rejected"]
+    except urllib.error.HTTPError as e:
+        if e.code == 401:
+            sys.exit("Сервіс відхилив ключ датчика (401). Перевірте --key / DRONEWATCH_KEYS і key_sha256 у конфігу сервісу.")
+        print(f"  помилка відправки: {e}")
+    except (urllib.error.URLError, OSError) as e:
+        print(f"  помилка відправки: {e}")
+
+
+def report_progress(a: argparse.Namespace, el: float, totals: Totals) -> None:
+    try:
+        st = http(a.url + "/api/state")
+        live = len([t for t in st["tracks"] if not t["coasting"]])
+        print(f"  t={el:5.0f}с  надіслано={totals.sent}  відхилено={totals.rejected}  треків у сервісі={live}")
+    except (urllib.error.URLError, OSError):
+        pass
+
+
+def run_scenario(a: argparse.Namespace, rng: random.Random, sensors: list[SensorInfo], keys: dict[str, str],
+                 pubs: dict[str, MqttPublisher], bias: Bias) -> None:
+    targets = SCENARIOS[a.scenario](rng, a.count)
+    end = a.duration or max(t.wp[-1][0] for t in targets)
+    print(f"Сценарій «{a.scenario}»: цілей {len(targets)}, {end:.0f} с")
+    t0, totals, last_report = time.time(), Totals(), 0.0
+    while (el := time.time() - t0) <= end:
+        events = scan_events(a, rng, sensors, targets, bias, el)
+        if a.dry_run:
+            for e in events:
+                print(json.dumps(e, ensure_ascii=False))
+        elif events:
+            send_scan(a, sensors, keys, pubs, events, totals)
+        if not a.dry_run and el - last_report >= 10:
+            last_report = el
+            report_progress(a, el, totals)
+        time.sleep(max(0.0, a.period - (time.time() - t0 - el)))
+    print(f"Сценарій завершено: надіслано {totals.sent}, відхилено {totals.rejected}")
+
+
+def main() -> None:
+    a = parse_args()
+    rng = random.Random(a.seed)
+    configure_https(a)
+    dashboard_login(a)
+    sensors = select_sensors(fetch_sensors(a), a.only)
+    bias = parse_bias(a.bias)
+    keys = parse_keys(a.key, os.environ.get("DRONEWATCH_KEYS"))
+    warn_about_keys(a, keys, sensors)
+    pubs = open_publishers(a, sensors, keys)
+    while True:
+        run_scenario(a, rng, sensors, keys, pubs, bias)
         if not a.loop:
             break
     for conn in {id(c): c for c in pubs.values()}.values():

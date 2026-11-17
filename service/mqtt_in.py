@@ -7,14 +7,20 @@ import json
 import logging
 import ssl
 import time
+from typing import Any
 
 import paho.mqtt.client as mqtt
+from paho.mqtt.client import ConnectFlags, DisconnectFlags, MQTTMessage
+from paho.mqtt.properties import Properties
+from paho.mqtt.reasoncodes import ReasonCode
+
+from engine import Engine
 
 DEFAULT_TOPIC = "dronewatch/events/#"
 log = logging.getLogger("dronewatch.mqtt")
 
 
-def tls_context(ca_cert=None):
+def tls_context(ca_cert: str | None = None) -> ssl.SSLContext:
     """Контекст TLS для клієнта: сертифікат брокера й ім'я хоста перевіряються обов'язково (CERT_REQUIRED, check_hostname),
     не нижче TLS 1.2. З ca_cert довіряємо ЛИШЕ цьому CA (а не всім системним), без нього системному сховищу.
     Перевірку не вимкнути: небезпечного режиму «не перевіряти сертифікат» тут свідомо немає."""
@@ -24,15 +30,16 @@ def tls_context(ca_cert=None):
 
 
 class MqttIngest:
-    def __init__(self, engine, host, port=1883, topic=DEFAULT_TOPIC, username=None, password=None, tls=False, ca_cert=None):
+    def __init__(self, engine: Engine, host: str, port: int = 1883, topic: str = DEFAULT_TOPIC, username: str | None = None,
+                 password: str | None = None, tls: bool = False, ca_cert: str | None = None) -> None:
         """tls або ca_cert вмикають TLS (ca_cert: довіряти лише цьому CA). Без TLS пароль і ключі ходять відкритим текстом."""
         self.engine, self.host, self.port, self.topic = engine, host, port, topic
         self.tls = bool(tls or ca_cert)
         self.connected = False
         self.subscribed = False
-        self.since = None           # коли з'єднання стало робочим (monotonic)
-        self.last_message = None    # коли востаннє прийшло повідомлення (monotonic)
-        self._last_error = None   # щоб цикл перепідключення (кожні 1-15 с) не засипав лог однаковою помилкою
+        self.since: float | None = None           # коли з'єднання стало робочим (monotonic)
+        self.last_message: float | None = None    # коли востаннє прийшло повідомлення (monotonic)
+        self._last_error: tuple[str, ...] | None = None   # щоб цикл перепідключення (кожні 1-15 с) не засипав лог однаковою помилкою
         # З use_username_as_clientid у брокері це ім'я однаково буде замінено на логін, але без нього воно мусить бути стабільним
         self.client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2, client_id=username or "dronewatch-service")
         if username:
@@ -49,21 +56,22 @@ class MqttIngest:
         self.client.on_subscribe = self._on_subscribe
         self.client.on_message = self._on_message
 
-    def start(self):
+    def start(self) -> None:
         # connect_async + loop_start: сервіс стартує, навіть якщо брокер ще не піднявся, і сам перепідключається
         self.client.connect_async(self.host, self.port, keepalive=30)
         self.client.loop_start()
 
-    def stop(self):
+    def stop(self) -> None:
         self.client.loop_stop()
         self.client.disconnect()
 
-    def _report(self, key, message, *args):
+    def _report(self, key: tuple[str, ...], message: str, *args: object) -> None:
         if key != self._last_error:
             self._last_error = key
             log.error(message, *args)
 
-    def _on_connect(self, client, userdata, flags, reason_code, properties):
+    def _on_connect(self, client: mqtt.Client, userdata: Any, flags: ConnectFlags, reason_code: ReasonCode,
+                    properties: Properties | None) -> None:
         self.connected = not reason_code.is_failure
         self.subscribed = False
         if self.connected:
@@ -74,23 +82,25 @@ class MqttIngest:
             self._report(("connect", str(reason_code)), "MQTT: брокер %s:%s відхилив підключення (%s). Перевірте MQTT_USER і MQTT_PASSWORD",
                          self.host, self.port, reason_code)
 
-    def _on_connect_fail(self, client, userdata):
+    def _on_connect_fail(self, client: mqtt.Client, userdata: Any) -> None:
         # TCP/TLS-рукостискання не вдалося до будь-якої відповіді брокера. paho не передає причину, тож називаємо найімовірніші
         hint = ("Для TLS перевірте, що ca_cert це CA, яким підписано сертифікат брокера, і що ім'я хоста збігається з SAN сертифіката"
                 if self.tls else "Перевірте адресу й порт брокера")
         self._report(("connect_fail",), "MQTT: не вдалося зʼєднатися з %s:%s. %s", self.host, self.port, hint)
 
-    def _on_subscribe(self, client, userdata, mid, reason_codes, properties):
+    def _on_subscribe(self, client: mqtt.Client, userdata: Any, mid: int, reason_codes: list[ReasonCode],
+                      properties: Properties | None) -> None:
         ok = all(not rc.is_failure for rc in reason_codes)
         self.subscribed = ok
         if not ok:   # не всі брокери так роблять: Mosquitto приймає й заборонену ACL підписку мовчки, див. status()["idle_s"]
-            self._report(("subscribe",), "MQTT: брокер відмовив у підписці на %s (%s). Перевірте право read цього користувача в ACL брокера",
-                         self.topic, [str(rc) for rc in reason_codes])
+            self._report(("subscribe",), "MQTT: брокер відмовив у підписці на %s (%s). "
+                         "Перевірте право read цього користувача в ACL брокера", self.topic, [str(rc) for rc in reason_codes])
 
-    def _on_disconnect(self, client, userdata, flags, reason_code, properties):
+    def _on_disconnect(self, client: mqtt.Client, userdata: Any, flags: DisconnectFlags, reason_code: ReasonCode,
+                       properties: Properties | None) -> None:
         self.connected = self.subscribed = False
 
-    def _on_message(self, client, userdata, msg):
+    def _on_message(self, client: mqtt.Client, userdata: Any, msg: MQTTMessage) -> None:
         self.last_message = time.monotonic()
         try:
             data = json.loads(msg.payload)
@@ -107,7 +117,7 @@ class MqttIngest:
         if own:
             self.engine.ingest(own)
 
-    def status(self):
+    def status(self) -> dict[str, Any]:
         """connected: є з'єднання І прийнята підписка. idle_s: секунд без жодного повідомлення (None, якщо не підключені).
         Датчики шлють heartbeat щоскану, тож велике idle_s за робочого з'єднання майже напевно означає хибну ACL або
         топіки (Mosquitto приймає заборонену підписку мовчки й просто нічого не доставляє) чи те, що всі датчики мовчать."""

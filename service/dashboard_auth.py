@@ -54,7 +54,8 @@ def parse_hash(encoded: str) -> ParsedHash:
             parsed = ParsedHash(int(n), int(r), int(p), base64.b64decode(salt, validate=True), base64.b64decode(digest, validate=True))
         case _:
             raise ValueError("очікується scrypt$N$r$p$сіль$хеш")
-    if not (2 <= parsed.n <= _LIMITS["n"] and parsed.n & (parsed.n - 1) == 0 and 1 <= parsed.r <= _LIMITS["r"] and 1 <= parsed.p <= _LIMITS["p"]):
+    n_ok = 2 <= parsed.n <= _LIMITS["n"] and parsed.n & (parsed.n - 1) == 0   # степінь двійки
+    if not (n_ok and 1 <= parsed.r <= _LIMITS["r"] and 1 <= parsed.p <= _LIMITS["p"]):
         raise ValueError("параметри scrypt поза допустимими межами (N степінь двійки)")
     if len(parsed.salt) < 8 or len(parsed.digest) < 16:
         raise ValueError("сіль чи хеш закороткі")

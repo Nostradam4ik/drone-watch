@@ -3,6 +3,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -58,31 +59,33 @@ def test_hash_parsing_rejects_garbage_and_resource_bombs():
         raise AssertionError(f"параметри {(n, r, p)} мали бути відхилені")
 
 
-def test_overlong_password_is_rejected_before_hashing(monkeypatch=None):
-    calls = []
+def _count_scrypt_calls(monkeypatch) -> list[int]:
+    "Підміняє дороге хешування лічильником викликів (результат лишається справжнім)."
+    calls: list[int] = []
     original = da._scrypt
-    da._scrypt = lambda *a, **k: calls.append(1) or original(*a, **k)
-    try:
-        assert da.verify_password("x" * (da.MAX_PASSWORD_LEN + 1), FAST) is False
-        assert calls == [], "довгий пароль не має доходити до дорогого хешування"
-    finally:
-        da._scrypt = original
+
+    def counting(*args, **kwargs):
+        calls.append(1)
+        return original(*args, **kwargs)
+    monkeypatch.setattr(da, "_scrypt", counting)
+    return calls
 
 
-def test_unknown_user_costs_the_same_as_known_one():
+def test_overlong_password_is_rejected_before_hashing(monkeypatch):
+    calls = _count_scrypt_calls(monkeypatch)
+    assert da.verify_password("x" * (da.MAX_PASSWORD_LEN + 1), FAST) is False
+    assert calls == [], "довгий пароль не має доходити до дорогого хешування"
+
+
+def test_unknown_user_costs_the_same_as_known_one(monkeypatch):
     """Інакше за часом відповіді видно, які імена існують: хешуємо і для неіснуючого імені."""
     users = Users({"alice": FAST})
-    calls = []
-    original = da._scrypt
-    da._scrypt = lambda *a, **k: calls.append(1) or original(*a, **k)
-    try:
-        assert users.authenticate("alice", PASSWORD) is True
-        known = len(calls)
-        assert users.authenticate("alice", "wrong-password-123") is False
-        assert users.authenticate("nobody", PASSWORD) is False, "навіть правильний пароль іншого користувача не годиться"
-        assert len(calls) == known * 3, "кожна спроба, відома чи ні, має робити однакову дорогу перевірку"
-    finally:
-        da._scrypt = original
+    calls = _count_scrypt_calls(monkeypatch)
+    assert users.authenticate("alice", PASSWORD) is True
+    known = len(calls)
+    assert users.authenticate("alice", "wrong-password-123") is False
+    assert users.authenticate("nobody", PASSWORD) is False, "навіть правильний пароль іншого користувача не годиться"
+    assert len(calls) == known * 3, "кожна спроба, відома чи ні, має робити однакову дорогу перевірку"
 
 
 # ---------- сесії й ліміт ----------
@@ -260,8 +263,7 @@ def test_session_expires():
 
 
 def test_expired_session_closes_its_websocket():
-    made = _client(ttl=60)
-    c, m, clock = made
+    _, m, clock = _client(ttl=60)
 
     class FakeWs:
         def __init__(self):
@@ -426,12 +428,8 @@ def test_dashboard_config_is_fail_closed():
         pytest.skip(f"залежності відсутні: {e}")
 
     def rejects(dashboard, fragment):
-        try:
+        with pytest.raises(SystemExit, match=re.escape(fragment)):
             _load(LIVE.format(dashboard=dashboard))
-        except SystemExit as e:
-            assert fragment in str(e), (fragment, str(e))
-            return
-        raise AssertionError(f"конфіг мав бути відхилений: {fragment}")
 
     rejects("", "немає жодного користувача дашборда")                                    # за замовчуванням required
     rejects("dashboard: {auth: required}", "немає жодного користувача дашборда")
@@ -499,20 +497,21 @@ def test_keygen_dashboard_user():
 
 # ---------- справжній HTTPS + емулятор ----------
 def test_real_https_login_cookie_and_emulator():
+    for module in ("cryptography", "uvicorn", "app"):
+        pytest.importorskip(module)
     try:
-        import app  # noqa: F401
-        import cryptography  # noqa: F401
-        import uvicorn
+        from websockets.exceptions import InvalidStatus
         from websockets.sync.client import connect
     except ImportError as e:
         pytest.skip(f"залежності відсутні: {e}")
     import urllib.error
     import urllib.request
 
-    import emulate
-    from dashboard_web import DashboardAccess
     from test_https import HttpsServer
     from test_tls import make_pki
+
+    import emulate
+    from dashboard_web import DashboardAccess
 
     with tempfile.TemporaryDirectory() as d:
         ca, crt, key = make_pki(d, names=("localhost", "127.0.0.1", "service"))
@@ -523,19 +522,13 @@ def test_real_https_login_cookie_and_emulator():
             ctx = emulate.tls_context(str(ca))
             emulate.HTTPS_CONTEXT = ctx
 
-            try:
+            with pytest.raises(urllib.error.HTTPError) as exc:
                 emulate.http(base + "/api/config")
-            except urllib.error.HTTPError as e:
-                assert e.code == 401
-            else:
-                raise AssertionError("без входу /api/config мав дати 401")
+            assert exc.value.code == 401, "без входу /api/config мав дати 401"
 
-            try:
+            with pytest.raises(urllib.error.HTTPError) as exc:
                 emulate.http(base + "/api/login", {"username": "alice", "password": "wrong-password-123"})
-            except urllib.error.HTTPError as e:
-                assert e.code == 401
-            else:
-                raise AssertionError("хибний пароль мав дати 401")
+            assert exc.value.code == 401, "хибний пароль мав дати 401"
 
             emulate.http(base + "/api/login", {"username": "alice", "password": PASSWORD})
             assert "sensors" in emulate.http(base + "/api/config"), "емулятор після входу читає конфіг"
@@ -546,11 +539,9 @@ def test_real_https_login_cookie_and_emulator():
             with connect(f"wss://127.0.0.1:{srv.port}/ws", ssl=ctx, open_timeout=5,
                          additional_headers={"Cookie": f"dw_session={cookies[0].value}"}) as ws:
                 ws.send("hi")
-            try:
-                with connect(f"wss://127.0.0.1:{srv.port}/ws", ssl=ctx, open_timeout=5):
-                    raise AssertionError("wss без cookie не мав відкритися")
-            except Exception as e:
-                assert "403" in str(e) or "rejected" in str(e).lower() or "InvalidStatus" in type(e).__name__, repr(e)
+            with pytest.raises(InvalidStatus) as exc, connect(f"wss://127.0.0.1:{srv.port}/ws", ssl=ctx, open_timeout=5):
+                pass
+            assert exc.value.response.status_code == 403, "wss без cookie має відхилятися"
         finally:
             emulate.HTTPS_CONTEXT = None
             srv.stop()

@@ -3,6 +3,7 @@
 Інтеграційні тести піднімають справжній сервіс (uvicorn) із реальним сертифікатом і ганяють проти нього справжні клієнти:
 емулятор, healthcheck.py і WebSocket. Потрібні cryptography, fastapi і uvicorn; без них відповідні тести пропускаються."""
 import os
+import re
 import socket
 import ssl
 import subprocess
@@ -48,13 +49,9 @@ class HttpsServer:
 
 
 def _deps():
-    try:
-        import app  # noqa: F401  (потребує fastapi, paho, yaml: ті самі залежності, що й у сервісу)
-        import cryptography  # noqa: F401
-        import uvicorn
-        return True
-    except ImportError as e:
-        pytest.skip(f"залежності відсутні: {e}")
+    for module in ("cryptography", "uvicorn", "app"):   # app потребує fastapi, paho, yaml: ті самі залежності, що й сервіс
+        pytest.importorskip(module)
+    return True
 
 
 def _wait(cond, timeout=5.0):
@@ -78,12 +75,8 @@ def test_launcher_refuses_to_start_without_tls():
         key.write_text("x")
 
         def refuses(env, fragment):
-            try:
+            with pytest.raises(SystemExit, match=re.escape(fragment)):
                 serve.settings(env)
-            except SystemExit as e:
-                assert fragment in str(e), (fragment, str(e))
-                return
-            raise AssertionError(f"мав відмовити: {env}")
 
         refuses({}, "HTTPS не налаштовано")                                                    # за замовчуванням: без TLS не стартуємо
         refuses({"ALLOW_INSECURE_HTTP": "0"}, "HTTPS не налаштовано")                          # лише рівно «1» вимикає захист
@@ -93,10 +86,10 @@ def test_launcher_refuses_to_start_without_tls():
         refuses({"TLS_CERT_FILE": str(crt), "TLS_KEY_FILE": str(Path(d, "немає.key"))}, "TLS_KEY_FILE")
         refuses({"TLS_CERT_FILE": str(Path(d, "немає.crt")), "TLS_KEY_FILE": str(key)}, "TLS_CERT_FILE")
 
-        host, port, kw = serve.settings({"TLS_CERT_FILE": str(crt), "TLS_KEY_FILE": str(key), "PORT": "9443", "HOST": "127.0.0.1"})
-        assert (host, port, kw) == ("127.0.0.1", 9443, {"ssl_certfile": str(crt), "ssl_keyfile": str(key)})
+        configured = serve.settings({"TLS_CERT_FILE": str(crt), "TLS_KEY_FILE": str(key), "PORT": "9443", "HOST": "127.0.0.1"})
+        assert configured == serve.ServerSettings("127.0.0.1", 9443, str(crt), str(key))
         # TLS задано разом із прапорцем відкритого режиму: перемагає TLS
-        assert serve.settings({"TLS_CERT_FILE": str(crt), "TLS_KEY_FILE": str(key), "ALLOW_INSECURE_HTTP": "1"})[2]["ssl_certfile"]
+        assert serve.settings({"TLS_CERT_FILE": str(crt), "TLS_KEY_FILE": str(key), "ALLOW_INSECURE_HTTP": "1"}).ssl_certfile == str(crt)
 
 
 def test_launcher_insecure_mode_is_explicit_and_loud():
@@ -108,7 +101,8 @@ def test_launcher_insecure_mode_is_explicit_and_loud():
     from contextlib import redirect_stderr
     err = io.StringIO()
     with redirect_stderr(err):
-        assert serve.settings({"ALLOW_INSECURE_HTTP": "1"})[2] == {}
+        insecure = serve.settings({"ALLOW_INSECURE_HTTP": "1"})
+        assert insecure.ssl_certfile is None and insecure.ssl_keyfile is None
     assert "УВАГА" in err.getvalue() and "відкритим текстом" in err.getvalue()
 
 
@@ -135,12 +129,9 @@ def test_https_api_dashboard_and_clients():
 
             # 2. сертифікат від недовіреного CA: відхиляється ще до відправки запиту з ключем
             emulate.HTTPS_CONTEXT = emulate.tls_context(str(other_ca))
-            try:
+            with pytest.raises(urllib.error.URLError) as exc:
                 emulate.http(base + "/api/events", [ev], key=KEYS["rf1"])
-            except urllib.error.URLError as e:
-                assert isinstance(e.reason, ssl.SSLCertVerificationError), e.reason
-            else:
-                raise AssertionError("недовірений CA мав бути відхилений")
+            assert isinstance(exc.value.reason, ssl.SSLCertVerificationError), "недовірений CA мав бути відхилений"
 
             # 3. відкритий HTTP на TLS-порт: запит із ключем не доходить до застосунку
             emulate.HTTPS_CONTEXT = emulate.tls_context(str(ca))
@@ -169,12 +160,10 @@ def test_https_api_dashboard_and_clients():
         srv2 = HttpsServer(wrong_crt, wrong_key)
         try:
             emulate.HTTPS_CONTEXT = emulate.tls_context(str(wrong_ca))
-            try:
+            with pytest.raises(urllib.error.URLError) as exc:
                 emulate.http(f"https://localhost:{srv2.port}/api/health")
-            except urllib.error.URLError as e:
-                assert isinstance(e.reason, ssl.SSLCertVerificationError) and "mismatch" in str(e.reason).lower(), e.reason
-            else:
-                raise AssertionError("ім'я поза SAN мало бути відхилене")
+            reason = exc.value.reason
+            assert isinstance(reason, ssl.SSLCertVerificationError) and "mismatch" in str(reason).lower(), "ім'я поза SAN мало бути відхилене"
         finally:
             emulate.HTTPS_CONTEXT = None
             srv2.stop()
@@ -193,7 +182,7 @@ def test_healthcheck_script_verifies_the_certificate():
             ok = run_check(TLS_CERT_FILE="x", TLS_CA_FILE=str(ca))
             assert ok.returncode == 0, ok.stderr
             bad = run_check(TLS_CERT_FILE="x", TLS_CA_FILE=str(other_ca))
-            assert bad.returncode == 1 and "SSLCertVerificationError" in bad.stderr or "URLError" in bad.stderr, bad.stderr
+            assert (bad.returncode == 1 and "SSLCertVerificationError" in bad.stderr) or "URLError" in bad.stderr, bad.stderr
             plain = run_check()   # без TLS_CERT_FILE іде по відкритому HTTP: на TLS-порту має не вийти
             assert plain.returncode == 1, "healthcheck по відкритому HTTP не мав «пройти» на TLS-порту"
             srv.app.scan_task = type("T", (), {"done": lambda self: True})()   # сервіс живий, але цикл сканів помер: /api/health дає 503
@@ -218,7 +207,10 @@ def test_demo_stack_serves_https_only():
     assert sv["service"]["depends_on"]["certs"]["condition"] == "service_completed_successfully"
 
     # ключ сервісу бачить лише сервіс (і генератор), ключ брокера лише брокер, емулятор не бачить жодного ключа
-    holders = lambda vol: {n for n, s in sv.items() if any(str(v).startswith(vol + ":") for v in s.get("volumes", []))}
+
+    def holders(vol):
+        return {n for n, s in sv.items() if any(str(v).startswith(vol + ":") for v in s.get("volumes", []))}
+
     assert holders("certs-http") == {"certs", "service"} and holders("certs-server") == {"certs", "mosquitto"}
     assert "certs-http" in compose["volumes"]
     assert all(str(v).endswith(":ro") for n in ("service",) for v in sv[n]["volumes"] if str(v).startswith(("certs-http:", "certs-ca:")))

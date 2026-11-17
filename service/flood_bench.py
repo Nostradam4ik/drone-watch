@@ -15,20 +15,27 @@
 Код виходу 1, якщо найгірший скан довший за --budget (за замовчуванням scan_dt): зручно для перевірки на цільовому залізі.
 """
 import argparse
+import io
 import random
 import sys
 import time
+from typing import TYPE_CHECKING, Any
 
 from engine import Engine, Zone
+from models import Sensor
 from sim import default_sensors
 
-sys.stdout.reconfigure(encoding="utf-8")
+if TYPE_CHECKING:   # лише для типів: сам config (pyyaml, pydantic) бенчмарк без --config не вантажить
+    import config
+
+if isinstance(sys.stdout, io.TextIOWrapper):   # у тестах (pytest) stdout підмінено і reconfigure немає
+    sys.stdout.reconfigure(encoding="utf-8")
 
 WARMUP = 4   # перші скани дешевші: хибні треки ще накопичуються до стелі, міряємо сталий режим
 SWEEP = [(50, 60), (100, 120), (150, 200), (200, 300), (300, 500)]   # (подій на датчик, треків)
 
 
-def flood_events(rng, sensors, per_sensor):
+def flood_events(rng: random.Random, sensors: list[Sensor], per_sensor: int) -> list[dict[str, Any]]:
     events = []
     for s in sensors:
         for _ in range(per_sensor):
@@ -39,7 +46,8 @@ def flood_events(rng, sensors, per_sensor):
     return events
 
 
-def run(sensors, max_events, max_tracks, flood, scans, verbose=False, seed=1):
+def run(sensors: list[Sensor], max_events: int, max_tracks: int, flood: int, scans: int, verbose: bool = False,
+        seed: int = 1) -> tuple[float, float, dict[str, int]]:
     """Повертає (середній скан сталого режиму, максимальний скан, stats рушія)."""
     rng = random.Random(seed)
     eng = Engine(sensors, [Zone("z", 600, "WARNING")], max_events_per_sensor=max_events, max_tracks=max_tracks)
@@ -55,14 +63,14 @@ def run(sensors, max_events, max_tracks, flood, scans, verbose=False, seed=1):
     return sum(steady) / len(steady), max(steady), eng.stats
 
 
-def load_config(path):
+def load_config(path: str) -> "tuple[config.Config, list[Sensor]]":
     import config  # лише тут: рушію й бенчмарку без --config pyyaml/pydantic не потрібні
     cfg = config.load(path)
     sensors = config.build_sensors(cfg) if cfg.sensors else default_sensors()
     return cfg, sensors
 
 
-def main():
+def main() -> int:
     ap = argparse.ArgumentParser(description="Скан під потопом подій", epilog=__doc__.split("Приклади")[1],
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--config", help="бойовий YAML: стелі, датчики й scan_dt беруться звідти")

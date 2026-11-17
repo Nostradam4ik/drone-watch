@@ -1,6 +1,7 @@
 """Автентифікація датчиків ключем. Запуск: python test_auth.py (або pytest). Частина тестів потребує залежностей сервісу."""
 import json
 import logging
+import re
 import subprocess
 import sys
 import tempfile
@@ -86,12 +87,10 @@ def test_unauthorized_flood_is_cheap_and_does_not_fill_buffer():
 
 
 def _client():
-    try:
-        import app
-        import test_health
-        from fastapi.testclient import TestClient
-    except ImportError as e:
-        pytest.skip(f"залежності відсутні: {e}")
+    pytest.importorskip("app")
+    pytest.importorskip("fastapi.testclient")
+    import test_health
+    from fastapi.testclient import TestClient
     m = test_health._app_with_engine()
     m.engine.auth = make_auth()
     return TestClient(m.app, raise_server_exceptions=False), m
@@ -99,8 +98,12 @@ def _client():
 
 def test_http_requires_key_per_sensor():
     c, m = _client()
-    ev = lambda sid, **kw: {k: v for k, v in det(sid, **kw).items() if k != "key"}   # у тілі ключа немає: він у заголовку
-    h = lambda key: {"X-API-Key": key} if key else {}
+
+    def ev(sid, **kw):   # у тілі ключа немає: він у заголовку
+        return {k: v for k, v in det(sid, **kw).items() if k != "key"}
+
+    def h(key):
+        return {"X-API-Key": key} if key else {}
 
     r = c.post("/api/events", json=[ev("rf1")])
     assert r.status_code == 401 and r.headers.get("www-authenticate") == "ApiKey" and "ключ" in r.json()["detail"]
@@ -117,13 +120,14 @@ def test_http_requires_key_per_sensor():
     assert hb.status_code == 200 and hb.json()["accepted"] == 1
     assert c.post("/api/events", json=[]).status_code == 200, "порожній пакет не є помилкою автентифікації"
 
-    smuggled = ev("rf1"); smuggled["key"] = KEYS["rf1"]      # ключ у тілі ігнорується: лише заголовок
+    smuggled = ev("rf1")
+    smuggled["key"] = KEYS["rf1"]      # ключ у тілі ігнорується: лише заголовок
     assert c.post("/api/events", json=[smuggled]).status_code == 401
     assert m.engine.stats["events_unauthorized"] == 5   # без ключа, хибний, чужий, ac1 у змішаному, ключ у тілі
 
 
 def test_keys_never_appear_in_responses_or_logs():
-    c, m = _client()
+    c, _ = _client()
     records = []
     handler = logging.Handler()
     handler.emit = records.append
@@ -148,8 +152,10 @@ def test_mqtt_events_carry_key_in_payload():
         pytest.skip(f"залежності відсутні: {e}")
     eng = make_engine()
     ing = MqttIngest(eng, "localhost")
-    msg = lambda payload, topic="dronewatch/events/rf1": types.SimpleNamespace(
-        payload=payload if isinstance(payload, bytes) else json.dumps(payload).encode(), topic=topic)
+
+    def msg(payload, topic="dronewatch/events/rf1"):
+        return types.SimpleNamespace(payload=payload if isinstance(payload, bytes) else json.dumps(payload).encode(), topic=topic)
+
     ing._on_message(None, None, msg([det("rf1", KEYS["rf1"]), det("rf1")]))
     assert eng.stats["events_in"] == 1 and eng.stats["events_unauthorized"] == 1
     ing._on_message(None, None, msg(b'[{"sensor_id":"rf1","key":"\\ud800","heartbeat":true}]'))   # самотній суррогат у JSON
@@ -181,12 +187,8 @@ def test_config_is_fail_closed():
         pytest.skip(f"залежності відсутні: {e}")
 
     def rejects(text, fragment):
-        try:
+        with pytest.raises(SystemExit, match=re.escape(fragment)):
             _load_cfg(text)
-        except SystemExit as e:
-            assert fragment in str(e), (fragment, str(e))
-            return
-        raise AssertionError(f"конфіг мав бути відхилений ({fragment})")
 
     good = hash_key("k")
     rejects(LIVE.format(auth="", key=""), "key_sha256")                                         # за замовчуванням required
@@ -219,8 +221,8 @@ def test_keygen_roundtrip():
     out = subprocess.run([sys.executable, str(HERE / "keygen.py"), "radar1", "rf1"], capture_output=True, text=True, encoding="utf-8",
                          check=True).stdout
     lines = out.splitlines()
-    keys = [l.split(": ")[-1] for l in lines if "ключ датчика" in l]
-    hashes = [l.split('"')[1] for l in lines if "key_sha256" in l]
+    keys = [line.split(": ")[-1] for line in lines if "ключ датчика" in line]
+    hashes = [line.split('"')[1] for line in lines if "key_sha256" in line]
     assert len(keys) == len(hashes) == 2 and keys[0] != keys[1] and all(len(k) >= 40 for k in keys), "ключі випадкові й достатньо довгі"
     a = SensorAuth({"radar1": hashes[0], "rf1": hashes[1]})
     assert a.verify("radar1", keys[0]) and a.verify("rf1", keys[1]) and not a.verify("radar1", keys[1])
@@ -233,12 +235,9 @@ def test_emulator_key_parsing_never_echoes_a_key():
     assert emulate.parse_keys(["radar1=A"], "rf1=B,ac1=C") == {"rf1": "B", "ac1": "C", "radar1": "A"}
     assert emulate.parse_keys(["radar1=NEW"], "radar1=OLD") == {"radar1": "NEW"}, "прапорець перекриває оточення"
     for bad in (["SECRET-KEY-WITHOUT-NAME"], ["=SECRET"], ["radar1="]):
-        try:
+        with pytest.raises(SystemExit) as exc:
             emulate.parse_keys(bad, "")
-        except SystemExit as e:
-            assert "SECRET" not in str(e.code)
-        else:
-            raise AssertionError(bad)
+        assert "SECRET" not in str(exc.value.code)
 
 
 class _RC:
@@ -259,7 +258,10 @@ def test_mqtt_topic_must_match_sensor_id():
         pytest.skip(f"залежності відсутні: {e}")
     eng = make_engine()
     ing = MqttIngest(eng, "localhost")
-    msg = lambda payload, topic: types.SimpleNamespace(payload=json.dumps(payload).encode(), topic=topic)
+
+    def msg(payload, topic):
+        return types.SimpleNamespace(payload=json.dumps(payload).encode(), topic=topic)
+
     ing._on_message(None, None, msg([det("rf1", KEYS["rf1"])], "dronewatch/events/rf1"))
     assert eng.stats["events_in"] == 1 and eng.stats["events_unauthorized"] == 0
     # rf1 публікує подію radar1 (з вкраденим ключем radar1) у свій топік: рушій навіть не бачить її
@@ -344,13 +346,16 @@ def test_mosquitto_hash_format_and_cli():
     line = keygen.mosquitto_hash("пароль-123")
     assert line.startswith("$7$101$") and line.count("$") == 4 and _pbkdf2("пароль-123", line) and not _pbkdf2("інший", line)
     assert keygen.mosquitto_hash("x") != keygen.mosquitto_hash("x"), "сіль має бути випадковою"
-    run = lambda *args: subprocess.run([sys.executable, str(HERE / "keygen.py"), *args], capture_output=True, text=True,
-                                       encoding="utf-8", check=True).stdout
+
+    def run(*args):
+        return subprocess.run([sys.executable, str(HERE / "keygen.py"), *args], capture_output=True, text=True,
+                              encoding="utf-8", check=True).stdout
+
     user, _, rest = run("--mosquitto", "healthcheck", "pw").strip().partition(":")
     assert user == "healthcheck" and _pbkdf2("pw", rest)
     full = run("radar1")
-    key = next(l.split(": ")[-1] for l in full.splitlines() if "ключ датчика" in l)
-    entry = next(l.split("mosquitto.passwd: ")[1] for l in full.splitlines() if "mosquitto.passwd:" in l)
+    key = next(line.split(": ")[-1] for line in full.splitlines() if "ключ датчика" in line)
+    entry = next(line.split("mosquitto.passwd: ")[1] for line in full.splitlines() if "mosquitto.passwd:" in line)
     assert entry.startswith("radar1:") and _pbkdf2(key, entry.split(":", 1)[1]), "пароль у брокері = той самий ключ датчика"
 
 
@@ -365,29 +370,29 @@ def test_broker_files_match_demo_stack():
     sensor_keys = dict(i.split("=", 1) for i in compose["services"]["emulator"]["environment"]["DRONEWATCH_KEYS"].split(","))
     svc_pw = compose["services"]["service"]["environment"]["MQTT_PASSWORD"]
     hc_pw = " ".join(compose["services"]["mosquitto"]["healthcheck"]["test"]).split("-P ")[1].split()[0]
-    passwd = dict(l.split(":", 1) for l in (root / "deploy" / "mosquitto.passwd").read_text(encoding="utf-8").split())
+    passwd = dict(line.split(":", 1) for line in (root / "deploy" / "mosquitto.passwd").read_text(encoding="utf-8").split())
 
     expected = {**sensor_keys, "dronewatch-service": svc_pw, "healthcheck": hc_pw}
     assert set(passwd) == set(expected), "у passwd рівно датчики, сервіс і healthcheck, ніхто зайвий"
     assert all(_pbkdf2(expected[u], passwd[u]) for u in expected), "хеші в passwd не відповідають паролям у compose"
     assert compose["services"]["service"]["environment"]["MQTT_USER"] == "dronewatch-service"
 
-    active = [l.split("#")[0].strip() for l in (root / "deploy" / "mosquitto.conf").read_text(encoding="utf-8").splitlines()]
+    active = [line.split("#")[0].strip() for line in (root / "deploy" / "mosquitto.conf").read_text(encoding="utf-8").splitlines()]
     assert "allow_anonymous false" in active and "use_username_as_clientid true" in active
     assert "allow_anonymous true" not in active
     assert "password_file /mosquitto/config/passwd" in active and "acl_file /mosquitto/config/acl" in active
 
-    acl = [l.strip() for l in (root / "deploy" / "mosquitto.acl").read_text(encoding="utf-8").splitlines()
-           if l.strip() and not l.strip().startswith("#")]
+    acl = [line.strip() for line in (root / "deploy" / "mosquitto.acl").read_text(encoding="utf-8").splitlines()
+           if line.strip() and not line.strip().startswith("#")]
     assert acl[0] == "pattern write dronewatch/events/%u", "правило для датчиків: писати лише у власний топік"
-    assert [l for l in acl if l.startswith("pattern")] == [acl[0]], "інших загальних правил, що діяли б на всіх, бути не має"
+    assert [line for line in acl if line.startswith("pattern")] == [acl[0]], "інших загальних правил, що діяли б на всіх, бути не має"
     per_user, cur = {}, None
-    for l in acl[1:]:
-        if l.startswith("user "):
-            cur = l.split()[1]
+    for line in acl[1:]:
+        if line.startswith("user "):
+            cur = line.split()[1]
             per_user[cur] = []
         else:
-            per_user[cur].append(l)
+            per_user[cur].append(line)
     assert per_user == {"dronewatch-service": ["topic read dronewatch/events/#"], "healthcheck": ["topic read $SYS/broker/uptime"]}
 
 

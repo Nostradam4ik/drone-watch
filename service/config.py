@@ -1,21 +1,22 @@
 """Завантаження і перевірка config.yaml: датчики, зони, параметри тривог."""
 import math
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal, Self
 
 import numpy as np
 import yaml
+from pydantic import BaseModel, Field, ValidationError, field_validator, model_validator
+
 from dashboard_auth import parse_hash
 from engine import Zone
 from models import Sensor
-from pydantic import BaseModel, Field, ValidationError, field_validator, model_validator
 
 
 class Noise(BaseModel):
     """Похибка вимірювання (1σ). Для пеленгових датчиків потрібен лише azimuth_deg."""
-    range_m: float = Field(5.0, gt=0)
-    azimuth_deg: float = Field(1.0, gt=0)
-    elevation_deg: float = Field(1.5, gt=0)
+    range_m: float = Field(default=5.0, gt=0)
+    azimuth_deg: float = Field(default=1.0, gt=0)
+    elevation_deg: float = Field(default=1.5, gt=0)
 
 
 class Bias(BaseModel):
@@ -50,7 +51,7 @@ class DashboardCfg(BaseModel):
     (локальна розробка, довірена мережа); сервіс пише про це попередження. У demo автентифікація вимкнена завжди."""
     auth: Literal["required", "disabled"] = "required"
     users: list[DashboardUser] = []
-    session_ttl_s: float = Field(8 * 3600, gt=0, le=30 * 86400)   # скільки діє сесія після входу
+    session_ttl_s: float = Field(default=8 * 3600, gt=0, le=30 * 86400)   # скільки діє сесія після входу
 
 
 class SensorCfg(BaseModel):
@@ -59,13 +60,13 @@ class SensorCfg(BaseModel):
     position: list[float] = Field(description="[east_m, north_m] відносно початку координат об'єкта")
     max_range: float = Field(gt=0)
     noise: Noise = Noise()
-    latency_s: float = Field(0.0, ge=0)
+    latency_s: float = Field(default=0.0, ge=0)
     bias: Bias = Bias()
-    key_sha256: str | None = Field(None, description="SHA-256 ключа датчика (hex); ключ видає python keygen.py <id>")
+    key_sha256: str | None = Field(default=None, description="SHA-256 ключа датчика (hex); ключ видає python keygen.py <id>")
 
     @field_validator("key_sha256")
     @classmethod
-    def _key_hash(cls, v):
+    def _key_hash(cls, v: str | None) -> str | None:
         if v is None:
             return v
         v = v.strip().lower()
@@ -77,7 +78,7 @@ class SensorCfg(BaseModel):
 
     @field_validator("position")
     @classmethod
-    def _pos(cls, v):
+    def _pos(cls, v: list[float]) -> list[float]:
         if len(v) not in (2, 3):
             raise ValueError("position: потрібно [east, north] або [east, north, up]")
         return v
@@ -91,14 +92,14 @@ class ZoneCfg(BaseModel):
 
 
 class AlertsCfg(BaseModel):
-    min_age_s: float = Field(5.0, ge=0)               # скільки секунд трек має бути підтвердженим до тривоги
+    min_age_s: float = Field(default=5.0, ge=0)               # скільки секунд трек має бути підтвердженим до тривоги
     require_radar_in_cover: bool = True               # у зоні радара тривога лише з радарним підтвердженням
-    max_coast_scans: int = Field(2, ge=0)
+    max_coast_scans: int = Field(default=2, ge=0)
 
 
 class MqttCfg(BaseModel):
     host: str
-    port: int = Field(1883, ge=1, le=65535)   # з TLS брокер зазвичай слухає 8883
+    port: int = Field(default=1883, ge=1, le=65535)   # з TLS брокер зазвичай слухає 8883
     topic: str = "dronewatch/events/#"
     username: str | None = None
     password: str | None = None
@@ -108,12 +109,12 @@ class MqttCfg(BaseModel):
 
 class Config(BaseModel):
     mode: Literal["demo", "live"] = "demo"
-    scan_dt: float = Field(0.5, gt=0)
+    scan_dt: float = Field(default=0.5, gt=0)
     # Стелі проти потопу подій. Вартість скану ~ (треки x події), тож вибирайте за бюджетом часу: вищі значення дозволяють
     # більші рої, але під атакою потопом скан довшає. Понад стелі події відкидаються й видно в stats / на дашборді.
-    max_events_per_sensor_scan: int = Field(150, ge=1)
-    max_tracks: int = Field(200, ge=1)
-    sensor_timeout_s: float = Field(5.0, gt=0)   # тиша датчика довше за це = відмова (потрібен heartbeat від датчика)
+    max_events_per_sensor_scan: int = Field(default=150, ge=1)
+    max_tracks: int = Field(default=200, ge=1)
+    sensor_timeout_s: float = Field(default=5.0, gt=0)   # тиша датчика довше за це = відмова (потрібен heartbeat від датчика)
     sensors: list[SensorCfg] = []
     zones: list[ZoneCfg] = []
     alerts: AlertsCfg = AlertsCfg()
@@ -122,7 +123,7 @@ class Config(BaseModel):
     dashboard: DashboardCfg = DashboardCfg()
 
     @model_validator(mode="after")
-    def _check(self):
+    def _check(self) -> Self:
         ids = [s.id for s in self.sensors]
         if len(ids) != len(set(ids)):
             raise ValueError("id датчиків мають бути унікальними")
@@ -149,23 +150,23 @@ class Config(BaseModel):
         return self
 
 
-def load(path):
+def load(path: str | Path) -> Config:
     path = Path(path)
     try:
         raw = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
         return Config(**raw)
     except FileNotFoundError:
-        raise SystemExit(f"Конфіг не знайдено: {path}")
+        raise SystemExit(f"Конфіг не знайдено: {path}") from None
     except yaml.YAMLError as e:
-        raise SystemExit(f"Помилка YAML у {path}:\n{e}")
+        raise SystemExit(f"Помилка YAML у {path}:\n{e}") from None
     except ValidationError as e:
         lines = [f"  {'.'.join(str(p) for p in err['loc'])}: {err['msg']}" for err in e.errors()]
-        raise SystemExit(f"Помилки в конфігу {path}:\n" + "\n".join(lines))
+        raise SystemExit(f"Помилки в конфігу {path}:\n" + "\n".join(lines)) from None
     except ValueError as e:
-        raise SystemExit(f"Помилка в конфігу {path}: {e}")
+        raise SystemExit(f"Помилка в конфігу {path}: {e}") from None
 
 
-def build_sensors(cfg):
+def build_sensors(cfg: Config) -> list[Sensor]:
     sensors = []
     for sc in cfg.sensors:
         pos = list(sc.position) + [0.0] * (3 - len(sc.position))
@@ -183,11 +184,11 @@ def build_sensors(cfg):
     return sensors
 
 
-def build_zones(cfg):
+def build_zones(cfg: Config) -> list[Zone]:
     return [Zone(z.name, z.radius_m, z.level, tuple(z.center)) for z in cfg.zones]
 
 
-def calibration_note(cfg):
+def calibration_note(cfg: Config) -> dict[str, Any]:
     """Чи є в конфігу калібрування: показується на дашборді."""
     if any(any(v != 0 for v in s.bias.model_dump().values()) for s in cfg.sensors):
         return {"done": True, "note": "bias із конфігу"}

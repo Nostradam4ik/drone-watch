@@ -6,6 +6,7 @@ import datetime
 import ipaddress
 import json
 import logging
+import re
 import socket
 import ssl
 import tempfile
@@ -32,9 +33,12 @@ def make_pki(directory, names=("localhost", "127.0.0.1"), cn="test CA"):
     from cryptography.hazmat.primitives.asymmetric import ec
     from cryptography.x509.oid import ExtendedKeyUsageOID, NameOID
 
-    name = lambda c: x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, c)])
+
+    def name(common_name):
+        return x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, common_name)])
+
     now = datetime.datetime.now(datetime.UTC)
-    window = dict(not_valid_before=now - datetime.timedelta(days=1), not_valid_after=now + datetime.timedelta(days=1))
+    window = {"not_valid_before": now - datetime.timedelta(days=1), "not_valid_after": now + datetime.timedelta(days=1)}
 
     def build(subject, issuer, pub, signer, extensions):
         b = (x509.CertificateBuilder().subject_name(subject).issuer_name(issuer).public_key(pub)
@@ -296,12 +300,8 @@ def test_service_mqtt_over_tls_receives_events():
                 bad.stop()
             broker.close()
 
-    try:
+    with pytest.raises(RuntimeError, match=re.escape("/немає/такого/ca.pem")):   # хибний шлях до CA валить старт, називаючи шлях
         MqttIngest(engine, "127.0.0.1", 1, ca_cert="/немає/такого/ca.pem")
-    except RuntimeError as e:
-        assert "/немає/такого/ca.pem" in str(e), "помилка має називати шлях до CA"
-    else:
-        raise AssertionError("хибний шлях до CA має валити старт зі зрозумілою причиною")
 
 
 def test_demo_stack_is_tls_only_and_ships_no_private_keys():
@@ -310,8 +310,8 @@ def test_demo_stack_is_tls_only_and_ships_no_private_keys():
         import yaml
     except ImportError as e:
         pytest.skip(f"залежності відсутні: {e}")
-    conf = [l.split("#")[0].strip() for l in (ROOT / "deploy" / "mosquitto.conf").read_text(encoding="utf-8").splitlines()]
-    assert "listener 8883" in conf and not any(l.startswith("listener 1883") for l in conf), "відкритого слухача бути не повинно"
+    conf = [line.split("#")[0].strip() for line in (ROOT / "deploy" / "mosquitto.conf").read_text(encoding="utf-8").splitlines()]
+    assert "listener 8883" in conf and not any(line.startswith("listener 1883") for line in conf), "відкритого слухача бути не повинно"
     for required in ("cafile /mosquitto/certs-ca/ca.crt", "certfile /mosquitto/certs-server/server.crt",
                      "keyfile /mosquitto/certs-server/server.key", "allow_anonymous false"):
         assert required in conf, required
@@ -331,15 +331,15 @@ def test_demo_stack_is_tls_only_and_ships_no_private_keys():
 
     script = (ROOT / "deploy" / "gen-certs.sh").read_bytes()
     assert b"\r" not in script, "скрипт із CRLF не запуститься в контейнері"
-    installs = [l for l in script.decode("utf-8").splitlines() if l.lstrip().startswith("install ")]
-    assert installs and not any("ca.key" in l for l in installs), "ключ CA не має потрапляти в томи"
+    installs = [line for line in script.decode("utf-8").splitlines() if line.lstrip().startswith("install ")]
+    assert installs and not any("ca.key" in line for line in installs), "ключ CA не має потрапляти в томи"
 
     marker = "PRIVATE " + "KEY-----"                          # зібрано з частин, щоб цей файл не знаходив сам себе
     offenders = []
     for path in ROOT.rglob("*"):
-        if path.is_file() and ".git" not in path.parts and "__pycache__" not in path.parts and path.suffix not in (".png", ".pyc", ".db"):
-            if marker in path.read_text(encoding="utf-8", errors="ignore"):
-                offenders.append(str(path.relative_to(ROOT)))
+        scannable = path.is_file() and ".git" not in path.parts and "__pycache__" not in path.parts and path.suffix not in (".png", ".pyc", ".db")
+        if scannable and marker in path.read_text(encoding="utf-8", errors="ignore"):
+            offenders.append(str(path.relative_to(ROOT)))
     assert not offenders, f"у репозиторії є приватні ключі: {offenders}"
 
 

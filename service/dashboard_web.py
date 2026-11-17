@@ -9,16 +9,18 @@
 import logging
 import math
 import os
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Annotated
 from urllib.parse import urlsplit
 
-from dashboard_auth import MAX_PASSWORD_LEN, LoginLimiter, SessionStore, Users
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.requests import HTTPConnection, Request
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, Response
 from pydantic import BaseModel, ConfigDict, Field
+
+from dashboard_auth import MAX_PASSWORD_LEN, LoginLimiter, SessionStore, Users
 
 log = logging.getLogger("dronewatch.dashboard")
 STATIC = Path(__file__).resolve().parent / "static"
@@ -141,7 +143,7 @@ SECURITY_HEADERS = {
 }
 
 
-async def add_security_headers(request: Request, call_next) -> Response:
+async def add_security_headers(request: Request, call_next: Callable[[Request], Awaitable[Response]]) -> Response:
     response = await call_next(request)
     for name, value in SECURITY_HEADERS.items():
         response.headers.setdefault(name, value)

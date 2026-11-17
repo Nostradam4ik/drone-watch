@@ -1,5 +1,6 @@
 """Стан датчиків і відмова радара. Запуск: python test_health.py (або pytest). Час фейковий, тож це секунди, а не 90 с."""
 import asyncio
+import json
 import random
 import sqlite3
 import sys
@@ -10,6 +11,7 @@ from pathlib import Path
 
 import numpy as np
 import pytest
+
 from demo import to_event
 from engine import Engine, Zone
 from sim import Target, default_sensors, simulate
@@ -364,12 +366,14 @@ def test_http_rejects_nan_and_infinity():
     client = TestClient(app.app, raise_server_exceptions=False)   # дивимось на відповідь, а не на виняток сервера
     headers = {"Content-Type": "application/json"}
     ts = time.time()
-    for body in ('[{"sensor_id":"rf1","ts":%f,"azimuth_deg":NaN}]' % ts, '[{"sensor_id":"rf1","ts":Infinity,"azimuth_deg":1}]',
-                 '[{"sensor_id":"radar1","ts":%f,"azimuth_deg":1,"range_m":-Infinity,"elevation_deg":1}]' % ts):
+    nan, inf = float("nan"), float("inf")   # json.dumps пише їх як літерали NaN/Infinity, які Python приймає, а стандартний JSON ні
+    for body in (json.dumps([{"sensor_id": "rf1", "ts": ts, "azimuth_deg": nan}]),
+                 json.dumps([{"sensor_id": "rf1", "ts": inf, "azimuth_deg": 1}]),
+                 json.dumps([{"sensor_id": "radar1", "ts": ts, "azimuth_deg": 1, "range_m": -inf, "elevation_deg": 1}])):
         r = client.post("/api/events", content=body, headers=headers)
         assert r.status_code == 422, (body, r.status_code)
         assert "input" not in r.text and "NaN" not in r.text, "відповідь не має відлунювати значення"
-    ok = client.post("/api/events", content='[{"sensor_id":"rf1","ts":%f,"azimuth_deg":1.5}]' % ts, headers=headers)
+    ok = client.post("/api/events", content=json.dumps([{"sensor_id": "rf1", "ts": ts, "azimuth_deg": 1.5}]), headers=headers)
     assert ok.status_code == 200 and ok.json()["accepted"] == 1
 
 

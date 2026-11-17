@@ -6,6 +6,8 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
+
+from models import Floats
 from run import SCENARIOS
 from sim import default_sensors, simulate
 from tracker import Tracker
@@ -18,8 +20,8 @@ def collect(seed, scenario):
     duration = cfg["dur"]
     sensors, targets = default_sensors(cfg["realistic"]), cfg["targets"]()
     tracker = Tracker(sensors)
-    truth_path = {tg.name: [] for tg in targets}
-    pts = {"ok": [], "live_false": [], "coast_false": []}
+    truth_path: dict[str, list[Floats]] = {tg.name: [] for tg in targets}
+    pts: dict[str, list[tuple[float, float, int]]] = {"ok": [], "live_false": [], "coast_false": []}
     for t, dets, truth in simulate(sensors, targets, duration=duration, seed=seed):
         tracker.step(t, dets)
         for n, p in truth.items():

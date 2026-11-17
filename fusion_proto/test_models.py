@@ -2,6 +2,7 @@
 import time
 
 import numpy as np
+
 from models import Sensor
 from sim import default_sensors, simulate, swarm_targets
 from tracker import Tracker
@@ -81,7 +82,7 @@ def _live_tracker(steps=40):
         s.latency_comp = s.latency
     tr = Tracker(sens)
     last = []
-    for i, (t, dets, truth) in enumerate(simulate(sens, swarm_targets(), duration=60, seed=2)):
+    for i, (t, dets, _truth) in enumerate(simulate(sens, swarm_targets(), duration=60, seed=2)):
         tr.step(t, dets)
         if i >= steps:
             last = dets
@@ -121,7 +122,7 @@ def test_gating_with_single_measurement_and_input_untouched():
     before = Z.copy()
     d2, cost = tr.tracks[0].gate_costs(s, Z)
     assert d2.shape == (1,) and np.isfinite(d2).all() and np.isfinite(cost).all()
-    assert (Z == before).all()
+    assert (before == Z).all()
 
 
 def test_gating_speed():

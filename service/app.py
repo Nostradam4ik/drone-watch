@@ -5,9 +5,15 @@ import logging
 import os
 import sqlite3
 import time
+from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager, closing
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, Any
+
+from fastapi import Body, Depends, FastAPI, Header, Request, WebSocket, WebSocketDisconnect
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, Response
+from pydantic import BaseModel, ConfigDict
 
 import config
 import dashboard_web
@@ -15,12 +21,9 @@ from auth import SensorAuth
 from dashboard_auth import LoginLimiter, SessionStore, Users
 from dashboard_web import DashboardAccess, current_user, require_user
 from demo import DemoSource, make_sensors
-from engine import Engine
-from fastapi import Body, Depends, FastAPI, Header, Request, WebSocket, WebSocketDisconnect
-from fastapi.exceptions import RequestValidationError
-from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
+from engine import Engine, SensorStatus
+from models import Sensor
 from mqtt_in import MqttIngest
-from pydantic import BaseModel, ConfigDict
 
 log = logging.getLogger("dronewatch")
 BASE = Path(__file__).resolve().parent
@@ -44,45 +47,56 @@ engine: Engine | None = None
 mqtt_ingest: MqttIngest | None = None
 demo_src: DemoSource | None = None
 clients: dict[WebSocket, str | None] = {}   # вебсокет -> токен сесії (None, коли автентифікацію вимкнено)
-scan_task = None
+scan_task: asyncio.Task[None] | None = None
 # стан циклу сканів для /api/health: last_ok = час останнього успішного скану
-scan_health = {"started": time.time(), "last_ok": None, "errors": 0, "consecutive": 0, "last_error": None}
+scan_health: dict[str, Any] = {"started": time.time(), "last_ok": None, "errors": 0, "consecutive": 0, "last_error": None}
+
+
+def build_engine(cfg: config.Config, sensors: list[Sensor]) -> Engine:
+    required = cfg.mode == "live" and cfg.auth.mode == "required"
+    auth = SensorAuth({s.id: s.key_sha256 for s in cfg.sensors if s.key_sha256}) if required else None
+    if cfg.mode == "live" and auth is None:
+        log.warning("автентифікацію датчиків вимкнено (auth.mode: disabled): будь-хто з доступом до /api/events чи брокера "
+                    "може підкидати події й підробляти heartbeat")
+    return Engine(sensors, config.build_zones(cfg), db_path=DB_PATH, scan_dt=cfg.scan_dt,
+                  min_age_s=cfg.alerts.min_age_s, require_radar=cfg.alerts.require_radar_in_cover,
+                  max_coast=cfg.alerts.max_coast_scans, sensor_timeout_s=cfg.sensor_timeout_s,
+                  max_events_per_sensor=cfg.max_events_per_sensor_scan, max_tracks=cfg.max_tracks, auth=auth)
+
+
+def build_mqtt(cfg: config.Config, engine: Engine) -> MqttIngest | None:
+    """Підписка на MQTT, якщо задано брокер (конфіг або MQTT_HOST). Змінні оточення перекривають конфіг (зручно для docker)."""
+    m = cfg.mqtt.model_dump() if cfg.mqtt else {}
+    host = os.environ.get("MQTT_HOST", m.get("host"))
+    if not host:
+        return None
+    user = os.environ.get("MQTT_USER", m.get("username"))
+    ca = os.environ.get("MQTT_CA_CERT", m.get("ca_cert")) or None
+    tls = bool(ca) or os.environ.get("MQTT_TLS", str(m.get("tls", False))).strip().lower() in ("1", "true", "yes", "on")
+    if user and not tls:
+        log.warning("MQTT без TLS: логін, пароль і ключі датчиків ідуть відкритим текстом. Задайте MQTT_CA_CERT "
+                    "(або mqtt.ca_cert / mqtt.tls у конфігу), якщо брокер не на довіреному каналі")
+    return MqttIngest(engine, host, int(os.environ.get("MQTT_PORT", m.get("port", 1883))), m.get("topic") or "dronewatch/events/#",
+                      user, os.environ.get("MQTT_PASSWORD", m.get("password")), tls=tls, ca_cert=ca)
 
 
 @asynccontextmanager
-async def lifespan(app):
+async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     global engine, demo_src, DEMO, mqtt_ingest, scan_task
-    # Без цього Python показує лише WARNING і вище, а журнал входів оператора (INFO) не було б видно. Тільки при старті сервісу:
-    # при імпорті модуля це засмічувало б вивід тестів.
+    # Без цього Python показує лише WARNING і вище, а журнал входів оператора (INFO) не було б видно.
+    # Лише при старті сервісу: при імпорті модуля це засмічувало б вивід тестів.
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     cfg = config.load(os.environ.get("CONFIG", BASE / "config.yaml"))
     DEMO = cfg.mode == "demo"
     sensors = make_sensors() if DEMO else config.build_sensors(cfg)  # demo: датчики симулятора, інакше з конфігу
-    auth = SensorAuth({s.id: s.key_sha256 for s in cfg.sensors}) if not DEMO and cfg.auth.mode == "required" else None
-    if not DEMO and auth is None:
-        log.warning("автентифікацію датчиків вимкнено (auth.mode: disabled): будь-хто з доступом до /api/events чи брокера "
-                    "може підкидати події й підробляти heartbeat")
-    engine = Engine(sensors, config.build_zones(cfg), db_path=DB_PATH, scan_dt=cfg.scan_dt,
-                    min_age_s=cfg.alerts.min_age_s, require_radar=cfg.alerts.require_radar_in_cover,
-                    max_coast=cfg.alerts.max_coast_scans, sensor_timeout_s=cfg.sensor_timeout_s,
-                    max_events_per_sensor=cfg.max_events_per_sensor_scan, max_tracks=cfg.max_tracks, auth=auth)
+    engine = build_engine(cfg, sensors)
     if DEMO:
         engine.calibration = {"done": True, "note": "еталонний політ + компенсація затримок"}
         demo_src = DemoSource(sensors)
     else:
         engine.calibration = config.calibration_note(cfg)
-    m = cfg.mqtt.model_dump() if cfg.mqtt else {}
-    m_host = os.environ.get("MQTT_HOST", m.get("host"))  # змінні оточення перекривають конфіг (зручно для docker)
-    if m_host:
-        m_user = os.environ.get("MQTT_USER", m.get("username"))
-        m_ca = os.environ.get("MQTT_CA_CERT", m.get("ca_cert")) or None
-        m_tls = bool(m_ca) or os.environ.get("MQTT_TLS", str(m.get("tls", False))).strip().lower() in ("1", "true", "yes", "on")
-        if m_user and not m_tls:
-            log.warning("MQTT без TLS: логін, пароль і ключі датчиків ідуть відкритим текстом. Задайте MQTT_CA_CERT "
-                        "(або mqtt.ca_cert / mqtt.tls у конфігу), якщо брокер не на довіреному каналі")
-        mqtt_ingest = MqttIngest(engine, m_host, int(os.environ.get("MQTT_PORT", m.get("port", 1883))),
-                                 m.get("topic") or "dronewatch/events/#", m_user,
-                                 os.environ.get("MQTT_PASSWORD", m.get("password")), tls=m_tls, ca_cert=m_ca)
+    mqtt_ingest = build_mqtt(cfg, engine)
+    if mqtt_ingest:
         mqtt_ingest.start()
     app.state.access = build_dashboard_access(cfg)
     scan_health.update(started=time.time(), last_ok=None, errors=0, consecutive=0, last_error=None)
@@ -111,30 +125,37 @@ app.middleware("http")(dashboard_web.add_security_headers)
 
 
 @app.exception_handler(RequestValidationError)
-async def validation_error(request: Request, exc: RequestValidationError):
+async def validation_error(request: Request, exc: RequestValidationError) -> JSONResponse:
     """422 без значень, що не пройшли перевірку. Стандартна відповідь їх відлунює (`input`), а NaN/Infinity Starlette
     не вміє серіалізувати в JSON: клієнт отримував 500 замість 422. Заодно не повертаємо відправнику його ж дані."""
     return JSONResponse({"detail": [{"loc": e["loc"], "msg": e["msg"], "type": e["type"]} for e in exc.errors()]}, status_code=422)
 
 
-def _scan_task_done(task):
+def _scan_task_done(task: asyncio.Task[None]) -> None:
     if not task.cancelled():
         log.critical("цикл сканів завершився: %r. Трекінг не працює, /api/health повертає 503", task.exception())
 
 
-async def scan_step():
+def _engine() -> Engine:
+    """Рушій, створений у lifespan. Явна помилка замість AttributeError на None, якщо сервіс викликано без старту."""
+    if engine is None:
+        raise RuntimeError("рушій не ініціалізовано: lifespan не запускався")
+    return engine
+
+
+async def scan_step() -> None:
     """Один скан. Будь-який збій тут не має зупиняти трекінг: ловимо, рахуємо, логуємо й живемо далі."""
     sh = scan_health
     try:
         truth = None
         if demo_src is not None:
             events, truth, done = demo_src.poll()
-            engine.ingest(events)
+            _engine().ingest(events)
             if done:
-                engine.reset()
+                _engine().reset()
                 demo_src.restart()
-        engine.tick()
-        payload = {"type": "state", **engine.state(truth), "alerts": engine.alerts[:30],
+        _engine().tick()
+        payload = {"type": "state", **_engine().state(truth), "alerts": _engine().alerts[:30],
                    "mqtt": mqtt_ingest.status() if mqtt_ingest else None}
         access: DashboardAccess = getattr(app.state, "access", None) or DashboardAccess()
         for ws, token in list(clients.items()):
@@ -151,13 +172,13 @@ async def scan_step():
         sh["errors"] += 1
         sh["consecutive"] += 1
         sh["last_error"] = f"{type(e).__name__}: {e}"
-        engine.count("scan_errors")
+        _engine().count("scan_errors")
         if sh["consecutive"] == 1 or sh["consecutive"] % 20 == 0:   # не засмічуємо лог 2 рядками на секунду
             log.exception("збій скану (поспіль: %d, усього: %d)", sh["consecutive"], sh["errors"])
         if sh["consecutive"] == SCAN_ERRORS_BEFORE_RESET:
             log.error("%d збоїв поспіль: скидаю трекер (журнал інцидентів лишається)", sh["consecutive"])
             try:
-                engine.reset()
+                _engine().reset()
             except Exception:
                 log.exception("скидання трекера теж не вдалося")
     else:
@@ -165,37 +186,37 @@ async def scan_step():
         sh["last_ok"] = time.time()
 
 
-async def scan_loop():
+async def scan_loop() -> None:
     while True:
         await scan_step()
-        await asyncio.sleep(engine.scan_dt)
+        await asyncio.sleep(_engine().scan_dt)
 
 
 @app.get("/")
-def index(user: Annotated[str | None, Depends(current_user)]):
+def index(user: Annotated[str | None, Depends(current_user)]) -> Response:
     if user is None:   # сторінку без входу не віддаємо: людину веде на форму входу
         return RedirectResponse("/login", status_code=303)
     return FileResponse(BASE / "static" / "index.html")
 
 
 @app.get("/api/config", dependencies=[Depends(require_user)])
-def get_config():
-    return {**engine.config(), "demo": DEMO}
+def get_config() -> dict[str, Any]:
+    return {**_engine().config(), "demo": DEMO}
 
 
-@app.get("/api/health")
-def health(user: Annotated[str | None, Depends(current_user)]):
+@app.get("/api/health", response_model=None)   # повертає то dict, то JSONResponse(503): моделі відповіді тут нема
+def health(user: Annotated[str | None, Depends(current_user)]) -> dict[str, Any] | JSONResponse:
     """Для healthcheck і моніторингу. 503, якщо цикл сканів помер або давно не було жодного успішного скану.
     Без входу віддає лише {"ok": ...}: імена втрачених датчиків, адреса брокера й тексти помилок це вже подробиці для оператора."""
     now, sh = time.time(), scan_health
-    stale_after = max(5.0, 10 * engine.scan_dt)
+    stale_after = max(5.0, 10 * _engine().scan_dt)
     last = sh["last_ok"] if sh["last_ok"] is not None else sh["started"]
     scanning = scan_task is not None and not scan_task.done() and now - last <= stale_after
     if user is None:
         return {"ok": True} if scanning else JSONResponse({"ok": False}, status_code=503)
-    lost = engine.degraded()
-    body = {"ok": scanning, "degraded": bool(lost), "lost_sensors": lost, "auth": engine.auth is not None,
-            "mode": "demo" if DEMO else "live", "scans": engine.stats["scans"],
+    lost = _engine().degraded()
+    body = {"ok": scanning, "degraded": bool(lost), "lost_sensors": lost, "auth": _engine().auth is not None,
+            "mode": "demo" if DEMO else "live", "scans": _engine().stats["scans"],
             "scan": {"errors": sh["errors"], "consecutive_errors": sh["consecutive"], "last_error": sh["last_error"],
                      "last_ok_age_s": round(now - sh["last_ok"], 1) if sh["last_ok"] is not None else None},
             "mqtt": mqtt_ingest.status() if mqtt_ingest else None}
@@ -203,22 +224,22 @@ def health(user: Annotated[str | None, Depends(current_user)]):
 
 
 @app.get("/api/sensors", dependencies=[Depends(require_user)])
-def sensors():
+def sensors() -> list[SensorStatus]:
     """Стан здоровʼя кожного датчика: OK / WAITING / LOST."""
-    return list(engine.sensor_status().values())
+    return list(_engine().sensor_status().values())
 
 
 @app.get("/api/state", dependencies=[Depends(require_user)])
-def state():
-    return engine.state()
+def state() -> dict[str, Any]:
+    return _engine().state()
 
 
-@app.post("/api/events")
+@app.post("/api/events", response_model=None)   # то dict, то JSONResponse(401)
 def post_events(events: Annotated[list[Detection], Body(max_length=MAX_HTTP_BATCH)],
-                x_api_key: Annotated[str | None, Header()] = None):
+                x_api_key: Annotated[str | None, Header()] = None) -> dict[str, int] | JSONResponse:
     """Ключ датчика в заголовку X-API-Key (не в тілі: тіла частіше потрапляють у логи). Ключ належить одному датчику:
     події інших датчиків у цьому ж запиті відхиляються. 401, якщо жодної події не прийнято через ключ."""
-    r = engine.ingest_detailed([{**e.model_dump(), "key": x_api_key} for e in events])
+    r = _engine().ingest_detailed([{**e.model_dump(), "key": x_api_key} for e in events])
     if r.unauthorized and not r.accepted:
         return JSONResponse({"detail": "відсутній або хибний ключ датчика (заголовок X-API-Key)"}, status_code=401,
                             headers={"WWW-Authenticate": "ApiKey"})
@@ -226,7 +247,7 @@ def post_events(events: Annotated[list[Detection], Body(max_length=MAX_HTTP_BATC
 
 
 @app.get("/api/incidents", dependencies=[Depends(require_user)])
-def incidents(limit: int = 100):
+def incidents(limit: int = 100) -> list[dict[str, Any]]:
     # окреме з'єднання на запит, і його треба закривати (раніше воно витікало); LIMIT -1 у SQLite = «без ліміту», тож clamp знизу
     with closing(sqlite3.connect(DB_PATH)) as db:
         db.row_factory = sqlite3.Row
@@ -235,7 +256,7 @@ def incidents(limit: int = 100):
 
 
 @app.websocket("/ws")
-async def ws(websocket: WebSocket):
+async def ws(websocket: WebSocket) -> None:
     access: DashboardAccess = getattr(app.state, "access", None) or DashboardAccess()
     # до accept: відмова тут стає HTTP 403 на рукостисканні, WebSocket навіть не відкривається. Origin захищає від чужих сайтів
     if access.user(websocket) is None or not dashboard_web.origin_ok(websocket):
