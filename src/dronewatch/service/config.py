@@ -97,6 +97,16 @@ class AlertsCfg(BaseModel):
     max_coast_scans: int = Field(default=2, ge=0)
 
 
+class AiCfg(BaseModel):
+    """AI-асистент оператора (RAG + tool-calling чат). enabled: true лише вмикає намір; якщо MISTRAL_API_KEY
+    не задано в оточенні, сервіс все одно стартує, а /api/ai/ask чесно каже, що AI недоступний."""
+    enabled: bool = False
+    model: str = "mistral-small-latest"
+    embedding_model: str = "mistral-embed"
+    qdrant_url: str = "http://localhost:6333"
+    max_tool_iterations: int = Field(default=4, ge=1, le=10)
+
+
 class MqttCfg(BaseModel):
     host: str
     port: int = Field(default=1883, ge=1, le=65535)   # з TLS брокер зазвичай слухає 8883
@@ -121,6 +131,7 @@ class Config(BaseModel):
     mqtt: MqttCfg | None = None
     auth: AuthCfg = AuthCfg()
     dashboard: DashboardCfg = DashboardCfg()
+    ai: AiCfg = AiCfg()
 
     @model_validator(mode="after")
     def _check(self) -> Self:
