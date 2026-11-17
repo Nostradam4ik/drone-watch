@@ -45,13 +45,21 @@ def mosquitto_hash(password: str, salt: bytes | None = None) -> str:
     return "$7$101$" + base64.b64encode(salt).decode() + "$" + base64.b64encode(digest).decode()
 
 
+def new_secret(nbytes: int) -> str:
+    """Випадковий секрет (base64url). Не починається з «-»: інакше argparse прийняв би його за прапорець, і видані ключі
+    не можна було б передати в `--hash КЛЮЧ` чи `--mosquitto ІМ'Я КЛЮЧ` (це траплялося в ~1 із 64 випадків)."""
+    while (secret := secrets.token_urlsafe(nbytes)).startswith("-"):
+        pass
+    return secret
+
+
 def dashboard_user(name: str, *, generate: bool, password_env: str | None) -> int:
     """Рядок для dashboard.users у config.yaml. Пароль не друкується, крім режиму --generate (там інакше його ніхто не дізнається)."""
     if not re.fullmatch(r"[A-Za-z0-9_.@-]{1,64}", name):
         print("Ім'я: 1-64 символи з літер, цифр і _ . @ -", file=sys.stderr)
         return 2
     if generate:
-        password = secrets.token_urlsafe(18)
+        password = new_secret(18)
     elif password_env:
         if not (password := os.environ.get(password_env, "")):
             print(f"Змінна {password_env} порожня або не задана", file=sys.stderr)
@@ -75,7 +83,7 @@ def main() -> int:
     ap = argparse.ArgumentParser(description="Генератор ключів датчиків", epilog=__doc__.split("\n\n", 1)[1],
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("sensors", nargs="*", help="id датчиків з config.yaml")
-    ap.add_argument("--hash", metavar="KEY", help="лише порахувати key_sha256 для наявного ключа")
+    ap.add_argument("--hash", metavar="KEY", help="лише порахувати key_sha256 для наявного ключа (якщо він починається з «-»: --hash=КЛЮЧ)")
     ap.add_argument("--mosquitto", nargs=2, metavar=("ІМ'Я", "ПАРОЛЬ"), help="лише порахувати рядок для mosquitto.passwd")
     ap.add_argument("--dashboard-user", metavar="ІМ'Я", help="згенерувати рядок для користувача дашборда")
     ap.add_argument("--generate", action="store_true", help="з --dashboard-user: випадковий пароль")
@@ -92,7 +100,7 @@ def main() -> int:
     if not a.sensors:
         ap.error("вкажіть id датчиків, --hash або --mosquitto")
     for sid in a.sensors:
-        key = secrets.token_urlsafe(32)   # 256 біт
+        key = new_secret(32)   # 256 біт
         print(f"{sid}:\n  ключ датчика (покажіть лише йому, сервер його не зберігає): {key}\n"
               f"  у config.yaml:      key_sha256: \"{hash_key(key)}\"\n"
               f"  у mosquitto.passwd: {sid}:{mosquitto_hash(key)}\n")

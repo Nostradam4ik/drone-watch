@@ -231,6 +231,25 @@ def test_keygen_roundtrip():
                           check=True).stdout.strip() == hashes[0]
 
 
+def test_generated_secrets_never_start_with_dash(monkeypatch):
+    """Регресія рідкісного флейка (~1/64): ключ «-abc…» argparse сприймав за прапорець, і `--hash КЛЮЧ` падав із кодом 2."""
+    import secrets as secrets_module
+
+    from dronewatch.service import keygen
+    queue = iter(["-abc", "-def", "ok-secret"])
+    monkeypatch.setattr(secrets_module, "token_urlsafe", lambda n: next(queue))
+    assert keygen.new_secret(32) == "ok-secret", "секрет із «-» на початку має перегенеровуватися"
+    monkeypatch.undo()
+    assert not any(keygen.new_secret(32).startswith("-") for _ in range(3000))
+    assert all(len(keygen.new_secret(32)) == 43 for _ in range(50)), "довжина ключа 256 біт у base64url"
+
+
+def test_keygen_hash_accepts_a_key_with_leading_dash():
+    out = subprocess.run([sys.executable, "-m", "dronewatch.service.keygen", "--hash=-leading-dash-key"], capture_output=True, text=True,
+                         check=True).stdout.strip()
+    assert out == hash_key("-leading-dash-key")
+
+
 def test_emulator_key_parsing_never_echoes_a_key():
     from dronewatch.emulator import emulate
     assert emulate.parse_keys(["radar1=A"], "rf1=B,ac1=C") == {"rf1": "B", "ac1": "C", "radar1": "A"}
