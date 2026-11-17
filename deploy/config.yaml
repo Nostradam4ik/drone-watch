@@ -3,16 +3,16 @@
 #
 # ДЕМО-КЛЮЧІ ДАТЧИКІВ. key_sha256 нижче відповідають ключам, що лежать у docker-compose.yml (сервіс emulator), тобто
 # вони публічні, як і весь цей репозиторій: так стенд працює одразу після `docker compose up`. Для будь-чого, окрім
-# локальної демонстрації, згенеруйте свої (python service/keygen.py radar1 rf1 ac1), замініть тут хеші й видайте
+# локальної демонстрації, згенеруйте свої (dronewatch-keygen radar1 rf1 ac1), замініть тут хеші й видайте
 # кожен ключ лише своєму датчику.
 mode: live
 scan_dt: 0.5
 sensor_timeout_s: 5   # тиша довше за це = датчик відмовив (емулятор шле heartbeat кожен скан)
-max_events_per_sensor_scan: 150  # стелі проти потопу подій, пояснення в service/config.example.yaml
+max_events_per_sensor_scan: 150  # стелі проти потопу подій, пояснення в src/dronewatch/service/config.example.yaml
 max_tracks: 200
 
 # ДЕМО-КОРИСТУВАЧ ДАШБОРДА: логін demo, пароль лежить у docker-compose.yml (ДЕМО-секрет, публічний, як і весь репозиторій).
-# Для чогось, окрім локальної демонстрації: python service/keygen.py --dashboard-user ІМ'Я і замініть рядок нижче.
+# Для чогось, окрім локальної демонстрації: dronewatch-keygen --dashboard-user ІМ'Я і замініть рядок нижче.
 dashboard:
   auth: required
   session_ttl_s: 28800

@@ -1,4 +1,8 @@
 **/__pycache__
 **/*.png
 **/*.db
+**/*.egg-info
 .git
+.venv
+tests
+docs

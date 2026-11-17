@@ -10,3 +10,11 @@ venv/
 
 # Артефакти інструментів
 .playwright-mcp/
+
+# Пакет у режимі розробки та кеші інструментів
+*.egg-info/
+build/
+dist/
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/

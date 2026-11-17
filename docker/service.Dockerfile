@@ -1,0 +1,15 @@
+# Збирати з кореня репозиторію: docker build -f docker/service.Dockerfile .
+FROM python:3.12-slim
+WORKDIR /app
+# Залежності беруться з pyproject.toml і ставляться окремим шаром: він перезбирається лише при зміні залежностей, а не коду
+COPY pyproject.toml .
+RUN python -c "import tomllib; print('\n'.join(tomllib.load(open('pyproject.toml','rb'))['project']['dependencies']))" > /tmp/req.txt \
+    && pip install --no-cache-dir -r /tmp/req.txt && rm /tmp/req.txt
+COPY src src
+RUN pip install --no-cache-dir --no-deps .
+ENV DB_PATH=/data/incidents.db PYTHONUNBUFFERED=1
+RUN mkdir -p /data
+EXPOSE 8000
+# HTTPS: сертифікат і ключ сервісу задаються TLS_CERT_FILE / TLS_KEY_FILE (див. docker-compose.yml); без них сервіс не стартує
+HEALTHCHECK --interval=10s --timeout=3s --start-period=15s CMD ["python", "-m", "dronewatch.service.healthcheck"]
+CMD ["python", "-m", "dronewatch.service.serve"]

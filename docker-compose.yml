@@ -8,8 +8,8 @@
 # до довірених (docker compose cp service:/certs/ca.crt ./ca.crt) або не погодитися з ризиком для цієї демо-сторінки.
 # Дашборд закритий входом (демо-користувач demo, пароль нижче в сервісі emulator). Логіни, паролі й ключі ДЕМО-секрети, тож публічні.
 # Контейнери бачать один одного по мережі Docker, тож емулятору це не заважає. Щоб приймати датчики з мережі, замініть
-# демо-секрети й сертифікати своїми (див. service/README.md), і лише тоді змініть "127.0.0.1:" на "0.0.0.0:" (або адресу інтерфейсу).
-# Свої сертифікати замість демо: див. service/README.md, розділи про TLS і HTTPS.
+# демо-секрети й сертифікати своїми (див. README.md), і лише тоді змініть "127.0.0.1:" на "0.0.0.0:" (або адресу інтерфейсу).
+# Свої сертифікати замість демо: див. README.md, розділи про TLS і HTTPS.
 services:
   certs:   # одноразово (і при перевипуску) створює CA й сертифікат брокера в томах; приватних ключів у репозиторії немає
     image: alpine/openssl
@@ -50,11 +50,11 @@ services:
     restart: unless-stopped
 
   service:
-    build: {context: ., dockerfile: service/Dockerfile}
+    build: {context: ., dockerfile: docker/service.Dockerfile}
     ports: ["127.0.0.1:8000:8000"]
     environment:
       CONFIG: /config/config.yaml
-      TLS_CERT_FILE: /tls/http.crt       # HTTPS: без цих двох змінних serve.py не стартує (fail-closed)
+      TLS_CERT_FILE: /tls/http.crt       # HTTPS: без цих двох змінних dronewatch.service.serve не стартує (fail-closed)
       TLS_KEY_FILE: /tls/http.key
       TLS_CA_FILE: /certs/ca.crt         # лише для healthcheck: перевіряє сертифікат сервісу так само суворо, як клієнти
       MQTT_HOST: mosquitto
@@ -74,7 +74,7 @@ services:
 
   emulator:                      # лише з профілем demo-sensors
     profiles: ["demo-sensors"]
-    build: ./emulator
+    build: {context: ., dockerfile: docker/emulator.Dockerfile}
     volumes:
       - certs-ca:/certs:ro
     environment:   # ДЕМО-ключі, їм відповідають key_sha256 у deploy/config.yaml. Не використовуйте за межами локальної демонстрації
