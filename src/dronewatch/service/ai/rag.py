@@ -12,6 +12,8 @@ from typing import Any
 from qdrant_client import QdrantClient
 from qdrant_client.models import Distance, PointStruct, VectorParams
 
+from dronewatch.service.ai.errors import AiUnavailable
+
 
 def incident_text(row: dict[str, Any]) -> str:
     return (f"Інцидент: трек {row['track_id']}, зона {row['zone']}, рівень {row['level']}, "
@@ -29,9 +31,14 @@ class IncidentIndex:
     def _ensure_collection(self) -> None:
         if self._ensured:
             return
-        if not self._client.collection_exists(self._collection):
-            dim = len(self._embed(["."])[0])
-            self._client.create_collection(self._collection, vectors_config=VectorParams(size=dim, distance=Distance.COSINE))
+        try:
+            if not self._client.collection_exists(self._collection):
+                dim = len(self._embed(["."])[0])
+                self._client.create_collection(self._collection, vectors_config=VectorParams(size=dim, distance=Distance.COSINE))
+        except AiUnavailable:
+            raise
+        except Exception as e:   # непередбачена помилка самого клієнта Qdrant (мережа, протокол) — не лише embed
+            raise AiUnavailable(f"Qdrant: не вдалося підготувати колекцію «{self._collection}»: {e}") from e
         self._ensured = True
 
     def index(self, point_id: str, row: dict[str, Any]) -> None:
@@ -42,11 +49,19 @@ class IncidentIndex:
         # id, uuid4 тощо) довільний рядок; детерміновано мапимо його в UUID5, щоб той самий point_id завжди бив
         # в ту саму точку (повторний index() того самого інциденту оновлює запис, а не дублює).
         qid = str(uuid.uuid5(uuid.NAMESPACE_OID, point_id))
-        self._client.upsert(self._collection, points=[PointStruct(id=qid, vector=vector, payload={"text": text, **row})])
+        try:
+            self._client.upsert(self._collection, points=[PointStruct(id=qid, vector=vector, payload={"text": text, **row})])
+        except Exception as e:
+            raise AiUnavailable(f"Qdrant: не вдалося записати інцидент: {e}") from e
 
     def search(self, query: str, k: int = 3) -> list[str]:
-        if not self._client.collection_exists(self._collection):
-            return []
-        vector = self._embed([query])[0]
-        hits = self._client.query_points(self._collection, query=vector, limit=k).points
+        try:
+            if not self._client.collection_exists(self._collection):
+                return []
+            vector = self._embed([query])[0]
+            hits = self._client.query_points(self._collection, query=vector, limit=k).points
+        except AiUnavailable:
+            raise
+        except Exception as e:
+            raise AiUnavailable(f"Qdrant: пошук не вдався: {e}") from e
         return [h.payload["text"] for h in hits if h.payload]

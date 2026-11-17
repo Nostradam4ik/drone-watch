@@ -45,3 +45,44 @@ def test_scan_step_survives_qdrant_indexing_failure():
     rt.engine.tick = lambda: [ALERT]
     asyncio.run(app.scan_step(app.app, rt))  # не повинно впасти й не повинно зупинити цикл сканів
     assert rt.scan.errors == 0, "збій AI-індексації не повинен рахуватись як помилка скану"
+
+
+def test_scan_step_survives_non_ai_unavailable_exception_from_indexing():
+    """Не лише AiUnavailable: будь-яка непередбачена помилка самого клієнта Qdrant теж не має рахуватись як
+    помилка скану чи зупиняти трекер (background review: raw qdrant_client-помилки раніше йшли повз except)."""
+    class _IndexRaisingRuntimeError:
+        def index(self, point_id, row):
+            raise RuntimeError("щось зовсім несподіване в клієнті Qdrant")
+
+    rt = app.Runtime(engine=Engine(default_sensors(), [Zone("z", 50, "WARNING")]), ai=_ai_runtime(_IndexRaisingRuntimeError()))
+    rt.engine.tick = lambda: [ALERT]
+
+    async def run_and_drain():
+        await app.scan_step(app.app, rt)
+        await asyncio.gather(*rt.ai_tasks)   # дочекатись фонової задачі індексації, щоб побачити її результат
+
+    asyncio.run(run_and_drain())
+    assert rt.scan.errors == 0
+
+
+def test_scan_step_indexing_does_not_block_the_event_loop():
+    """Індексація має йти в окремому потоці (asyncio.to_thread), а не синхронно в корутині scan_step — інакше
+    повільний Qdrant/Mistral заморожує всю обробку WebSocket і HTTP на час мережевого виклику."""
+    import threading
+
+    main_thread = threading.get_ident()
+    seen_thread = []
+
+    class _ThreadRecordingIndex:
+        def index(self, point_id, row):
+            seen_thread.append(threading.get_ident())
+
+    rt = app.Runtime(engine=Engine(default_sensors(), [Zone("z", 50, "WARNING")]), ai=_ai_runtime(_ThreadRecordingIndex()))
+    rt.engine.tick = lambda: [ALERT]
+
+    async def run_and_drain():
+        await app.scan_step(app.app, rt)
+        await asyncio.gather(*rt.ai_tasks)
+
+    asyncio.run(run_and_drain())
+    assert seen_thread and seen_thread[0] != main_thread, "index() мав виконатись у фоновому потоці, не в event loop"

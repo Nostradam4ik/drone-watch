@@ -30,3 +30,21 @@ def test_index_propagates_ai_unavailable_from_embed():
     idx = IncidentIndex("unused", broken_embed, client=QdrantClient(location=":memory:"))
     with pytest.raises(AiUnavailable):
         idx.index("1", {"track_id": 1, "zone": "A", "level": "WARNING", "speed": 1.0, "sensors": "radar1", "ts": 1.0})
+
+
+class _BrokenQdrantClient:
+    """Імітує непередбачену помилку самого клієнта Qdrant (мережа, протокол) — не через embed."""
+    def collection_exists(self, name):
+        raise ConnectionError("qdrant unreachable")
+
+
+def test_index_wraps_raw_qdrant_errors_as_ai_unavailable():
+    idx = IncidentIndex("unused", _fake_embed(4), client=_BrokenQdrantClient())
+    with pytest.raises(AiUnavailable):
+        idx.index("1", {"track_id": 1, "zone": "A", "level": "WARNING", "speed": 1.0, "sensors": "radar1", "ts": 1.0})
+
+
+def test_search_wraps_raw_qdrant_errors_as_ai_unavailable():
+    idx = IncidentIndex("unused", _fake_embed(4), client=_BrokenQdrantClient())
+    with pytest.raises(AiUnavailable):
+        idx.search("щось")

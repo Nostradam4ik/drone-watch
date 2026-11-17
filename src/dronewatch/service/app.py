@@ -33,7 +33,7 @@ from dronewatch.service.auth import SensorAuth
 from dronewatch.service.dashboard_auth import LoginLimiter, SessionStore, Users
 from dronewatch.service.dashboard_web import DashboardAccess, current_user, require_user
 from dronewatch.service.demo import DemoSource, make_sensors
-from dronewatch.service.engine import Engine, SensorStatus
+from dronewatch.service.engine import Alert, Engine, SensorStatus
 from dronewatch.service.mqtt_in import MqttIngest
 
 log = logging.getLogger("dronewatch")
@@ -88,6 +88,7 @@ class Runtime:
     scan_task: asyncio.Task[None] | None = None
     scan: ScanHealth = field(default_factory=ScanHealth)
     ai: AiRuntime | None = None
+    ai_tasks: set[asyncio.Task[None]] = field(default_factory=set)   # живі посилання на фонові задачі AI-індексації
 
 
 def get_runtime(conn: HTTPConnection) -> Runtime:
@@ -205,6 +206,24 @@ def _scan_task_done(task: asyncio.Task[None]) -> None:
         log.critical("цикл сканів завершився: %r. Трекінг не працює, /api/health повертає 503", task.exception())
 
 
+async def _index_alert_in_background(index: IncidentIndex, alert: Alert) -> None:
+    """Qdrant/ембединги — мережевий виклик; asyncio.to_thread не дає йому заблокувати event loop (WebSocket, HTTP)
+    на час запиту. Ловимо геть усе (не лише AiUnavailable): непередбачена помилка самого клієнта Qdrant не має
+    права дійти до scan_step і порахуватись помилкою скану чи спричинити скидання трекера."""
+    row = {**alert, "sensors": ",".join(alert["sensors"])}
+    try:
+        await asyncio.to_thread(index.index, str(uuid.uuid4()), row)
+    except Exception as e:
+        log.warning("AI: не вдалося проіндексувати інцидент у Qdrant: %s", e)
+
+
+def _schedule_ai_indexing(rt: Runtime, alert: Alert) -> None:
+    assert rt.ai is not None
+    task = asyncio.create_task(_index_alert_in_background(rt.ai.index, alert))
+    rt.ai_tasks.add(task)
+    task.add_done_callback(rt.ai_tasks.discard)
+
+
 async def broadcast(rt: Runtime, access: DashboardAccess, payload: dict[str, Any]) -> None:
     """Шле стан усім WebSocket-клієнтам; сесії, що скінчилися (або вийшли), закриває замість розсилки."""
     for ws, token in list(rt.clients.items()):
@@ -236,10 +255,7 @@ async def scan_step(app: FastAPI, rt: Runtime) -> None:
         await broadcast(rt, getattr(app.state, "access", None) or DashboardAccess(), payload)
         if rt.ai is not None:
             for alert in new_alerts:
-                try:
-                    rt.ai.index.index(str(uuid.uuid4()), {**alert, "sensors": ",".join(alert["sensors"])})
-                except AiUnavailable as e:   # RAG-індексація необов'язкова: Qdrant/Mistral лежать — трекінг іде далі
-                    log.warning("AI: не вдалося проіндексувати інцидент у Qdrant: %s", e)
+                _schedule_ai_indexing(rt, alert)
     except Exception as e:  # CancelledError сюди не потрапляє (це BaseException), тож зупинка сервісу працює
         sh.errors += 1
         sh.consecutive += 1
