@@ -13,7 +13,7 @@ version = "0.1.0"
 description = "Drone Watch: мультидатчикове виявлення дронів (fusion-трекер, сервіс, емулятор датчиків)"
 requires-python = ">=3.12"
 dependencies = [
-    "fastapi>=0.110",
+    "fastapi>=0.162.7",
     "uvicorn>=0.29",
     "websockets>=12",
     "numpy>=1.26",
