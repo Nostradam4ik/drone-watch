@@ -6,6 +6,7 @@
 import asyncio
 import contextlib
 import logging
+import math
 import os
 import sqlite3
 import time
@@ -19,13 +20,17 @@ from fastapi import Body, Depends, FastAPI, Header, HTTPException, Request, WebS
 from fastapi.exceptions import RequestValidationError
 from fastapi.requests import HTTPConnection
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, Response
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 from dronewatch.fusion.models import Sensor
 from dronewatch.service import config, dashboard_web
+from dronewatch.service.ai import agent
+from dronewatch.service.ai.errors import AiUnavailable
+from dronewatch.service.ai.llm import MistralClient
+from dronewatch.service.ai.rag import IncidentIndex
 from dronewatch.service.auth import SensorAuth
 from dronewatch.service.dashboard_auth import LoginLimiter, SessionStore, Users
-from dronewatch.service.dashboard_web import DashboardAccess, current_user, require_user
+from dronewatch.service.dashboard_web import DashboardAccess, current_user, get_access, require_user
 from dronewatch.service.demo import DemoSource, make_sensors
 from dronewatch.service.engine import Engine, SensorStatus
 from dronewatch.service.mqtt_in import MqttIngest
@@ -60,6 +65,16 @@ class ScanHealth:
     last_error: str | None = None
 
 
+@dataclass(frozen=True, slots=True)
+class AiRuntime:
+    """AI-асистент оператора: чат-агент (llm) і RAG-індекс минулих інцидентів (index). Існує лише коли
+    ai.enabled і MISTRAL_API_KEY справді задано — інакше Runtime.ai лишається None (build_ai)."""
+    llm: MistralClient
+    index: IncidentIndex
+    max_iterations: int
+    limiter: LoginLimiter
+
+
 @dataclass
 class Runtime:
     """Увесь змінюваний стан працюючого сервісу. Лежить в `app.state.runtime`; рушій обовʼязковий, решта має значення за замовчуванням."""
@@ -71,6 +86,7 @@ class Runtime:
     clients: dict[WebSocket, str | None] = field(default_factory=dict)   # вебсокет -> токен сесії (None, коли входу немає)
     scan_task: asyncio.Task[None] | None = None
     scan: ScanHealth = field(default_factory=ScanHealth)
+    ai: AiRuntime | None = None
 
 
 def get_runtime(conn: HTTPConnection) -> Runtime:
@@ -111,6 +127,22 @@ def build_mqtt(cfg: config.Config, engine: Engine) -> MqttIngest | None:
                       user, os.environ.get("MQTT_PASSWORD", m.get("password")), tls=tls, ca_cert=ca)
 
 
+def build_ai(cfg: config.Config) -> AiRuntime | None:
+    """AI-асистент — цілком необов'язковий шар. ai.enabled: false чи відсутній MISTRAL_API_KEY: сервіс все одно
+    піднімається, лише /api/ai/ask повертає 503 з поясненням замість того, щоб відмовлятись стартувати."""
+    if not cfg.ai.enabled:
+        return None
+    api_key = os.environ.get("MISTRAL_API_KEY")
+    if not api_key:
+        log.warning("ai.enabled: true, але MISTRAL_API_KEY не задано в оточенні: AI-асистент вимкнено "
+                    "(/api/ai/ask відповідатиме 503)")
+        return None
+    llm = MistralClient(api_key, model=cfg.ai.model, embedding_model=cfg.ai.embedding_model)
+    index = IncidentIndex(cfg.ai.qdrant_url, llm.embed)
+    return AiRuntime(llm=llm, index=index, max_iterations=cfg.ai.max_tool_iterations,
+                     limiter=LoginLimiter(max_failures=10, window_s=60.0))
+
+
 def build_runtime(cfg: config.Config) -> Runtime:
     """Збирає робочий стан із конфігу. Нічого не запускає: це робить lifespan."""
     demo = cfg.mode == "demo"
@@ -122,7 +154,7 @@ def build_runtime(cfg: config.Config) -> Runtime:
     else:
         engine.calibration = config.calibration_note(cfg)
     return Runtime(engine=engine, demo=demo, db_path=db_path, demo_src=DemoSource(sensors) if demo else None,
-                   mqtt=build_mqtt(cfg, engine))
+                   mqtt=build_mqtt(cfg, engine), ai=build_ai(cfg))
 
 
 @asynccontextmanager
@@ -290,6 +322,33 @@ def read_incidents(db_path: str, limit: int = 100) -> list[dict[str, Any]]:
 @app.get("/api/incidents", dependencies=[Depends(require_user)])
 def incidents(rt: RuntimeDep, limit: int = 100) -> list[dict[str, Any]]:
     return read_incidents(rt.db_path, limit)
+
+
+class AskRequest(BaseModel):
+    question: str = Field(min_length=1, max_length=500)
+
+
+class AskResponse(BaseModel):
+    answer: str
+    tool_calls: list[dict[str, Any]]
+
+
+@app.post("/api/ai/ask", dependencies=[Depends(require_user)], response_model=None)
+def ask_ai(body: AskRequest, request: Request, rt: RuntimeDep) -> AskResponse | JSONResponse:
+    """Чат-агент оператора: читає живий стан і минулі інциденти через тули, нічого не пише в систему.
+    503, якщо AI вимкнено чи недоступний — трекінг дронів від цього не залежить."""
+    if rt.ai is None:
+        return JSONResponse({"detail": "AI-асистент вимкнено або недоступний"}, status_code=503)
+    access = get_access(request)
+    key = access.token(request) or "anon"
+    if wait := rt.ai.limiter.attempt(key):
+        raise HTTPException(429, "Забагато запитів до AI-асистента, спробуйте пізніше",
+                            headers={"Retry-After": str(math.ceil(wait))})
+    try:
+        result = agent.ask(body.question, llm=rt.ai.llm, rt=rt, index=rt.ai.index, max_iterations=rt.ai.max_iterations)
+    except AiUnavailable:
+        return JSONResponse({"detail": "AI-асистент вимкнено або недоступний"}, status_code=503)
+    return AskResponse(answer=result.answer, tool_calls=result.tool_calls)
 
 
 @app.websocket("/ws")
