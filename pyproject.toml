@@ -23,7 +23,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=8", "httpx>=0.27", "cryptography>=42", "ruff>=0.6", "mypy>=1.10", "types-PyYAML"]
+dev = ["pytest>=9.2.0", "httpx>=0.27", "cryptography>=42", "ruff>=0.6", "mypy>=1.10", "types-PyYAML"]
 viz = ["matplotlib>=3.8"]   # лише для dronewatch.fusion.viz (малює карти треків)
 
 [project.scripts]
