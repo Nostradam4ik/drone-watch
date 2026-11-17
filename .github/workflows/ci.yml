@@ -53,3 +53,20 @@ jobs:
           out=$(docker run --rm dronewatch-service 2>&1); code=$?
           echo "$out"
           [ "$code" -ne 0 ] && echo "$out" | grep -q "HTTPS не налаштовано"
+
+  e2e:
+    name: Повний стенд (docker compose)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+      - name: Підняти стенд (certs, mosquitto, сервіс, емулятор датчиків)
+        run: docker compose --profile demo-sensors up --build -d --wait
+      - name: Наскрізна перевірка (HTTPS, вхід, MQTT по TLS, датчики, брокер)
+        run: bash deploy/e2e-check.sh
+      - name: Логи контейнерів (лише при збої)
+        if: failure()
+        run: docker compose --profile demo-sensors logs --no-color --tail 200
+      - name: Зупинити стенд
+        if: always()
+        run: docker compose --profile demo-sensors down -v
