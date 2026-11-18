@@ -59,6 +59,8 @@ class SensorCfg(BaseModel):
     type: Literal["radar", "rf", "acoustic"]
     position: list[float] = Field(description="[east_m, north_m] відносно початку координат об'єкта")
     max_range: float = Field(gt=0)
+    heading_deg: float = Field(default=0.0, ge=0, lt=360, description="куди дивиться датчик, компасні градуси (північ = 0); для секторних")
+    fov_deg: float = Field(default=360.0, gt=0, le=360, description="ширина сектора огляду по азимуту; 360 = круговий огляд")
     noise: Noise = Noise()
     latency_s: float = Field(default=0.0, ge=0)
     bias: Bias = Bias()
@@ -206,6 +208,8 @@ def build_sensors(cfg: Config) -> list[Sensor]:
             s.bias_est = np.array([-math.radians(sc.bias.azimuth_deg)])
         s.latency = sc.latency_s
         s.latency_comp = sc.latency_s   # затримку вважаємо відомою (синхронізація годинників)
+        s.fov = math.radians(sc.fov_deg)
+        s.heading = math.radians(90.0 - sc.heading_deg)   # компас -> математичний кут
         sensors.append(s)
     return sensors
 

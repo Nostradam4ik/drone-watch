@@ -25,7 +25,7 @@ from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, Resp
 from pydantic import BaseModel, ConfigDict, Field
 
 from dronewatch.fusion.models import Sensor
-from dronewatch.service import config, dashboard_web
+from dronewatch.service import config, coverage, dashboard_web, layout
 from dronewatch.service.ai import agent
 from dronewatch.service.ai.errors import AiUnavailable
 from dronewatch.service.ai.llm import MistralClient
@@ -34,7 +34,7 @@ from dronewatch.service.auth import SensorAuth
 from dronewatch.service.dashboard_auth import LoginLimiter, SessionStore, Users
 from dronewatch.service.dashboard_web import DashboardAccess, current_user, require_user
 from dronewatch.service.demo import DemoSource, make_sensors
-from dronewatch.service.engine import Alert, Engine, SensorStatus
+from dronewatch.service.engine import Alert, Engine, SensorStatus, Zone
 from dronewatch.service.mqtt_in import MqttIngest
 
 log = logging.getLogger("dronewatch")
@@ -105,13 +105,13 @@ def get_runtime(conn: HTTPConnection) -> Runtime:
 RuntimeDep = Annotated[Runtime, Depends(get_runtime)]
 
 
-def build_engine(cfg: config.Config, sensors: list[Sensor], db_path: str) -> Engine:
+def build_engine(cfg: config.Config, sensors: list[Sensor], db_path: str, zones: list[Zone] | None = None) -> Engine:
     required = cfg.mode == "live" and cfg.auth.mode == "required"
     auth = SensorAuth({s.id: s.key_sha256 for s in cfg.sensors if s.key_sha256}) if required else None
     if cfg.mode == "live" and auth is None:
         log.warning("автентифікацію датчиків вимкнено (auth.mode: disabled): будь-хто з доступом до /api/events чи брокера "
                     "може підкидати події й підробляти heartbeat")
-    return Engine(sensors, config.build_zones(cfg), db_path=db_path, scan_dt=cfg.scan_dt,
+    return Engine(sensors, zones if zones is not None else config.build_zones(cfg), db_path=db_path, scan_dt=cfg.scan_dt,
                   min_age_s=cfg.alerts.min_age_s, require_radar=cfg.alerts.require_radar_in_cover,
                   max_coast=cfg.alerts.max_coast_scans, sensor_timeout_s=cfg.sensor_timeout_s,
                   max_events_per_sensor=cfg.max_events_per_sensor_scan, max_tracks=cfg.max_tracks, auth=auth,
@@ -156,7 +156,7 @@ def build_runtime(cfg: config.Config) -> Runtime:
     sensors = make_sensors() if demo else config.build_sensors(cfg)   # demo: датчики симулятора, інакше з конфігу
     db_path = default_db_path()
     map_file = Path(cfg.map.pmtiles)
-    engine = build_engine(cfg, sensors, db_path)
+    engine = build_engine(cfg, sensors, db_path, layout.derive_zones(sensors) if demo else None)   # demo: зони з радарів, а не з конфігу
     if demo:
         engine.calibration = {"done": True, "note": "еталонний політ + компенсація затримок"}
     else:
@@ -350,7 +350,37 @@ def map_mode(rt: Runtime) -> str:
 
 @app.get("/api/config", dependencies=[Depends(require_user)])
 def get_config(rt: RuntimeDep) -> dict[str, Any]:
-    return {**rt.engine.config(), "demo": rt.demo, "map": {"mode": map_mode(rt)}}
+    return {**rt.engine.config(), "demo": rt.demo, "map": {"mode": map_mode(rt)},
+            "editable": rt.demo_src is not None, "sensor_types": layout.type_catalog(), "max_sensors": layout.MAX_SENSORS,
+            "layout_limit_m": layout.LIMIT_M, "zone_rule": {"buffer": layout.BUFFER_FRAC, "critical": layout.CRITICAL_FRAC}}
+
+
+def apply_layout(rt: Runtime, sensors: list[Sensor]) -> dict[str, Any]:
+    """Підміна розстановки в демо: зони виводяться з нових радарів. Без await між кроками: цикл сканів іде в тому ж потоці
+    й не побачить напіврозстановку."""
+    if rt.demo_src is None:
+        raise HTTPException(409, "розстановка датчиків доступна лише в демо-режимі: у бойовому датчики мають ключі й задаються конфігом")
+    rt.demo_src.set_sensors(sensors)
+    rt.engine.set_sensors(sensors, layout.derive_zones(sensors))
+    return {**rt.engine.config(), "demo": rt.demo}
+
+
+@app.put("/api/layout", dependencies=[Depends(require_user)])
+async def put_layout(body: layout.Layout, rt: RuntimeDep) -> dict[str, Any]:
+    """Нова розстановка (повний список датчиків): додати, пересунути чи прибрати датчик це одна атомарна заміна."""
+    return apply_layout(rt, layout.build(body))
+
+
+@app.post("/api/coverage", dependencies=[Depends(require_user)])
+async def post_coverage(body: layout.Layout) -> dict[str, Any]:
+    """Що покриває ця розстановка в буферній зоні (клітинки з класом). Нічого не змінює: лише рахує для підсвітки в редакторі."""
+    return coverage.coverage(layout.build(body))
+
+
+@app.delete("/api/layout", dependencies=[Depends(require_user)])
+async def reset_layout(rt: RuntimeDep) -> dict[str, Any]:
+    """Повернути вбудовані датчики демо."""
+    return apply_layout(rt, make_sensors())
 
 
 @app.get("/api/health", response_model=None)   # повертає то dict, то JSONResponse(503): моделі відповіді тут нема

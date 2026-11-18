@@ -25,7 +25,37 @@ def default_sensors(realistic: bool = False) -> list[Sensor]:
         sensors[1].latency = 0.3
         sensors[2].bias = np.array([np.radians(-4.0)])
         sensors[2].latency = 0.5  # акустика: час проходження звуку + обробка
+    sensors[0].type_id = "radar-mid"
     return sensors
+
+
+# Палітра датчиків для розстановки на карті. sigma: радар (м, градуси азимут, градуси елевація) або (градуси,) для пеленгових.
+SENSOR_TYPES: dict[str, dict[str, Any]] = {
+    "radar-long": {"name": "Радар дальній", "kind": "radar", "label": "radar", "max_range": 3000.0,
+                   "sigma": (10.0, 1.2, 2.5), "pd": 0.85, "clutter": 0.7},
+    "radar-mid": {"name": "Радар середній", "kind": "radar", "label": "radar", "max_range": 1500.0,
+                  "sigma": (5.0, 0.7, 1.5), "pd": 0.90, "clutter": 0.5},
+    "radar-short": {"name": "Радар ближній (точний)", "kind": "radar", "label": "radar", "max_range": 800.0,
+                    "sigma": (2.0, 0.4, 0.8), "pd": 0.95, "clutter": 0.3},
+    # Узагальнений секторний радар (не конкретна модель): параметри як у середнього, але дивиться лише в сектор 120°
+    "radar-sector": {"name": "Радар секторний 120°", "kind": "radar", "label": "radar", "max_range": 1500.0,
+                     "sigma": (5.0, 0.7, 1.5), "pd": 0.90, "clutter": 0.5, "fov_deg": 120.0},
+    "rf": {"name": "RF-детектор", "kind": "bearing", "label": "rf", "max_range": 1800.0, "sigma": (5.0,), "pd": 0.70, "clutter": 0.3},
+    "acoustic": {"name": "Акустичний", "kind": "bearing", "label": "acoustic", "max_range": 700.0, "sigma": (10.0,), "pd": 0.60,
+                 "clutter": 0.3},
+}
+
+
+def make_sensor(type_id: str, name: str, x: float, y: float, heading_deg: float = 0.0) -> Sensor:
+    """Датчик із палітри в точці (x, y) метрів. Ідеальний: без зсуву й затримки (їх задають лише вбудовані датчики демо).
+    heading_deg: куди він дивиться, компасні градуси (північ = 0, схід = 90); має значення лише для секторних типів."""
+    p = SENSOR_TYPES[type_id]
+    sigma = (p["sigma"][0], *np.radians(p["sigma"][1:])) if p["kind"] == "radar" else (np.radians(p["sigma"][0]),)
+    s = Sensor(name, p["kind"], (x, y, 0.0), sigma, p["pd"], p["max_range"], p["clutter"], p["label"])
+    s.type_id = type_id
+    s.fov = np.radians(p.get("fov_deg", 360.0))
+    s.heading = np.radians(90.0 - heading_deg)   # компас -> математичний кут
+    return s
 
 
 class Target:
@@ -96,12 +126,12 @@ def simulate(sensors: list[Sensor], targets: list[Target], duration: float = 90.
                 if not tg.active(tm):
                     continue
                 pos = tg.pos(tm)
-                if np.linalg.norm(pos - s.pos) > s.max_range or rng.random() > s.pd:
+                if np.linalg.norm(pos - s.pos) > s.max_range or not s.in_fov(pos) or rng.random() > s.pd:
                     continue
                 z = s.h(np.concatenate([pos, np.zeros(3)])) + s.bias + rng.normal(0, s.sigma)
                 dets.append((s.name, z))
             for _ in range(rng.poisson(s.clutter_rate)):  # хибні детекції (птахи, відбиття, вітер)
-                az = rng.uniform(-np.pi, np.pi)
+                az = rng.uniform(-np.pi, np.pi) if s.fov >= 2 * np.pi - 1e-9 else rng.uniform(s.heading - s.fov / 2, s.heading + s.fov / 2)
                 z = np.array([rng.uniform(50, s.max_range), az, rng.uniform(0, 0.5)]) if s.kind == "radar" else np.array([az])
                 dets.append((s.name, z))
         rng.shuffle(dets)

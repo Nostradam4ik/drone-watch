@@ -55,6 +55,11 @@ class DemoSource:
         self.seed += 1  # наступний цикл буде з іншим шумом
         self.finished_at: float | None = None
 
+    def set_sensors(self, sensors: list[Sensor]) -> None:
+        """Нова розстановка: симуляцію перераховуємо з початку, бо детекції залежать від позицій і дальностей датчиків."""
+        self.sensors = {s.name: s for s in sensors}
+        self.restart()
+
     def poll(self) -> tuple[list[dict[str, Any]], dict[str, Floats], bool]:
         """Повертає (події, істина) для всіх кроків симуляції, час яких уже настав; None коли цикл завершено."""
         elapsed = time.time() - self.started

@@ -154,8 +154,19 @@ def measure(rng: random.Random, sensor: SensorInfo, pos: Point, bias: Bias, nois
     return e
 
 
+def in_sector(sensor: SensorInfo, x: float, y: float) -> bool:
+    """Чи в секторі огляду датчика точка (x, y). Без fov_deg у конфігу (старий формат) датчик круговий."""
+    fov = sensor.get("fov_deg", 360.0)
+    if fov >= 360.0:
+        return True
+    off = (compass(x - sensor["pos"][0], y - sensor["pos"][1]) - sensor.get("heading_deg", 0.0) + 180.0) % 360.0 - 180.0
+    return abs(off) <= fov / 2
+
+
 def clutter(rng: random.Random, sensor: SensorInfo) -> Event:
-    e: Event = {"azimuth_deg": rng.uniform(0, 360)}
+    fov = sensor.get("fov_deg", 360.0)
+    az = rng.uniform(0, 360) if fov >= 360.0 else (sensor.get("heading_deg", 0.0) + rng.uniform(-fov / 2, fov / 2)) % 360.0
+    e: Event = {"azimuth_deg": az}
     if sensor["kind"] == "radar":
         e["range_m"] = rng.uniform(50, sensor["max_range"])
         e["elevation_deg"] = rng.uniform(0, 30)
@@ -435,7 +446,7 @@ def scan_events(a: argparse.Namespace, rng: random.Random, sensors: list[SensorI
             if not tg.active(el):
                 continue
             p = tg.pos(el)
-            if math.hypot(p[0] - s["pos"][0], p[1] - s["pos"][1]) > s["max_range"] or rng.random() > a.pd:
+            if math.hypot(p[0] - s["pos"][0], p[1] - s["pos"][1]) > s["max_range"] or not in_sector(s, p[0], p[1]) or rng.random() > a.pd:
                 continue
             ev: Event = {"sensor_id": s["id"], "ts": time.time(), **measure(rng, s, p, bias, noise)}
             if tg.model and s["label"] == "rf":   # RF-детектор протоколів упізнає модель; радар і мікрофон цього не вміють

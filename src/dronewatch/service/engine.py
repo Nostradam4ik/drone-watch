@@ -128,6 +128,8 @@ class Engine:
         self.scan_dt = scan_dt
         self.tracker = Tracker(sensors, max_tracks=max_tracks)
         self.t0 = self.started = self.clock()
+        self.layout_rev = 0   # зростає при кожній зміні розстановки: дашборд за ним помічає, що конфіг застарів
+        self.since: dict[str, float] = {}   # sensor_id -> коли датчик додано (для тих, що додані після старту)
         self.last_seen: dict[str, float] = {}   # sensor_id -> час, коли від датчика востаннє щось прийшло (подія або heartbeat)
         self.heard: set[str] = set()            # датчики, що озивалися з попереднього скану
         self.buffer: list[Measurement] = []
@@ -156,15 +158,34 @@ class Engine:
     def reset(self) -> None:
         """Новий сеанс трекінгу (журнал інцидентів лишається)."""
         with self.lock:
-            self.tracker = Tracker(list(self.sensors.values()), max_tracks=self.max_tracks)
-            self.buffer.clear()
-            self.buf_count.clear()
-            self.ident_buffer.clear()
-            self.idents.clear()
-            self.dive_scans.clear()
-            self.z_hist.clear()
-            self.max_level.clear()
-            self.t0 = self.clock()
+            self._reset_locked()
+
+    def _reset_locked(self) -> None:
+        self.tracker = Tracker(list(self.sensors.values()), max_tracks=self.max_tracks)
+        self.buffer.clear()
+        self.buf_count.clear()
+        self.ident_buffer.clear()
+        self.idents.clear()
+        self.dive_scans.clear()
+        self.z_hist.clear()
+        self.max_level.clear()
+        self.t0 = self.clock()
+
+    def set_sensors(self, sensors: Iterable[Sensor], zones: list[Zone] | None = None) -> None:
+        """Нова розстановка датчиків (демо), за потреби разом із новими зонами. Старі треки й рівні тривог втрачають сенс,
+        тож це ще й новий сеанс трекінгу. Датчик, якого щойно додали, «очікується», а не «втрачений»:
+        відлік його мовчання йде від моменту додавання."""
+        sensors = list(sensors)
+        with self.lock:
+            if zones is not None:
+                self.zones = zones
+            now = self.clock()
+            self.sensors = {s.name: s for s in sensors}   # підміна цілим словником: _screen читає його поза замком
+            self.since = {s.name: self.since.get(s.name, now) for s in sensors}
+            self.last_seen = {k: v for k, v in self.last_seen.items() if k in self.sensors}
+            self.heard &= set(self.sensors)
+            self.layout_rev += 1
+            self._reset_locked()
 
     def count(self, key: str, n: int = 1) -> None:
         """Потокобезпечний лічильник: `stats[k] += n` із кількох потоків (HTTP, MQTT) губить приріст."""
@@ -395,7 +416,7 @@ class Engine:
         out: dict[str, SensorStatus] = {}
         for sid, s in self.sensors.items():
             seen = self.last_seen.get(sid)
-            age = now - (seen if seen is not None else self.started)
+            age = now - (seen if seen is not None else self.since.get(sid, self.started))
             out[sid] = {"id": sid, "label": s.label, "state": self._health(seen, age), "age_s": round(age, 1) if seen is not None else None}
         return out
 
@@ -433,7 +454,7 @@ class Engine:
             })
         out: dict[str, Any] = {
             "t": round(t, 1), "tracks": tracks, "stats": dict(self.stats), "calibration": self.calibration,
-            "sensors": list(self._sensor_status().values()),
+            "sensors": list(self._sensor_status().values()), "layout_rev": self.layout_rev,
             "tentative": sum(1 for tr in self.tracker.tracks if tr.state == "TENTATIVE")}
         if truth is not None:
             out["truth"] = {k: [round(float(v), 1) for v in p[:3]] for k, p in truth.items()}
@@ -441,8 +462,10 @@ class Engine:
 
     def config(self) -> dict[str, Any]:
         return {
-            "sensors": [{"id": s.name, "kind": s.kind, "label": s.label, "pos": s.pos[:2].tolist(), "max_range": s.max_range}
-                        for s in self.sensors.values()],
+            "sensors": [{"id": s.name, "kind": s.kind, "label": s.label, "type": s.type_id, "pos": s.pos[:2].tolist(),
+                         "max_range": s.max_range, "heading_deg": round(math_to_compass(s.heading), 1),
+                         "fov_deg": round(math.degrees(s.fov), 1)} for s in list(self.sensors.values())],
+            "layout_rev": self.layout_rev,
             "zones": [z.as_dict() for z in self.zones],
             "origin": {"lat": self.origin[0], "lon": self.origin[1]},
             "scan_dt": self.scan_dt,

@@ -128,6 +128,26 @@
   .sensor.LOST { border-left-color: var(--crit); } .sensor.LOST i { background: var(--crit); box-shadow: none; }
   .sensor .st { margin-left: auto; color: var(--muted); font-size: 11.5px; }
   .sensor.LOST .st { color: var(--crit); font-weight: 600; } .sensor.WAITING .st { color: var(--warn); }
+  h2.hd-sensors { display: flex; align-items: center; justify-content: space-between; padding-right: 12px; }
+  h2.hd-sensors .linkbtn { padding: 3px 9px; font-size: 11px; }
+  h2.hd-sensors .linkbtn.on { background: var(--sensor); color: #04100d; border-color: var(--sensor); }
+  #editor { padding: 9px 13px 10px; border-bottom: 1px solid var(--line); display: grid; gap: 8px; }
+  #palette { display: flex; flex-wrap: wrap; gap: 5px; }
+  #palette button { background: none; border: 1px solid var(--line); color: var(--text); border-radius: 3px; padding: 4px 8px;
+                    font: 500 11.5px var(--face-label); cursor: pointer; }
+  #palette button:hover { border-color: var(--muted); }
+  #palette button.on { background: var(--sensor); color: #04100d; border-color: var(--sensor); }
+  #editor .hint { color: var(--muted); font-size: 11px; line-height: 1.45; min-height: 3.2em; }
+  #editor .linkbtn { justify-self: start; }
+  #cov-row { font-size: 11.5px; color: var(--text); display: flex; align-items: center; gap: 6px; cursor: pointer; }
+  #cov-stats { display: grid; gap: 3px; font: 11px var(--face-data); color: var(--muted); }
+  #cov-stats div { display: flex; align-items: center; gap: 7px; }
+  #cov-stats i { width: 10px; height: 10px; border-radius: 2px; flex: none; }
+  #cov-stats b { margin-left: auto; color: var(--text); font-weight: 600; white-space: nowrap; padding-left: 6px; }
+  #cov-stats .sub { border-top: 1px solid var(--line); padding-top: 3px; margin-top: 2px; }
+  .sensor .del { margin-left: 8px; width: 20px; height: 20px; padding: 0; line-height: 1; background: none; color: var(--muted);
+                 border: 1px solid var(--line); border-radius: 3px; cursor: pointer; flex: none; }
+  .sensor .del:hover { color: var(--crit); border-color: var(--crit); }
   #degraded { flex: 1 0 100%; background: #ff386318; border: 1px solid var(--crit); border-radius: 3px; color: var(--crit);
               padding: 7px 12px; font: 12px var(--face-data); }
 
@@ -207,7 +227,9 @@
       <div><i style="background:#b9c6cf"></i>приналежність не визначена</div>
       <div><i style="background:transparent;border:2px solid var(--warn)"></i>кільце: у буферній зоні</div>
       <div><i style="background:transparent;border:2px solid var(--crit)"></i>кільце: у критичній зоні</div>
-      <div><i style="background:var(--sensor)"></i>датчик</div>
+      <div><i style="background:#4fc3ff"></i>радар</div>
+      <div><i style="background:#b48cff"></i>RF-детектор</div>
+      <div><i style="background:#ffb86b"></i>акустичний датчик</div>
       <div class="tip">Обертати й нахиляти карту: права кнопка миші + рух, або кнопка ⟲ справа (тоді лівою).</div>
       <label id="truth-row" hidden><input type="checkbox" id="truth"> показати істинні позиції (лише демо)</label>
     </div>
@@ -218,7 +240,14 @@
     </div>
     <div id="alerts"><div class="empty">Тривог немає</div></div>
     <div id="sensors-box">
-      <h2 class="hd-sensors">Датчики</h2>
+      <h2 class="hd-sensors"><span>Датчики</span><button class="linkbtn" id="edit-sensors" type="button" hidden>✎ Розставити</button></h2>
+      <div id="editor" hidden>
+        <div id="palette"></div>
+        <div class="hint" id="palette-hint"></div>
+        <label id="cov-row"><input type="checkbox" id="cov-on" checked> підсвітити покриття буферної зони</label>
+        <div id="cov-stats"></div>
+        <button class="linkbtn" id="layout-reset" type="button">Скинути до початкових</button>
+      </div>
       <div id="sensors"></div>
     </div>
     <div>
@@ -337,7 +366,8 @@ function hudStyle(style) {
 
 function addOverlays() {
   if (map.getSource("tracks")) return;
-  for (const id of ["zones", "ranges", "sensors", "trails", "vectors", "truth", "stalks", "impact", "tracks"]) map.addSource(id, { type: "geojson", data: fc([]) });
+  for (const id of ["coverage", "zones", "ranges", "sensors", "handles", "trails", "vectors", "truth", "stalks", "impact", "tracks"]) map.addSource(id, { type: "geojson", data: fc([]) });
+  map.addLayer({ id: "coverage-fill", source: "coverage", type: "fill", paint: { "fill-color": ["get", "color"], "fill-opacity": 0.34, "fill-antialias": false } });
   const label = (id, source, extra) => map.addLayer({ id, source, type: "symbol", layout: { "text-font": FONT, "text-size": 11, "text-allow-overlap": true, ...extra.layout },
     paint: { "text-halo-color": "#060a10", "text-halo-width": 1.6, ...extra.paint } });
   map.addLayer({ id: "zones-fill", source: "zones", type: "fill", filter: ["==", ["geometry-type"], "Polygon"], paint: { "fill-color": ["get", "color"], "fill-opacity": 0.09 } });
@@ -351,6 +381,8 @@ function addOverlays() {
   map.addLayer({ id: "truth", source: "truth", type: "circle", paint: { "circle-radius": 8, "circle-opacity": 0, "circle-stroke-color": "#fff", "circle-stroke-width": 1, "circle-stroke-opacity": 0.55 } });
   map.addLayer({ id: "sensors-dot", source: "sensors", type: "circle",
     paint: { "circle-radius": 6, "circle-color": ["get", "color"], "circle-stroke-color": "#060a10", "circle-stroke-width": 2 } });
+  map.addLayer({ id: "handles-dot", source: "handles", type: "circle",   // ручка повороту секторного датчика (лише в редакторі)
+    paint: { "circle-radius": 7, "circle-color": "#eef5f9", "circle-stroke-color": ["get", "color"], "circle-stroke-width": 3 } });
   label("sensors-label", "sensors", { layout: { "text-field": ["get", "name"], "text-offset": [0, 1.1], "text-anchor": "top" }, paint: { "text-color": ["get", "color"] } });
   map.addLayer({ id: "impact-line", source: "impact", type: "line", filter: ["==", ["geometry-type"], "LineString"],
     paint: { "line-color": "#ff3b63", "line-width": 2, "line-dasharray": [2, 2] } });
@@ -375,19 +407,50 @@ function addOverlays() {
   pushData();
 }
 
-function pushData() {
-  if (!map || !cfg || !map.getSource("tracks")) return;
-  const set = (id, features) => map.getSource(id).setData(fc(features));
-  set("zones", cfg.zones.flatMap(z => {
+const SENSOR_COLOR = { radar: "#4fc3ff", rf: "#b48cff", acoustic: "#ffb86b" };
+
+const isSector = s => s.fov_deg != null && s.fov_deg < 359.9;
+
+// Контур сектора огляду: центр, дуга від heading - fov/2 до heading + fov/2, назад у центр. Кути компасні (північ = 0, схід = 90).
+function sectorRing(s) {
+  const pts = [toLL(s.pos[0], s.pos[1])], n = 28, a0 = s.heading_deg - s.fov_deg / 2;
+  for (let i = 0; i <= n; i++) {
+    const a = (a0 + s.fov_deg * i / n) * Math.PI / 180;
+    pts.push(toLL(s.pos[0] + s.max_range * Math.sin(a), s.pos[1] + s.max_range * Math.cos(a)));
+  }
+  pts.push(pts[0]);
+  return pts;
+}
+
+function pushZones() {
+  if (!map || !cfg || !map.getSource("zones")) return;
+  map.getSource("zones").setData(fc(cfg.zones.flatMap(z => {
     const c = COLORS[z.level];
     return [feat({ type: "Polygon", coordinates: [circleRing(z.center[0], z.center[1], z.radius)] }, { color: c, name: z.name }),
             feat({ type: "Point", coordinates: toLL(z.center[0], z.center[1] + z.radius) }, { color: c, name: z.name })];
-  }));
-  const sensorFeatures = cfg.sensors.map(s => ({ s, lost: sensorState(s.id) === "LOST" }));
-  set("ranges", sensorFeatures.map(({ s, lost }) => feat({ type: "LineString", coordinates: circleRing(s.pos[0], s.pos[1], s.max_range) },
-    { color: lost ? "#ff3863" : "#4fc3ff" })));
-  set("sensors", sensorFeatures.map(({ s, lost }) => feat({ type: "Point", coordinates: toLL(s.pos[0], s.pos[1]) },
-    { color: lost ? "#ff3863" : "#4fc3ff", name: s.id + (lost ? " — НЕМАЄ ЗВʼЯЗКУ" : "") })));
+  })));
+}
+
+// Датчики окремо від решти: під час перетягування оновлюються лише вони, а не всі шари
+function pushSensors() {
+  if (!map || !cfg || !map.getSource("sensors")) return;
+  const items = cfg.sensors.map(s => ({ s, lost: sensorState(s.id) === "LOST", color: SENSOR_COLOR[s.label] || "#4fc3ff" }));
+  map.getSource("ranges").setData(fc(items.map(({ s, lost, color }) => feat({ type: "LineString",
+    coordinates: isSector(s) ? sectorRing(s) : circleRing(s.pos[0], s.pos[1], s.max_range) }, { color: lost ? "#ff3863" : color }))));
+  map.getSource("handles").setData(fc(editing ? items.filter(({ s }) => isSector(s)).map(({ s, color }) => {
+    const a = s.heading_deg * Math.PI / 180, d = s.max_range * 0.35;   // ручка на осі огляду; тягнеш, і датчик повертається
+    return feat({ type: "Point", coordinates: toLL(s.pos[0] + d * Math.sin(a), s.pos[1] + d * Math.cos(a)) }, { sid: s.id, color });
+  }) : []));
+  map.getSource("sensors").setData(fc(items.map(({ s, lost, color }) => feat({ type: "Point", coordinates: toLL(s.pos[0], s.pos[1]) },
+    { color: lost ? "#ff3863" : color, sid: s.id, name: s.id + (lost ? " — НЕМАЄ ЗВʼЯЗКУ" : "") }))));
+  scheduleCoverage();
+}
+
+function pushData() {
+  if (!map || !cfg || !map.getSource("tracks")) return;
+  const set = (id, features) => map.getSource(id).setData(fc(features));
+  pushZones();
+  pushSensors();
   const tracks = state ? state.tracks : [];
   set("tracks", tracks.map(t => feat({ type: "Point", coordinates: toLL(t.x, t.y) }, {
     id: t.id, color: (SIDE[t.side] || SIDE.unknown).color, opacity: t.coasting ? 0.4 : 1, selected: t.id === selected,
@@ -448,6 +511,7 @@ function setupRotateMode() {
   });
   addEventListener("mouseup", () => { rot = null; });
   map.rotateDragged = () => moved;   // щоб клік після обертання не знімав виділення цілі
+  map.rotateOn = () => on;
 }
 
 function initMap() {
@@ -464,8 +528,11 @@ function initMap() {
   map.addControl(new maplibregl.NavigationControl({ visualizePitch: true }), "bottom-right");
   setupRotateMode();
   map.on("style.load", addOverlays);
+  setupSensorEditing();
   map.on("click", e => {
     if (map.rotateDragged && map.rotateDragged()) return;
+    if (suppressClick) { suppressClick = false; return; }   // клік після перетягування датчика не знімає виділення цілі
+    if (editing && tool) { addSensor(e.lngLat); return; }
     const hit = map.getLayer("tracks-hit") ? map.queryRenderedFeatures(e.point, { layers: ["tracks-hit"] })[0] : null;
     selected = hit ? Number(hit.properties.id) : null;   // клік повз ціль знімає виділення
     select();
@@ -742,6 +809,10 @@ function render(msg) {
     mq.className = "chip " + (msg.mqtt.connected && !idle ? "live" : "off");
   }
 
+  if (cfg && msg.layout_rev !== undefined && msg.layout_rev !== cfg.layout_rev && !drag && !reloading) {   // розстановку змінили деінде (інша вкладка)
+    reloading = true;
+    reloadConfig().finally(() => { reloading = false; });
+  }
   renderSensors(msg.sensors || []);
   const st = msg.stats, ov = document.getElementById("overload"), shed = st.events_dropped + st.tracks_capped + st.bearings_truncated;
   const dn = document.getElementById("denied");
@@ -785,9 +856,11 @@ function alertTag(msg, a) {
 }
 
 function renderSensors(list) {
+  const kindName = s => { const c = cfg && cfg.sensors.find(x => x.id === s.id), t = c && typeInfo(c.type); return t ? t.name : (KIND_UA[s.label] || s.label); };
   document.getElementById("sensors").innerHTML = list.map(s =>
-    `<div class="sensor ${s.state}"><i></i><span>${esc(s.id)} <span class="st">${esc(KIND_UA[s.label] || s.label)}</span></span>` +
-    `<span class="st">${SENSOR_UA[s.state]}${s.state === "LOST" && s.age_s != null ? " · " + Math.round(s.age_s) + " с" : ""}</span></div>`).join("");
+    `<div class="sensor ${s.state}"><i></i><span>${esc(s.id)} <span class="st">${esc(kindName(s))}</span></span>` +
+    `<span class="st">${SENSOR_UA[s.state]}${s.state === "LOST" && s.age_s != null ? " · " + Math.round(s.age_s) + " с" : ""}</span>` +
+    (editing ? `<button class="del" type="button" data-del="${esc(s.id)}" title="Прибрати датчик" aria-label="Прибрати датчик ${esc(s.id)}">×</button>` : "") + `</div>`).join("");
   const lost = list.filter(s => s.state === "LOST"), ok = list.filter(s => s.state === "OK").length;
   const badge = document.getElementById("sens");
   badge.textContent = "датчики: " + ok + "/" + list.length;
@@ -882,6 +955,215 @@ updateSoundBtn();
 
 // Усі запити до API йдуть сюди: 401 означає, що входу немає або сесія скінчилась, тож ведемо на форму входу
 class LoginRequired extends Error {}
+// ---------- розстановка датчиків (лише демо: у бойовому режимі датчики з ключами задає конфіг) ----------
+// Датчик ставиться кліком по карті, перетягується мишею, прибирається кнопкою ×. Кожна зміна це повна нова розстановка
+// на сервері (PUT /api/layout): він перевіряє її й перезапускає симуляцію, тож карта завжди показує те, що рахує рушій.
+let editing = false, tool = null, drag = null, suppressClick = false, reloading = false, layoutChain = Promise.resolve();
+const typeInfo = id => ((cfg && cfg.sensor_types) || []).find(t => t.id === id);
+const round1 = v => Math.round(v * 10) / 10;
+
+function fromLL(lng, lat) {   // обернене до toLL: градуси -> метри (схід, північ)
+  const o = cfg.origin;
+  return [(lng - o.lon) * M_PER_DEG * Math.cos(o.lat * Math.PI / 180), (lat - o.lat) * M_PER_DEG];
+}
+
+function notice(text) {
+  const el = document.createElement("div");
+  el.className = "toast WARNING"; el.textContent = text;
+  document.getElementById("toast").appendChild(el);
+  setTimeout(() => el.remove(), 6000);
+}
+
+function sensorSpec(t) {
+  const sg = t.sigma, acc = t.label === "radar" ? `дальність ±${sg[0]} м, азимут ±${sg[1]}°, висота ±${sg[2]}°` : `пеленг ±${sg[0]}°`;
+  const view = t.fov_deg < 360 ? `дивиться в сектор ${t.fov_deg}° (білою ручкою його повертають)` : "круговий огляд";
+  return `${t.name}: радіус дії ${t.max_range} м, ${view}, виявлення ${Math.round(t.pd * 100)} %, похибка: ${acc}. ${t.label === "radar" ? "Дає позицію й висоту." : "Дає лише напрямок: потрібні два датчики."}`;
+}
+
+// ---------- підсвітка покриття (рахує сервер: POST /api/coverage) ----------
+// Клас клітинки буферної зони: що система зможе зробити з ціллю саме тут
+const COVERAGE = [
+  { name: "blind",  color: "#ff3b63", label: "сліпа зона: ніхто не бачить" },
+  { name: "weak",   color: "#ffb020", label: "слабке: лише напрямок, без висоти" },
+  { name: "good",   color: "#9be564", label: "добре: радар (позиція й висота)" },
+  { name: "strong", color: "#33e6c2", label: "повне: радар + запас + RF-ідентифікація" },
+];
+let covSig = "", covTimer = null, covSeq = 0;
+
+function clearCoverage() {
+  if (map && map.getSource("coverage")) map.getSource("coverage").setData(fc([]));
+  document.getElementById("cov-stats").innerHTML = ""; covSig = "";
+}
+
+function scheduleCoverage() {
+  if (!editing || !document.getElementById("cov-on").checked || !cfg) return;
+  const sig = JSON.stringify(cfg.sensors.map(s => [s.id, s.type, s.pos, s.heading_deg]));
+  if (sig === covSig || covTimer) return;   // розстановка та сама, або запит уже заплановано (піде з найновішою)
+  covTimer = setTimeout(runCoverage, 120);
+}
+
+async function runCoverage() {
+  covTimer = null;
+  const my = ++covSeq, sig = JSON.stringify(cfg.sensors.map(s => [s.id, s.type, s.pos, s.heading_deg]));
+  const body = { sensors: cfg.sensors.map(s => ({ id: s.id, type: s.type, x: round1(s.pos[0]), y: round1(s.pos[1]), heading: (s.heading_deg || 0) % 360 })) };
+  try {
+    const r = await fetch("/api/coverage", { method: "POST", credentials: "same-origin", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+    if (my !== covSeq || !editing) return;   // застаріла відповідь: з'явилась новіша розстановка
+    if (!r.ok) { clearCoverage(); covSig = sig; document.getElementById("cov-stats").textContent = "покриття не порахувати: потрібен радар або два пеленгові датчики"; return; }
+    drawCoverage(await r.json()); covSig = sig;
+  } catch (err) { /* сервіс тимчасово недоступний: підсвітка просто лишається попередньою */ }
+}
+
+function drawCoverage(c) {
+  const s = c.cell;
+  map.getSource("coverage").setData(fc(c.cells.map(([ix, iy, k]) => feat({ type: "Polygon", coordinates: [[
+    toLL(ix * s, iy * s), toLL((ix + 1) * s, iy * s), toLL((ix + 1) * s, (iy + 1) * s), toLL(ix * s, (iy + 1) * s), toLL(ix * s, iy * s)]] },
+    { color: COVERAGE[k].color }))));
+  document.getElementById("cov-stats").innerHTML = COVERAGE.slice().reverse().map(k =>
+    `<div><i style="background:${k.color}"></i>${esc(k.label)}<b>${c.stats[k.name]} %</b></div>`).join("") +
+    `<div class="sub">RF може визначити модель дрона на <b style="margin-left:6px">${c.stats.ident} %</b> зони</div>`;
+}
+
+function renderPalette() {
+  document.getElementById("palette").innerHTML = `<button type="button" data-tool="" class="${tool ? "" : "on"}">↖ курсор</button>` +
+    cfg.sensor_types.map(t => `<button type="button" data-tool="${esc(t.id)}" class="${tool === t.id ? "on" : ""}" title="${esc(sensorSpec(t))}">${esc(t.name)}</button>`).join("");
+  document.getElementById("palette-hint").textContent = tool ? sensorSpec(typeInfo(tool)) + " Клікніть по карті, щоб поставити; Esc: курсор."
+    : "Курсор: тягніть датчики, × у списку прибирає. Оберіть тип, щоб поставити новий кліком по карті. Буферна й критична зони йдуть за радарами.";
+  if (map) map.getCanvas().style.cursor = editing && tool ? "crosshair" : "";
+}
+
+function setEditing(on) {
+  editing = on; tool = null; drag = null;
+  document.getElementById("editor").hidden = !on;
+  const btn = document.getElementById("edit-sensors");
+  btn.classList.toggle("on", on); btn.textContent = on ? "✓ Готово" : "✎ Розставити";
+  if (on) renderPalette(); else if (map) map.getCanvas().style.cursor = "";
+  renderSensors(state ? state.sensors || [] : []);
+  if (on) scheduleCoverage(); else clearCoverage();
+  pushSensors();   // ручки повороту секторних датчиків показуються лише в редакторі
+}
+
+// Зони виводяться з радарів (те саме правило, що в layout.derive_zones на сервері): навколо кожного радара буферна й критична.
+// Тут це лише миттєвий перегляд, щоб зони їхали разом із радаром ще до відповіді сервера; остаточні зони приходять від нього.
+// Без радарів зони залежать від центра датчиків: тоді чекаємо сервер.
+function previewZones() {
+  const radars = cfg.sensors.filter(s => s.label === "radar"), r = cfg.zone_rule;
+  if (!radars.length || !r) return;
+  cfg.zones = radars.flatMap(s => [
+    { name: "Буферна зона " + s.id, level: "WARNING", radius: round1(s.max_range * r.buffer), center: s.pos.slice() },
+    { name: "Критична зона " + s.id, level: "CRITICAL", radius: round1(s.max_range * r.critical), center: s.pos.slice() }]);
+  pushZones();
+}
+
+function applyConfig(nc) {
+  cfg.sensors = nc.sensors; cfg.zones = nc.zones; cfg.layout_rev = nc.layout_rev;
+  trails.clear(); selected = null;   // рушій почав новий сеанс: старі треки й виділення більше нічого не означають
+  if (popup) { const p = popup; popup = null; stopViewer(); p.remove(); }
+  pushData();
+}
+
+async function reloadConfig() {
+  const fresh = await api("/api/config");
+  Object.assign(cfg, fresh);
+  trails.clear(); pushData();
+  if (editing) renderPalette();
+}
+
+function commitLayout() {
+  layoutChain = layoutChain.then(async () => {
+    const body = { sensors: cfg.sensors.map(s => ({ id: s.id, type: s.type, x: round1(s.pos[0]), y: round1(s.pos[1]), heading: (s.heading_deg || 0) % 360 })) };
+    try {
+      const r = await fetch("/api/layout", { method: "PUT", credentials: "same-origin", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+      if (r.status === 401) { location.replace("/login"); return; }
+      if (!r.ok) {
+        const d = await r.json().catch(() => ({}));
+        notice(typeof d.detail === "string" ? d.detail : "Розстановку відхилено: " + ((d.detail && d.detail[0] && d.detail[0].msg) || "помилка " + r.status).replace(/^Value error, /, ""));
+        await reloadConfig();   // повертаємо те, що справді діє на сервері
+        return;
+      }
+      applyConfig(await r.json());
+    } catch (err) { notice("Не вдалося зберегти розстановку: сервіс недоступний"); }
+  });
+}
+
+function addSensor(lngLat) {
+  const info = typeInfo(tool); if (!info) return;
+  const [x, y] = fromLL(lngLat.lng, lngLat.lat).map(round1);
+  if (cfg.sensors.length >= cfg.max_sensors) return notice("Забагато датчиків: не більше " + cfg.max_sensors);
+  if (Math.abs(x) > cfg.layout_limit_m || Math.abs(y) > cfg.layout_limit_m) return notice("Занадто далеко від центру: ліміт " + cfg.layout_limit_m + " м");
+  const prefix = info.label === "radar" ? "R" : info.label === "rf" ? "RF" : "AC";
+  let n = 1; while (cfg.sensors.some(s => s.id === prefix + n)) n++;
+  // секторний датчик одразу дивиться на центр охоронюваної ділянки (середина зон; без зон: на початок координат)
+  const cz = cfg.zones.length ? [cfg.zones.reduce((a, z) => a + z.center[0], 0) / cfg.zones.length, cfg.zones.reduce((a, z) => a + z.center[1], 0) / cfg.zones.length] : [0, 0];
+  const heading = Math.hypot(cz[0] - x, cz[1] - y) < 10 ? 0 : round1((Math.atan2(cz[0] - x, cz[1] - y) * 180 / Math.PI + 360) % 360);
+  cfg.sensors.push({ id: prefix + n, type: info.id, kind: info.label === "radar" ? "radar" : "bearing", label: info.label, pos: [x, y],
+                     max_range: info.max_range, fov_deg: info.fov_deg, heading_deg: heading });
+  pushSensors(); previewZones(); commitLayout();
+}
+
+function setupSensorEditing() {
+  map.on("mousedown", "sensors-dot", e => {
+    if (!editing || tool || (map.rotateOn && map.rotateOn()) || e.originalEvent.button !== 0) return;
+    e.preventDefault();
+    drag = { sid: e.features[0].properties.sid, moved: false };
+    map.dragPan.disable(); map.getCanvas().style.cursor = "grabbing";
+  });
+  map.on("mousedown", "handles-dot", e => {   // ручка повороту: тягнеш, і сектор повертається в бік курсора
+    if (!editing || (map.rotateOn && map.rotateOn()) || e.originalEvent.button !== 0) return;
+    e.preventDefault();
+    drag = { sid: e.features[0].properties.sid, moved: false, turn: true };
+    map.dragPan.disable(); map.getCanvas().style.cursor = "grabbing";
+  });
+  map.on("mouseenter", "handles-dot", () => { if (editing && !drag) map.getCanvas().style.cursor = "grab"; });
+  map.on("mouseleave", "handles-dot", () => { if (!drag) map.getCanvas().style.cursor = editing && tool ? "crosshair" : ""; });
+  map.on("mousemove", e => {
+    if (!drag) return;
+    const s = cfg.sensors.find(x => x.id === drag.sid); if (!s) return;
+    if (drag.turn) {
+      const [x, y] = fromLL(e.lngLat.lng, e.lngLat.lat);
+      s.heading_deg = round1((Math.atan2(x - s.pos[0], y - s.pos[1]) * 180 / Math.PI + 360) % 360);
+      drag.moved = true; pushSensors(); return;
+    }
+    const lim = cfg.layout_limit_m, [x, y] = fromLL(e.lngLat.lng, e.lngLat.lat);
+    s.pos = [round1(Math.max(-lim, Math.min(lim, x))), round1(Math.max(-lim, Math.min(lim, y)))];
+    drag.moved = true; pushSensors(); previewZones();
+  });
+  addEventListener("mouseup", () => {
+    if (!drag) return;
+    const d = drag; drag = null;
+    if (!(map.rotateOn && map.rotateOn())) map.dragPan.enable();
+    map.getCanvas().style.cursor = editing && !tool ? "grab" : "";
+    if (d.moved) {
+      suppressClick = true; setTimeout(() => { suppressClick = false; }, 0);   // клік після відпускання приходить одразу; якщо його не буде, прапорець не має «з'їсти» наступний
+      commitLayout();
+    }
+  });
+  map.on("mouseenter", "sensors-dot", () => { if (editing && !tool && !drag) map.getCanvas().style.cursor = "grab"; });
+  map.on("mouseleave", "sensors-dot", () => { if (!drag) map.getCanvas().style.cursor = editing && tool ? "crosshair" : ""; });
+}
+
+document.getElementById("edit-sensors").addEventListener("click", () => setEditing(!editing));
+document.getElementById("cov-on").addEventListener("change", () => { clearCoverage(); scheduleCoverage(); });
+document.getElementById("palette").addEventListener("click", e => {
+  const b = e.target.closest("button[data-tool]"); if (!b) return;
+  tool = b.dataset.tool || null; renderPalette();
+});
+document.getElementById("sensors").addEventListener("click", e => {
+  const b = e.target.closest("button[data-del]"); if (!b || !editing) return;
+  cfg.sensors = cfg.sensors.filter(s => s.id !== b.dataset.del);
+  pushSensors(); previewZones(); commitLayout();
+});
+document.getElementById("layout-reset").addEventListener("click", () => {
+  layoutChain = layoutChain.then(async () => {
+    try {
+      const r = await fetch("/api/layout", { method: "DELETE", credentials: "same-origin" });
+      if (r.status === 401) { location.replace("/login"); return; }
+      if (r.ok) applyConfig(await r.json()); else notice("Не вдалося скинути розстановку");
+    } catch (err) { notice("Не вдалося скинути розстановку: сервіс недоступний"); }
+  });
+});
+addEventListener("keydown", e => { if (e.key === "Escape" && editing && tool) { tool = null; renderPalette(); } });
+
 async function api(path) {
   const response = await fetch(path, { credentials: "same-origin" });
   if (response.status === 401) { location.replace("/login"); throw new LoginRequired(); }
@@ -904,6 +1186,7 @@ async function start() {
     document.getElementById("who-name").textContent = me.user;
     document.getElementById("who").hidden = document.getElementById("logout").hidden = false;
   }
+  document.getElementById("edit-sensors").hidden = !cfg.editable;   // лише демо: у бойовому режимі датчики задає конфіг
   initMap();
   connect();
 }
