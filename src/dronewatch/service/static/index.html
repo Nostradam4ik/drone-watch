@@ -1030,7 +1030,7 @@ function drawCoverage(c) {
     `<div class="sub">RF може визначити модель дрона на <b style="margin-left:6px">${c.stats.ident} %</b> зони</div>`;
 }
 
-const PARAM_UA = { max_range: "дальність", fov: "сектор огляду", sigma: "точність", pd: "ймовірність виявлення", clutter: "хибні спрацювання" };
+const PARAM_UA = { max_range: "дальність", fov: "сектор огляду", sigma: "точність", sigma_range: "точність по дальності", pd: "ймовірність виявлення", clutter: "хибні спрацювання" };
 
 // Реальна модель: що підтвердив виробник, що ми лише припустили, і де це написано
 function realInfoHtml(t) {
@@ -1040,7 +1040,8 @@ function realInfoHtml(t) {
   return `<div class="real-info"><b>${esc(r.vendor)} · ${esc(r.model)}</b><br>` +
     `Підтверджено виробником: ${esc(Object.values(r.known).join("; "))}.<br>` +
     `<span class="assumed">Припущено (виробник не вказав): ${esc(r.assumed.map(k => PARAM_UA[k] || k).join(", "))}.</span><br>` +
-    `${esc(r.note)}<br>Не моделюється: ${esc(r.extra.join("; "))}.<br>${links}</div>`;
+    `${esc(r.note)}<br>Ще в даташиті (не вся модель це враховує): ${esc(r.extra.join("; "))}.<br>${links}` +
+    (r.files && r.files.length ? ` · файл у проєкті: ${esc(r.files.join(", "))}` : "") + `</div>`;
 }
 
 function renderPalette() {

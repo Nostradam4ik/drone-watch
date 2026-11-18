@@ -46,28 +46,61 @@ SENSOR_TYPES: dict[str, dict[str, Any]] = {
 }
 
 
-# Реальні моделі. Правило: кожен параметр симуляції (max_range, fov, sigma, pd, clutter) або підтверджений виробником (known),
-# або чесно позначений припущенням (assumed): жодного мовчки вигаданого числа. Що виробник вказав, але симуляція не моделює,
-# лежить у extra. Дані зібрані з офіційних сторінок виробника, див. sources; перед польовим використанням звіряйте з даташитом.
-_ROBIN_SOURCES = ["https://www.robinradar.com/drone-detection-systems", "https://www.robinradar.com/products/iris-radar",
-                  "https://www.robinradar.com/news-events/robin-radar-deploys-off-the-shelf-cuas-radar-with-12km-range"]
-_ROBIN_EXTRA = ["огляд 60° по висоті (кут місця в симуляції не обмежується)",
-                "оновлення: 30 об/хв, 1 с на оберт (симуляція працює зі своїм кроком)",
-                "класифікація мікродоплером і нейромережею: відрізняє квадрокоптер, літак, птаха (не моделюється)"]
-_ROBIN_NOTE = ("5 і 12 км це «instrumented range» (технічна дальність радара), а не дальність виявлення малого дрона: "
-               "для малого дрона виробник її не вказує. У симуляції взято як є, реальна дальність по малих цілях буде меншою.")
+# Реальні моделі. Правило: кожен параметр симуляції (max_range, fov, sigma, pd, clutter) або підтверджений даташитом (known),
+# або чесно позначений припущенням (assumed): жодного мовчки вигаданого числа. sigma_range окремо, бо даташит може давати кутову
+# точність без точності по дальності. Що виробник вказав, але симуляція не моделює, лежить в extra. Файли даташитів лежать в
+# docs/datasheets (перевіряє tests/test_catalog.py), а max_range це ДАЛЬНІСТЬ ВИЯВЛЕННЯ МАЛОГО ДРОНА з даташита, не технічна дальність.
+_DOCS = "docs/datasheets/"
+_ROBIN = {"vendor": "Robin Radar Systems", "sources": ["https://www.robinradar.com/hubfs/IRIS%20product%20sheet%20042026.pdf"],
+          "files": [_DOCS + "robin-iris-product-sheet-2026-04.pdf"]}
+_ECHO = {"vendor": "Echodyne", "sources": ["https://www.echodyne.com/radar-systems/echoguard"],
+         "files": [_DOCS + "echodyne-echoguard.pdf"]}
+_BLIGHTER = {"vendor": "Blighter Surveillance Systems", "sources": ["https://blighter.com/wp-content/uploads/2025/10/blighter-a400-series-radars-datasheet-bss-1311.pdf"],
+             "files": [_DOCS + "blighter-a400-series.pdf"]}
+_BLIGHTER_COMMON = {
+    "assumed": ["sigma", "sigma_range", "pd", "clutter"],
+    "extra": ["технічна дальність 20 км; дальність за ЕПР: 0,01 м² 2,73 км, 0,1 м² 4,87 км, 10 м² 15,4 км",
+              "кут місця 10-15° (антени M10S) або 20-30° (W20S) (не моделюється)",
+              "скан 90° за 1,0 с; Ku-діапазон; хибна тривога 1 на добу (регулюється)",
+              "точність (дальність, кути) в даташиті не вказана"]}
 
 SENSOR_TYPES |= {
-    "robin-iris": {"name": "Robin Radar IRIS", "kind": "radar", "label": "radar", "max_range": 5000.0,
-                   "sigma": (5.0, 0.7, 1.5), "pd": 0.90, "clutter": 0.5,
-                   "real": {"vendor": "Robin Radar Systems", "model": "IRIS, стандартний режим", "sources": _ROBIN_SOURCES,
-                            "known": {"max_range": "5 км (instrumented range)", "fov": "360° по азимуту"},
-                            "assumed": ["sigma", "pd", "clutter"], "extra": _ROBIN_EXTRA, "note": _ROBIN_NOTE}},
-    "robin-iris-lrm": {"name": "Robin Radar IRIS, режим 12 км", "kind": "radar", "label": "radar", "max_range": 12000.0,
-                       "sigma": (5.0, 0.7, 1.5), "pd": 0.90, "clutter": 0.5,
-                       "real": {"vendor": "Robin Radar Systems", "model": "IRIS, Long Range Mode", "sources": _ROBIN_SOURCES,
-                                "known": {"max_range": "12 км (instrumented range, програмний режим LRM)", "fov": "360° по азимуту"},
-                                "assumed": ["sigma", "pd", "clutter"], "extra": _ROBIN_EXTRA, "note": _ROBIN_NOTE}},
+    "robin-iris": {
+        "name": "Robin Radar IRIS", "kind": "radar", "label": "radar", "max_range": 3100.0,
+        "sigma": (0.6, 0.75, 1.0), "pd": 0.90, "clutter": 0.5,
+        "real": {**_ROBIN, "model": "IRIS (стандартний режим)",
+                 "known": {"max_range": "3,1 км для мікродрона 0,9 кг (клас C1); інші класи див. нижче", "fov": "360° по азимуту",
+                           "sigma": "дальність 0,6 м, азимут 0,6-0,75°, кут місця 1° (в даташиті «accuracy», трактуємо як 1σ)"},
+                 "assumed": ["pd", "clutter"],
+                 "extra": ["виявлення за класами: нано 0,25 кг 1,1 км; мікро 0,9 кг 3,1 км; міні 2,9 кг 3,7 км; малі 52 кг (Шахед) 7,6 км",
+                           "технічна дальність 5 км, у режимі LRM 12 км (дальності виявлення в LRM не опубліковані)",
+                           "огляд 60° по висоті (кут місця в симуляції не обмежується); оновлення 1 с (30 об/хв)",
+                           "мікродоплер + нейромережа: класифікація квадрокоптера, літака, птаха (не моделюється)"],
+                 "note": "Дальності виявлення з таблиці даташита; він називає їх орієнтовними для типових видимості, завад і погоди."}},
+    "echodyne-echoguard": {
+        "name": "Echodyne EchoGuard", "kind": "radar", "label": "radar", "max_range": 1000.0,
+        "sigma": (2.0, 1.0, 1.5), "pd": 0.90, "clutter": 0.5, "fov_deg": 120.0,
+        "real": {**_ECHO, "model": "EchoGuard (MESA, K-діапазон)",
+                 "known": {"max_range": "більше 1 км для DJI Phantom 4 (нижня межа)", "fov": "120° по азимуту × 80° по висоті",
+                           "sigma": "азимут менше 1°, кут місця менше 1,5° (верхні межі з даташита)"},
+                 "assumed": ["sigma_range", "pd", "clutter"],
+                 "extra": ["більше 1,4 км для Matrice 600; людина більше 2,2 км; авто більше 3,5 км",
+                           "технічна дальність 6 км; оновлення треку 10 Гц; до 20 треків одночасно",
+                           "огляд 80° по висоті (кут місця в симуляції не обмежується)",
+                           "точність по дальності в даташиті не вказана"],
+                 "note": "«Менше 1°» і «більше 1 км» це межі, а не виміряні значення: реальна поведінка може відрізнятися."}},
+    "blighter-a422": {
+        "name": "Blighter A422 (180°)", "kind": "radar", "label": "radar", "max_range": 3000.0,
+        "sigma": (5.0, 0.7, 1.5), "pd": 0.90, "clutter": 0.5, "fov_deg": 180.0,
+        "real": {**_BLIGHTER, **_BLIGHTER_COMMON, "model": "A422, сектор 180°",
+                 "known": {"max_range": "дрони DJI Phantom: від 10 м до понад 3 км (нижня межа)", "fov": "180° по азимуту"},
+                 "note": "Точність у даташиті не вказана: sigma, виявлення й хибні спрацювання взято за припущенням."}},
+    "blighter-a402": {
+        "name": "Blighter A402 (90°)", "kind": "radar", "label": "radar", "max_range": 3000.0,
+        "sigma": (5.0, 0.7, 1.5), "pd": 0.90, "clutter": 0.5, "fov_deg": 90.0,
+        "real": {**_BLIGHTER, **_BLIGHTER_COMMON, "model": "A402, сектор 90°",
+                 "known": {"max_range": "дрони DJI Phantom: від 10 м до понад 3 км (нижня межа)", "fov": "90° по азимуту"},
+                 "note": "Точність у даташиті не вказана: sigma, виявлення й хибні спрацювання взято за припущенням."}},
 }
 
 
