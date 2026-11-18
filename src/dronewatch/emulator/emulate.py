@@ -67,8 +67,9 @@ FALLBACK_SENSORS: list[SensorInfo] = [  # якщо сервіс недоступ
 class Target:
     """Рух по вершинах [(t, x, y, z), ...] з лінійною інтерполяцією."""
 
-    def __init__(self, name: str, wp: Sequence[Sequence[float]]) -> None:
-        self.name, self.wp = name, wp
+    def __init__(self, name: str, wp: Sequence[Sequence[float]], model: str | None = None) -> None:
+        # model: ключ із каталогу сервісу (service/catalog.py), який «розпізнає» RF-датчик; None = цілі без ідентифікації
+        self.name, self.wp, self.model = name, wp, model
 
     def active(self, t: float) -> bool:
         return self.wp[0][0] <= t <= self.wp[-1][0]
@@ -83,18 +84,22 @@ class Target:
 
 
 def scenario_cross(rng: random.Random, count: int) -> list[Target]:
-    return [Target("cross", [(0, -900, 100, 70), (120, 900, 100, 70)])]
+    return [Target("cross", [(0, -900, 100, 70), (120, 900, 100, 70)], "geran-2")]
 
 
 def scenario_hover(rng: random.Random, count: int) -> list[Target]:
-    return [Target("hover", [(0, 600, 700, 60), (30, 250, 250, 60), (60, 250, 250, 60), (80, 800, 600, 120)])]
+    return [Target("hover", [(0, 600, 700, 60), (30, 250, 250, 60), (60, 250, 250, 60), (80, 800, 600, 120)], "dji-mavic-3")]
 
 
 def scenario_circle(rng: random.Random, count: int) -> list[Target]:
     r, v, n = 400.0, 12.0, 36
     period = 2 * math.pi * r / v
     return [Target("circle", [(period * k / n, r * math.cos(2 * math.pi * k / n), r * math.sin(2 * math.pi * k / n), 80.0)
-                              for k in range(n + 1)])]
+                              for k in range(n + 1)], "anafi-usa")]
+
+
+# Склад роя: суміш ворожих, своїх і цивільних, щоб на дашборді було що розрізняти
+SWARM_MODELS = ["geran-2", "orlan-10", "leleka-100", "lancet-3", "anafi-usa", "dji-mini-4", "furia", "zala-421"]
 
 
 def scenario_swarm(rng: random.Random, count: int) -> list[Target]:
@@ -109,7 +114,8 @@ def scenario_swarm(rng: random.Random, count: int) -> list[Target]:
         alt, speed, t0 = rng.uniform(40, 120), rng.uniform(14, 20), 2.0 * k
         t1 = t0 + math.hypot(ax - sx, ay - sy) / speed
         t2 = t1 + math.hypot(ex - ax, ey - ay) / speed
-        out.append(Target(f"S{k}", [(t0, sx, sy, alt), (t1, ax, ay, alt), (t2, ex, ey, alt + rng.uniform(-20, 20))]))
+        out.append(Target(f"S{k}", [(t0, sx, sy, alt), (t1, ax, ay, alt), (t2, ex, ey, alt + rng.uniform(-20, 20))],
+                          SWARM_MODELS[k % len(SWARM_MODELS)]))
     return out
 
 
@@ -427,7 +433,10 @@ def scan_events(a: argparse.Namespace, rng: random.Random, sensors: list[SensorI
             p = tg.pos(el)
             if math.hypot(p[0] - s["pos"][0], p[1] - s["pos"][1]) > s["max_range"] or rng.random() > a.pd:
                 continue
-            events.append({"sensor_id": s["id"], "ts": time.time(), **measure(rng, s, p, bias, noise)})
+            ev: Event = {"sensor_id": s["id"], "ts": time.time(), **measure(rng, s, p, bias, noise)}
+            if tg.model and s["label"] == "rf":   # RF-детектор протоколів упізнає модель; радар і мікрофон цього не вміють
+                ev["drone_model"] = tg.model
+            events.append(ev)
         for _ in range(poisson(rng, a.clutter)):
             events.append({"sensor_id": s["id"], "ts": time.time(), **clutter(rng, s)})
     rng.shuffle(events)

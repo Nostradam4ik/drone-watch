@@ -46,6 +46,10 @@ zones:
   - {name: "Буферна зона",  radius_m: 600, level: WARNING}
   - {name: "Критична зона", radius_m: 250, level: CRITICAL}
 
+# Де на карті світу лежить точка (0, 0) системи координат датчиків (position у метрах: схід, північ).
+# Лише для показу на карті дашборда; за замовчуванням Ейфелева вежа в Парижі.
+origin: {lat: 48.8584, lon: 2.2945}
+
 alerts:
   min_age_s: 5
   require_radar_in_cover: true

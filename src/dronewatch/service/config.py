@@ -117,6 +117,12 @@ class MqttCfg(BaseModel):
     ca_cert: str | None = None                # довіряти лише цьому CA (PEM); задання ca_cert вмикає TLS
 
 
+class OriginCfg(BaseModel):
+    """Де на карті світу лежить точка (0, 0) системи координат датчиків (схід, північ у метрах). Лише для показу на карті."""
+    lat: float = Field(default=48.8584, ge=-90, le=90)    # за замовчуванням Ейфелева вежа
+    lon: float = Field(default=2.2945, ge=-180, le=180)
+
+
 class Config(BaseModel):
     mode: Literal["demo", "live"] = "demo"
     scan_dt: float = Field(default=0.5, gt=0)
@@ -127,6 +133,7 @@ class Config(BaseModel):
     sensor_timeout_s: float = Field(default=5.0, gt=0)   # тиша датчика довше за це = відмова (потрібен heartbeat від датчика)
     sensors: list[SensorCfg] = []
     zones: list[ZoneCfg] = []
+    origin: OriginCfg = OriginCfg()
     alerts: AlertsCfg = AlertsCfg()
     mqtt: MqttCfg | None = None
     auth: AuthCfg = AuthCfg()

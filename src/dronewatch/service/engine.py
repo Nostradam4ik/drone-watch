@@ -24,11 +24,17 @@ import numpy as np
 from dronewatch.fusion.models import Floats, Sensor
 from dronewatch.fusion.tracker import Tracker
 from dronewatch.service.auth import SensorAuth
+from dronewatch.service.catalog import describe
 
 Level = Literal["NONE", "WARNING", "CRITICAL"]
 SensorState = Literal["OK", "WAITING", "LOST"]
 LEVELS: dict[Level, int] = {"NONE": 0, "WARNING": 1, "CRITICAL": 2}
 STALE_S = 2.0          # події старші за це відкидаються; події з майбутнього (розбіжність годинників) теж, понад цей допуск
+IDENT_GATE = math.radians(15)    # RF-ідентифікація привʼязується до треку, якщо пеленг збігається з ним у межах цього кута
+IDENT_AMBIGUITY = math.radians(4)   # два треки майже на одному пеленгу: невідомо, чия це модель, тож ідентифікацію не чіпаємо
+MAX_IDENTS_PER_SCAN = 500
+MAX_MODEL_LEN = 40
+DEFAULT_ORIGIN = (48.8584, 2.2945)   # Ейфелева вежа: куди на карті світу ставимо (0, 0) системи координат
 RANGE_SLACK = 1.5      # радар може трохи перебрати max_range (шум, повільне згасання), але не вдвічі
 OK, WAITING, LOST = "OK", "WAITING", "LOST"   # стан здоровʼя датчика
 Measurement = tuple[str, Floats]               # (датчик, вимірювання у внутрішньому форматі трекера)
@@ -65,6 +71,7 @@ class _Screened:
     """Підсумок перевірки пакета подій (без замка): що можна класти в буфер і що відхилено та чому."""
     beats: list[str] = field(default_factory=list)
     parsed: list[Measurement] = field(default_factory=list)
+    idents: list[tuple[str, float, str]] = field(default_factory=list)   # (датчик, пеленг у математичних координатах, ключ моделі)
     invalid: int = 0
     dropped: int = 0
     denied: int = 0
@@ -99,11 +106,12 @@ class Engine:
     def __init__(self, sensors: Iterable[Sensor], zones: list[Zone], db_path: str = ":memory:", scan_dt: float = 0.5,
                  min_age_s: float = 5.0, require_radar: bool = True, max_coast: int = 2, sensor_timeout_s: float = 5.0,
                  clock: Callable[[], float] = time.time, max_events_per_sensor: int = 150, max_tracks: int = 200,
-                 auth: SensorAuth | None = None) -> None:
+                 auth: SensorAuth | None = None, origin: tuple[float, float] = DEFAULT_ORIGIN) -> None:
         # min_age_s: тривога лише для треку, підтвердженого щонайменше стільки секунд (відсів короткоживучих хибних)
         # require_radar: у зоні радара тривога лише з радарним підтвердженням; max_coast: скільки сканів без детекцій трек ще «живий»
         self.min_age_s, self.require_radar, self.max_coast = min_age_s, require_radar, max_coast
         self.sensor_timeout_s, self.clock = sensor_timeout_s, clock   # clock підміняється в тестах
+        self.origin = origin   # (lat, lon) точки (0, 0): лише для показу на карті, фільтр працює в метрах
         self.auth = auth   # SensorAuth або None (автентифікація вимкнена: демо, довірена мережа)
         # Стелі проти потопу подій: понад них події відкидаються й рахуються, але скан лишається в межах бюджету часу.
         self.max_events_per_sensor, self.max_tracks = max_events_per_sensor, max_tracks
@@ -117,6 +125,8 @@ class Engine:
         self.heard: set[str] = set()            # датчики, що озивалися з попереднього скану
         self.buffer: list[Measurement] = []
         self.buf_count: Counter[str] = Counter()   # подій у буфері від кожного датчика (для стелі)
+        self.ident_buffer: list[tuple[str, float, str]] = []
+        self.idents: dict[int, Counter[str]] = {}   # track_id -> голоси за модель від RF-датчиків (виграє найчастіша)
         # Один замок на весь змінюваний стан: його беруть і HTTP-потоки (ingest, state), і потік MQTT, і цикл сканів.
         self.lock = threading.Lock()
         self.max_level: dict[int, Level] = {}   # track_id -> найвищий рівень, що вже дав тривогу
@@ -138,6 +148,8 @@ class Engine:
             self.tracker = Tracker(list(self.sensors.values()), max_tracks=self.max_tracks)
             self.buffer.clear()
             self.buf_count.clear()
+            self.ident_buffer.clear()
+            self.idents.clear()
             self.max_level.clear()
             self.t0 = self.clock()
 
@@ -181,6 +193,10 @@ class Engine:
             else:
                 taken[sid] += 1
                 out.parsed.append(z)
+                model = e.get("drone_model")
+                # лише RF-датчик розпізнає протокол дрона; модель від радара чи мікрофона ігноруємо, а не довіряємо
+                if isinstance(model, str) and 0 < len(model) <= MAX_MODEL_LEN and self.sensors[sid].label == "rf":
+                    out.idents.append((sid, float(z[1][0]), model))
         return out
 
     def _commit(self, screened: _Screened, now: float) -> IngestResult:
@@ -196,6 +212,8 @@ class Engine:
                 self.buffer.append(z)
                 self._mark(z[0], now)
                 accepted += 1
+            room = MAX_IDENTS_PER_SCAN - len(self.ident_buffer)
+            self.ident_buffer.extend(screened.idents[:max(room, 0)])
             self.stats["events_in"] += accepted
             self.stats["heartbeats"] += len(screened.beats)
             self.stats["events_rejected"] += screened.invalid
@@ -241,10 +259,39 @@ class Engine:
             t = self.clock() - self.t0
             down = {sid for sid, st in self._sensor_status().items() if st["state"] == LOST}
             self.tracker.step(t, dets, heard=heard, down=down)
+            self._assign_idents()
             for k, v in self.tracker.dropped.items():
                 self.stats[k] += v
             self.stats["scans"] += 1
             return self._evaluate(t)
+
+    def _assign_idents(self) -> None:
+        """Привʼязує RF-ідентифікації (модель дрона) до треків за пеленгом: береться трек із найближчим пеленгом від того
+        RF-датчика, але лише якщо він у межах IDENT_GATE і однозначно ближчий за решту. Під self.lock."""
+        idents, self.ident_buffer = self.ident_buffer, []
+        tracks = self.tracker.tracks
+        for sid, az, model in idents:
+            pos = self.sensors[sid].pos
+            diffs = sorted(
+                (abs((math.atan2(tr.x[1] - pos[1], tr.x[0] - pos[0]) - az + math.pi) % (2 * math.pi) - math.pi), tr.id)
+                for tr in tracks)
+            if not diffs or diffs[0][0] > IDENT_GATE:
+                continue
+            if len(diffs) > 1 and diffs[1][0] - diffs[0][0] < IDENT_AMBIGUITY:
+                continue
+            self.idents.setdefault(diffs[0][1], Counter())[model] += 1
+
+    def _identity(self, track_id: int) -> dict[str, Any]:
+        """Що відомо про тип цілі: модель, чия вона й звідки це відомо. Без RF-ідентифікації model = None."""
+        votes = self.idents.get(track_id)
+        if not votes:
+            return {"model": None, "model_name": None, "side": "unknown", "country": None, "drone_kind": None, "shape": None,
+                    "identified_by": None}
+        model = votes.most_common(1)[0][0]
+        info = describe(model)
+        assert info is not None
+        return {"model": model, "model_name": info["name"], "side": info["side"], "country": info["country"],
+                "drone_kind": info["kind"], "shape": info["shape"], "identified_by": "rf"}
 
     def _highest_zone(self, pos: Floats) -> Zone | None:
         """Зона найвищого рівня, що містить точку (за рівних перемагає перша в списку); None, якщо точка поза зонами."""
@@ -278,6 +325,9 @@ class Engine:
         for tid in list(self.max_level):
             if tid not in alive:
                 del self.max_level[tid]
+        for tid in list(self.idents):
+            if tid not in alive:
+                del self.idents[tid]
         return new_alerts
 
     # --- вихід
@@ -322,6 +372,7 @@ class Engine:
                 "score": round(float(tr.score(t)), 2),
                 "kinds": sorted(k for k, ts in tr.kinds.items() if t - ts < 3.0),
                 "coasting": tr.misses > self.max_coast, "level": zone.level if zone else "NONE",
+                **self._identity(tr.id),
             })
         out: dict[str, Any] = {
             "t": round(t, 1), "tracks": tracks, "stats": dict(self.stats), "calibration": self.calibration,
@@ -336,5 +387,6 @@ class Engine:
             "sensors": [{"id": s.name, "kind": s.kind, "label": s.label, "pos": s.pos[:2].tolist(), "max_range": s.max_range}
                         for s in self.sensors.values()],
             "zones": [z.as_dict() for z in self.zones],
+            "origin": {"lat": self.origin[0], "lon": self.origin[1]},
             "scan_dt": self.scan_dt,
         }
