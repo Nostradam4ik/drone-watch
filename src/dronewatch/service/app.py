@@ -50,6 +50,7 @@ class Detection(BaseModel):
     heartbeat: bool = False            # «я живий, але нічого не бачу»
     range_m: float | None = None
     elevation_deg: float | None = None
+    drone_model: str | None = Field(default=None, max_length=40)   # ключ моделі з RF-детектора (див. catalog.py)
 
 
 def default_db_path() -> str:
@@ -110,7 +111,8 @@ def build_engine(cfg: config.Config, sensors: list[Sensor], db_path: str) -> Eng
     return Engine(sensors, config.build_zones(cfg), db_path=db_path, scan_dt=cfg.scan_dt,
                   min_age_s=cfg.alerts.min_age_s, require_radar=cfg.alerts.require_radar_in_cover,
                   max_coast=cfg.alerts.max_coast_scans, sensor_timeout_s=cfg.sensor_timeout_s,
-                  max_events_per_sensor=cfg.max_events_per_sensor_scan, max_tracks=cfg.max_tracks, auth=auth)
+                  max_events_per_sensor=cfg.max_events_per_sensor_scan, max_tracks=cfg.max_tracks, auth=auth,
+                  origin=(cfg.origin.lat, cfg.origin.lon))
 
 
 def build_mqtt(cfg: config.Config, engine: Engine) -> MqttIngest | None:
@@ -285,6 +287,16 @@ def index(user: Annotated[str | None, Depends(current_user)]) -> Response:
     if user is None:   # сторінку без входу не віддаємо: людину веде на форму входу
         return RedirectResponse("/login", status_code=303)
     return FileResponse(BASE / "static" / "index.html")
+
+
+VENDOR_FILES = {"maplibre-gl.js": "text/javascript", "maplibre-gl.css": "text/css", "three.module.min.js": "text/javascript"}
+
+
+@app.get("/static/vendor/{name}", include_in_schema=False)
+def vendor(name: str) -> Response:   # бібліотеки віддаємо самі, а не з CDN: без стороннього коду на сторінці
+    if name not in VENDOR_FILES:   # лише відомі файли: жодних шляхів із клієнта
+        return Response(status_code=404)
+    return FileResponse(BASE / "static" / "vendor" / name, media_type=VENDOR_FILES[name])
 
 
 @app.get("/api/config", dependencies=[Depends(require_user)])
