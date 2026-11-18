@@ -76,6 +76,9 @@ def test_map_glyphs_only_for_the_bundled_font_and_numeric_ranges(client):
     ok = client.get("/static/fonts/Noto Sans Regular/0-255.pbf")
     assert ok.status_code == 200 and ok.headers["content-type"] == "application/x-protobuf" and len(ok.content) > 1000
     assert client.get("/static/fonts/Other Font/0-255.pbf").status_code == 404
+    # діапазон, якого нема серед збережених: порожній валідний файл, а не 404 (404 ламає шар підписів на карті)
+    missing = client.get("/static/fonts/Noto Sans Regular/11008-11263.pbf")
+    assert missing.status_code == 200 and missing.content == b"" and missing.headers["content-type"] == "application/x-protobuf"
     for bad in ("abc-def", "..%2F0-255", "0-255x", "999999-1"):
         assert client.get(f"/static/fonts/Noto Sans Regular/{bad}.pbf").status_code == 404, bad
 

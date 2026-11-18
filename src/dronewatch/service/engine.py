@@ -14,7 +14,7 @@ import math
 import sqlite3
 import threading
 import time
-from collections import Counter
+from collections import Counter, deque
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field
 from typing import Any, Literal, TypedDict
@@ -33,6 +33,13 @@ STALE_S = 2.0          # події старші за це відкидають�
 IDENT_GATE = math.radians(15)    # RF-ідентифікація привʼязується до треку, якщо пеленг збігається з ним у межах цього кута
 IDENT_AMBIGUITY = math.radians(4)   # два треки майже на одному пеленгу: невідомо, чия це модель, тож ідентифікацію не чіпаємо
 MAX_IDENTS_PER_SCAN = 500
+DIVE_VZ = 4.0                    # м/с: так швидко має знижуватись ціль, щоб це вважалось пікіруванням, а не шумом висоти
+DIVE_ANGLE = math.radians(10)    # і кут пікірування не менший за цей (відносно горизонту)
+DIVE_SCANS = 5                   # стільки сканів поспіль (шум одного скану не рахується)
+DIVE_DROP_M = 20.0               # і за вікно нижче висота справді впала щонайменше на стільки метрів (оцінка швидкості сама по собі шумить)
+DIVE_WINDOW_S = 4.0
+DIVE_RADAR_S = 1.5                # трек має мати радарне підтвердження не старіше за стільки секунд
+DIVE_MIN_AGE_S = 6.0             # трек молодший за це не оцінюємо: у щойно створеного треку швидкість ще не зійшлась і стрибає
 MAX_MODEL_LEN = 40
 DEFAULT_ORIGIN = (48.8584, 2.2945)   # Ейфелева вежа: куди на карті світу ставимо (0, 0) системи координат
 RANGE_SLACK = 1.5      # радар може трохи перебрати max_range (шум, повільне згасання), але не вдвічі
@@ -129,6 +136,8 @@ class Engine:
         # track_id -> датчик -> голоси за модель. Один датчик дає один голос на трек за скан, а ключі моделей обмежені каталогом,
         # тож памʼять тут обмежена числом треків x датчиків x розміром каталогу
         self.idents: dict[int, dict[str, Counter[str]]] = {}
+        self.dive_scans: dict[int, int] = {}   # track_id -> скільки сканів поспіль ціль пікірує
+        self.z_hist: dict[int, deque[tuple[float, float]]] = {}   # track_id -> (час, висота) за останні секунди
         # Один замок на весь змінюваний стан: його беруть і HTTP-потоки (ingest, state), і потік MQTT, і цикл сканів.
         self.lock = threading.Lock()
         self.max_level: dict[int, Level] = {}   # track_id -> найвищий рівень, що вже дав тривогу
@@ -152,6 +161,8 @@ class Engine:
             self.buf_count.clear()
             self.ident_buffer.clear()
             self.idents.clear()
+            self.dive_scans.clear()
+            self.z_hist.clear()
             self.max_level.clear()
             self.t0 = self.clock()
 
@@ -264,6 +275,7 @@ class Engine:
             down = {sid for sid, st in self._sensor_status().items() if st["state"] == LOST}
             self.tracker.step(t, dets, heard=heard, down=down)
             self._assign_idents()
+            self._update_dives(t)
             for k, v in self.tracker.dropped.items():
                 self.stats[k] += v
             self.stats["scans"] += 1
@@ -289,6 +301,33 @@ class Engine:
         for (tid, sid), models in scan.items():
             if len(models) == 1:
                 self.idents.setdefault(tid, {}).setdefault(sid, Counter())[next(iter(models))] += 1
+
+    @staticmethod
+    def _is_diving(vx: float, vy: float, vz: float, z: float) -> bool:
+        return z > 0 and vz <= -DIVE_VZ and math.atan2(-vz, math.hypot(vx, vy)) >= DIVE_ANGLE
+
+    def _update_dives(self, t: float) -> None:
+        """Рахує, скільки сканів поспіль кожна ціль пікірує (стрімко й круто знижується). Під self.lock."""
+        alive = set()
+        for tr in self.tracker.tracks:
+            alive.add(tr.id)
+            hist = self.z_hist.setdefault(tr.id, deque())
+            hist.append((t, float(tr.x[2])))
+            while hist and t - hist[0][0] > DIVE_WINDOW_S + 1.0:
+                hist.popleft()
+            old = next((z for ts, z in hist if t - ts <= DIVE_WINDOW_S), None)   # найдавніша висота у вікні
+            dropped = old is not None and t - hist[0][0] >= DIVE_WINDOW_S - 1.0 and old - float(tr.x[2]) >= DIVE_DROP_M
+            mature = tr.confirmed_at is not None and t - tr.confirmed_at >= DIVE_MIN_AGE_S
+            if t - tr.kinds["radar"] > DIVE_RADAR_S:   # висоту надійно міряє лише радар; з пеленгів вона блукає, і це не пікірування
+                mature = False
+            if mature and dropped and self._is_diving(float(tr.x[3]), float(tr.x[4]), float(tr.x[5]), float(tr.x[2])):
+                self.dive_scans[tr.id] = self.dive_scans.get(tr.id, 0) + 1
+            else:
+                self.dive_scans.pop(tr.id, None)
+        for tid in set(self.dive_scans) - alive:
+            del self.dive_scans[tid]
+        for tid in set(self.z_hist) - alive:
+            del self.z_hist[tid]
 
     def _identity(self, track_id: int) -> dict[str, Any]:
         """Що відомо про тип цілі: модель, чия вона й звідки це відомо. Без RF-ідентифікації model = None.
@@ -386,6 +425,10 @@ class Engine:
                 "score": round(float(tr.score(t)), 2),
                 "kinds": sorted(k for k, ts in tr.kinds.items() if t - ts < 3.0),
                 "coasting": tr.misses > self.max_coast, "level": zone.level if zone else "NONE",
+                "vz": round(float(tr.x[5]), 1),
+                "diving": self.dive_scans.get(tr.id, 0) >= DIVE_SCANS,
+                # скільки секунд до землі за поточної швидкості зниження (лише коли ціль знижується)
+                "ttg": round(float(tr.x[2]) / -float(tr.x[5]), 1) if tr.x[5] < -0.5 and tr.x[2] > 0 else None,
                 **self._identity(tr.id),
             })
         out: dict[str, Any] = {

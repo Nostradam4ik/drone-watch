@@ -312,9 +312,14 @@ GLYPH_RANGE = re.compile(r"^\d{1,5}-\d{1,5}$")
 @app.get("/static/fonts/{stack}/{glyph_range}.pbf", include_in_schema=False)
 def font_glyphs(stack: str, glyph_range: str) -> Response:   # підписи на карті без жодного зовнішнього запиту
     path = BASE / "static" / "vendor" / "fonts" / FONT_STACK / f"{glyph_range}.pbf"
-    if stack != FONT_STACK or not GLYPH_RANGE.match(glyph_range) or not path.is_file():
+    if stack != FONT_STACK or not GLYPH_RANGE.match(glyph_range):
         return Response(status_code=404)
-    return FileResponse(path, media_type="application/x-protobuf", headers={"Cache-Control": "public, max-age=86400"})
+    headers = {"Cache-Control": "public, max-age=86400"}
+    if not path.is_file():
+        # Діапазону немає в збережених: віддаємо порожній, але ВАЛІДНИЙ файл (символів просто не буде). 404 тут ламає
+        # весь шар підписів: MapLibre не добудовує тайл, доки не отримає відповідь на кожен гліф.
+        return Response(b"", media_type="application/x-protobuf", headers=headers)
+    return FileResponse(path, media_type="application/x-protobuf", headers=headers)
 
 
 WEBFONT_NAME = re.compile(r"^[A-Za-z0-9_-]+\.(css|woff2)$")

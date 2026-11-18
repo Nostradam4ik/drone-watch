@@ -85,11 +85,16 @@
   .dossier dl { margin: 8px 0 0; display: grid; grid-template-columns: auto 1fr; gap: 3px 10px; }
   .dossier dt { color: var(--muted); } .dossier dd { margin: 0; text-align: right; }
   .dossier dd b { color: var(--text); font-weight: 600; }
-  .dossier .viewer { position: relative; height: 150px; margin: 8px 0 2px; border: 1px solid var(--line); border-radius: 3px;
+  .dossier .viewer { position: relative; height: 130px; margin: 8px 0 2px; border: 1px solid var(--line); border-radius: 3px;
              background: radial-gradient(ellipse at 50% 65%, #12242f 0%, #060a10 78%); overflow: hidden; cursor: grab; touch-action: none; }
   .dossier .viewer:active { cursor: grabbing; }
-  .dossier .viewer canvas { width: 100%; height: 150px; display: block; }
+  .dossier .viewer canvas { width: 100%; height: 130px; display: block; }
   .dossier .viewer .vcap { position: absolute; left: 7px; bottom: 5px; right: 7px; font: 9.5px var(--face-data); color: var(--muted); pointer-events: none; }
+  .dossier .dive { background: #ff3b6322; border: 1px solid var(--crit); color: var(--crit); padding: 5px 8px; margin: 6px 0 2px;
+             border-radius: 3px; font: 600 11.5px var(--face-label); letter-spacing: .02em; }
+  .alert { cursor: pointer; } .alert:hover { background: #0f1822; }
+  .dossier summary { cursor: pointer; color: var(--muted); font-size: 11px; margin-top: 6px; } .dossier summary:hover { color: var(--text); }
+  .dossier details dl { margin-top: 4px; }
   .dossier .hint { color: var(--muted); font-size: 10.5px; margin-top: 8px; border-top: 1px solid var(--line); padding-top: 6px; }
   .dossier dd.NONE { color: var(--ok); } .dossier dd.WARNING { color: var(--warn); } .dossier dd.CRITICAL { color: var(--crit); font-weight: 600; }
 
@@ -185,6 +190,7 @@
   <span class="stat">Кандидатів: <b id="s-tent">0</b></span>
   <span class="stat">Подій: <b id="s-ev">0</b></span>
   <span class="spacer"></span>
+  <button class="linkbtn" id="sound" type="button"></button>
   <span class="stat">t = <b id="s-t">0</b> с</span>
   <span class="stat" id="who" hidden>користувач: <b id="who-name"></b></span>
   <button class="linkbtn" id="logout" hidden>Вийти</button>
@@ -331,7 +337,7 @@ function hudStyle(style) {
 
 function addOverlays() {
   if (map.getSource("tracks")) return;
-  for (const id of ["zones", "ranges", "sensors", "trails", "vectors", "truth", "tracks"]) map.addSource(id, { type: "geojson", data: fc([]) });
+  for (const id of ["zones", "ranges", "sensors", "trails", "vectors", "truth", "stalks", "impact", "tracks"]) map.addSource(id, { type: "geojson", data: fc([]) });
   const label = (id, source, extra) => map.addLayer({ id, source, type: "symbol", layout: { "text-font": FONT, "text-size": 11, "text-allow-overlap": true, ...extra.layout },
     paint: { "text-halo-color": "#060a10", "text-halo-width": 1.6, ...extra.paint } });
   map.addLayer({ id: "zones-fill", source: "zones", type: "fill", filter: ["==", ["geometry-type"], "Polygon"], paint: { "fill-color": ["get", "color"], "fill-opacity": 0.09 } });
@@ -346,6 +352,11 @@ function addOverlays() {
   map.addLayer({ id: "sensors-dot", source: "sensors", type: "circle",
     paint: { "circle-radius": 6, "circle-color": ["get", "color"], "circle-stroke-color": "#060a10", "circle-stroke-width": 2 } });
   label("sensors-label", "sensors", { layout: { "text-field": ["get", "name"], "text-offset": [0, 1.1], "text-anchor": "top" }, paint: { "text-color": ["get", "color"] } });
+  map.addLayer({ id: "impact-line", source: "impact", type: "line", filter: ["==", ["geometry-type"], "LineString"],
+    paint: { "line-color": "#ff3b63", "line-width": 2, "line-dasharray": [2, 2] } });
+  map.addLayer({ id: "impact-pt", source: "impact", type: "circle", filter: ["==", ["geometry-type"], "Point"],
+    paint: { "circle-radius": 9, "circle-color": "#ff3b63", "circle-opacity": 0.25, "circle-stroke-color": "#ff3b63", "circle-stroke-width": 2 } });
+  label("impact-label", "impact", { layout: { "text-field": ["get", "text"], "text-anchor": "top", "text-offset": [0, 1.2] }, paint: { "text-color": "#ff7a93" } });
   map.addLayer({ id: "tracks-halo", source: "tracks", type: "circle",   // кільце = зона загрози, а не приналежність
     paint: { "circle-radius": 13, "circle-opacity": 0, "circle-stroke-color": ["get", "halo"], "circle-stroke-width": ["get", "haloW"], "circle-stroke-opacity": 0.95 } });
   map.addLayer({ id: "tracks-dot", source: "tracks", type: "circle",
@@ -355,6 +366,12 @@ function addOverlays() {
   label("tracks-label", "tracks", { layout: { "text-field": ["get", "label"], "text-anchor": "left", "text-offset": [1.2, 0], "text-size": 12 },
     paint: { "text-color": "#eef5f9", "text-opacity": ["get", "opacity"] } });
   map.addLayer({ id: "tracks-hit", source: "tracks", type: "circle", paint: { "circle-radius": 20, "circle-opacity": 0.01 } });   // велика зона для кліку
+  // Висота цілі: тонкий стовпчик від землі й «голова» на висоті дрона (справжня 3D-висота, видно при нахилі карти).
+  // Додаються ОСТАННІМИ: прозорі 3D-шари, що стоять раніше, глушать 2D-шари (точки, підписи) після себе.
+  map.addLayer({ id: "stalks", source: "stalks", type: "fill-extrusion", filter: ["==", ["get", "part"], "stalk"],
+    paint: { "fill-extrusion-color": ["get", "color"], "fill-extrusion-height": ["get", "top"], "fill-extrusion-base": 0, "fill-extrusion-opacity": 0.55 } });
+  map.addLayer({ id: "heads", source: "stalks", type: "fill-extrusion", filter: ["==", ["get", "part"], "head"],
+    paint: { "fill-extrusion-color": ["get", "color"], "fill-extrusion-height": ["get", "top"], "fill-extrusion-base": ["get", "base"], "fill-extrusion-opacity": 0.95 } });
   pushData();
 }
 
@@ -374,9 +391,20 @@ function pushData() {
   const tracks = state ? state.tracks : [];
   set("tracks", tracks.map(t => feat({ type: "Point", coordinates: toLL(t.x, t.y) }, {
     id: t.id, color: (SIDE[t.side] || SIDE.unknown).color, opacity: t.coasting ? 0.4 : 1, selected: t.id === selected,
-    halo: COLORS[t.level], haloW: t.level === "CRITICAL" ? 3.5 : t.level === "WARNING" ? 2 : 0,
-    label: "#" + t.id + (t.coasting ? " ?" : "") + (t.model_name ? " · " + shortName(t) : ""),
+    halo: t.diving ? COLORS.CRITICAL : COLORS[t.level], haloW: t.diving ? 4.5 : t.level === "CRITICAL" ? 3.5 : t.level === "WARNING" ? 2 : 0,
+    label: "#" + t.id + (t.coasting ? " ?" : "") + (t.model_name ? " · " + shortName(t) : "") + " · " + Math.round(t.z) + " м" + (t.diving ? " ↓" : "")   // "↓" (U+2193) є у збережених діапазонах шрифту; "⬇" ні, а помилка гліфа ламає весь шар підписів,
   })));
+  set("stalks", tracks.filter(t => !t.coasting && t.z > 1).flatMap(t => {
+    const color = (SIDE[t.side] || SIDE.unknown).color, ring = half => [[-half, -half], [half, -half], [half, half], [-half, half], [-half, -half]]
+      .map(([dx, dy]) => toLL(t.x + dx, t.y + dy));
+    return [feat({ type: "Polygon", coordinates: [ring(1.2)] }, { part: "stalk", color, top: t.z, base: 0 }),
+            feat({ type: "Polygon", coordinates: [ring(5)] }, { part: "head", color, top: t.z + 3, base: Math.max(t.z - 3, 0) })];
+  }));
+  set("impact", tracks.filter(t => t.diving && t.ttg).flatMap(t => {
+    const ix = t.x + t.vx * t.ttg, iy = t.y + t.vy * t.ttg;   // де ціль впаде, якщо збереже курс і швидкість зниження
+    return [feat({ type: "LineString", coordinates: [toLL(t.x, t.y), toLL(ix, iy)] }, {}),
+            feat({ type: "Point", coordinates: toLL(ix, iy) }, { text: "падіння ~" + Math.round(t.ttg) + " с" })];
+  }));
   set("trails", tracks.map(t => feat({ type: "LineString", coordinates: (trails.get(t.id) || []).map(p => toLL(p[0], p[1])) },
     { color: (SIDE[t.side] || SIDE.unknown).color, opacity: t.coasting ? 0.25 : 0.65 })).filter(f => f.geometry.coordinates.length > 1));
   set("vectors", tracks.map(t => feat({ type: "LineString", coordinates: [toLL(t.x, t.y), toLL(t.x + t.vx * 5, t.y + t.vy * 5)] },   // де буде за 5 с
@@ -462,7 +490,7 @@ function initMap() {
 let three = null, viewer = null;
 import("/static/vendor/three.module.min.js").then(m => { three = m; }).catch(err => console.warn("3D-моделі вимкнено:", err));
 const reducedMotion = matchMedia("(prefers-reduced-motion: reduce)").matches;
-const VIEW_H = 150;
+const VIEW_H = 130;
 
 function hudMesh(geo, color, ghost) {   // темна заливка + контурні ребра: читається як схема, а не іграшка
   const g = new three.Group();
@@ -590,6 +618,7 @@ function heading(t) {
   return deg + "° " + COMPASS[Math.round(deg / 45) % 8];
 }
 
+let detailsOpen = false;   // чи розгорнуто «докладніше»: памʼятаємо між оновленнями (вікно перемальовується щоскану)
 function dossierParts(t) {
   const side = SIDE[t.side] || SIDE.unknown, ll = toLL(t.x, t.y);
   const ident = t.identity_conflict
@@ -597,17 +626,20 @@ function dossierParts(t) {
     : t.identified_by
     ? `<div class="hint">Тип і приналежність: RF-ідентифікація протоколу${cfg.demo ? " (симуляція: модель задає емулятор)" : ""}. Радар сам «свій/ворог» не визначає.</div>`
     : `<div class="hint">${esc(guessClass(t))}. Оцінка за швидкістю й висотою, не розпізнавання: RF-ідентифікації немає.</div>`;
-  const head = `<div class="ttl"><span>ЦІЛЬ #${t.id}</span><b style="color:${side.color}">${side.label}</b></div>` +
+  const dive = t.diving ? `<div class="dive">⬇ ПІКІРУЄ: до землі ~${t.ttg} с. Прогнозна точка падіння позначена на карті.</div>` : "";
+  const head = `<div class="ttl"><span>ЦІЛЬ #${t.id}</span><b style="color:${side.color}">${side.label}</b></div>` + dive +
     `<div class="model">${esc(t.model_name || (t.identity_conflict ? "суперечливі дані RF" : "тип не визначено"))}</div>` +
     (t.drone_kind ? `<div class="sub">${esc(t.drone_kind)} · ${esc(t.country)}</div>` : "");
   const body = `<dl><dt>швидкість</dt><dd><b>${t.speed} м/с</b> · ${Math.round(t.speed * 3.6)} км/год</dd>` +
     `<dt>висота</dt><dd>${Math.round(t.z)} м</dd>` +
+    `<dt>верт. швидкість</dt><dd class="${t.diving ? "CRITICAL" : ""}">${t.vz > 0 ? "+" : ""}${t.vz} м/с${t.ttg ? " · до землі " + t.ttg + " с" : ""}</dd>` +
     `<dt>курс</dt><dd>${heading(t)}</dd>` +
     `<dt>рівень</dt><dd class="${t.level}">${LEVEL_UA[t.level]}</dd>` +
+    `<dt>підтвердили</dt><dd>${esc(t.kinds.map(k => KIND_UA[k] || k).join(", ") || "—")}</dd></dl>` +
+    `<details${detailsOpen ? " open" : ""}><summary>докладніше</summary><dl>` +
     `<dt>координати</dt><dd>${ll[1].toFixed(5)}, ${ll[0].toFixed(5)}</dd>` +
     `<dt>похибка</dt><dd>±${t.err} м</dd>` +
-    `<dt>довіра треку</dt><dd>${t.score}</dd>` +
-    `<dt>підтвердили</dt><dd>${esc(t.kinds.map(k => KIND_UA[k] || k).join(", ") || "—")}</dd></dl>` + ident;
+    `<dt>довіра треку</dt><dd>${t.score}</dd></dl></details>` + ident;
   return { head, body };
 }
 
@@ -617,6 +649,8 @@ function fillDossier(p, t) {
   const parts = dossierParts(t);
   p._head.innerHTML = parts.head;
   p._body.innerHTML = parts.body;
+  const det = p._body.querySelector("details");
+  if (det) det.addEventListener("toggle", () => { detailsOpen = det.open; });
   const side = SIDE[t.side] || SIDE.unknown, ghost = !t.shape;
   const v = ensureViewer(p._view);
   p._view.hidden = !v;
@@ -725,16 +759,17 @@ function render(msg) {
   const rows = msg.tracks.filter(t => !t.coasting).sort((a, b) => ({ CRITICAL: 2, WARNING: 1, NONE: 0 }[b.level] - { CRITICAL: 2, WARNING: 1, NONE: 0 }[a.level]) || a.id - b.id);
   document.getElementById("tbody").innerHTML = rows.map(t =>
     `<tr data-id="${t.id}" class="${t.id === selected ? "sel" : ""}"><td>#${t.id}</td>` +
-    `<td class="l"><i class="sd" style="background:${(SIDE[t.side] || SIDE.unknown).color}"></i>${esc(t.model_name ? shortName(t) : "—")}</td>` +
+    `<td class="l"><i class="sd" style="background:${(SIDE[t.side] || SIDE.unknown).color}"></i>${esc(t.model_name ? shortName(t) : "—")}${t.diving ? ' <b style="color:var(--crit)">⬇</b>' : ""}</td>` +
     `<td class="${t.level}">${LEVEL_UA[t.level]}</td><td>${t.speed}</td><td>${Math.round(t.z)}</td></tr>`).join("");
 
   const box = document.getElementById("alerts");
   if (msg.alerts.length) {
     box.innerHTML = msg.alerts.map(a =>
-      `<div class="alert ${a.level}"><span><span class="lvl">${a.level === "CRITICAL" ? "ЗАГРОЗА" : "УВАГА"}</span> <span class="id">#${a.track_id} · ${esc(a.zone)}</span>${alertTag(msg, a)}</span>` +
+      `<div class="alert ${a.level}" data-track="${a.track_id}" title="Показати ціль на карті"><span><span class="lvl">${a.level === "CRITICAL" ? "ЗАГРОЗА" : "УВАГА"}</span> <span class="id">#${a.track_id} · ${esc(a.zone)}</span>${alertTag(msg, a)}</span>` +
       `<span class="meta"><span>${new Date(a.ts * 1000).toLocaleTimeString()}</span><span class="sep"></span><span>${a.speed} м/с</span><span class="sep"></span><span>${esc(a.sensors.map(k => KIND_UA[k] || k).join(", "))}</span></span></div>`).join("");
     msg.alerts.forEach(a => { const k = a.ts + ":" + a.track_id + ":" + a.level; if (!seenAlerts.has(k)) { seenAlerts.add(k); if (!firstMsg) toast(a); } });
   } else box.innerHTML = '<div class="empty">Тривог немає</div>';
+  soundCheck(msg, firstMsg);
   firstMsg = false;
   document.getElementById("truth-row").hidden = !(cfg && cfg.demo && msg.truth);
   pushData();
@@ -775,6 +810,75 @@ document.getElementById("tbody").addEventListener("click", e => {
   select();
 });
 document.getElementById("truth").addEventListener("change", pushData);
+
+// Клік по тривозі наводить карту на ціль і відкриває її досьє
+document.getElementById("alerts").addEventListener("click", e => {
+  const card = e.target.closest(".alert[data-track]"); if (!card || !map) return;
+  const id = +card.dataset.track;
+  if (!state || !state.tracks.some(t => t.id === id)) { toast({ level: "WARNING", track_id: id, zone: "ціль вже не відстежується" }); return; }
+  if (popup) { const p = popup; popup = null; stopViewer(); p.remove(); }   // нове досьє відкриється біля цілі й карта зсунеться до неї
+  selected = id;
+  select();
+});
+
+// ---------- звук для ворожих цілей ----------
+// Браузер не дає грати звук, доки людина не клікнула по сторінці, тому AudioContext створюється при першому жесті.
+let soundOn = true, audio = null, lastAlarm = 0;
+try { soundOn = localStorage.getItem("dw-sound") !== "off"; } catch (err) { /* без сховища звук просто увімкнено */ }
+function ensureAudio() {
+  if (!audio) { try { audio = new (window.AudioContext || window.webkitAudioContext)(); } catch (err) { return null; } }
+  if (audio.state === "suspended") audio.resume().then(updateSoundBtn).catch(() => {});
+  return audio;
+}
+function updateSoundBtn() {
+  const b = document.getElementById("sound"), locked = soundOn && !(audio && audio.state === "running");
+  b.textContent = "♪ звук: " + (!soundOn ? "вимк." : locked ? "клікніть, щоб дозволити" : "увімк.");
+  b.style.color = soundOn && !locked ? "var(--ok)" : "";
+}
+function tone(freq, at, dur, gain = 0.08, type = "square") {
+  const o = audio.createOscillator(), g = audio.createGain();
+  o.type = type; o.frequency.setValueAtTime(freq, audio.currentTime + at);
+  g.gain.setValueAtTime(0.0001, audio.currentTime + at);
+  g.gain.exponentialRampToValueAtTime(gain, audio.currentTime + at + 0.01);
+  g.gain.exponentialRampToValueAtTime(0.0001, audio.currentTime + at + dur);
+  o.connect(g).connect(audio.destination); o.start(audio.currentTime + at); o.stop(audio.currentTime + at + dur + 0.02);
+}
+// Три сигнали, що відрізняються на слух: пікірування (швидкі спадні), загроза (дві ноти двічі), увага (одна м'яка)
+const ALARMS = {
+  dive: () => [1400, 1150, 950, 780].forEach((f, i) => tone(f, i * 0.13, 0.11, 0.1)),
+  critical: () => [880, 660, 880, 660].forEach((f, i) => tone(f, i * 0.2, 0.17, 0.09)),
+  warning: () => tone(620, 0, 0.25, 0.06, "triangle"),
+};
+function alarm(kind) {
+  if (!soundOn || !ensureAudio() || audio.state !== "running" || performance.now() - lastAlarm < 1000) return;
+  lastAlarm = performance.now();
+  ALARMS[kind]();
+}
+const announced = { dive: new Set(), critical: new Set(), warning: new Set() };
+function soundCheck(msg, silent) {
+  const ids = new Set(msg.tracks.map(t => t.id));
+  for (const set of Object.values(announced)) for (const id of set) if (!ids.has(id)) set.delete(id);
+  let loudest = null;   // за один кадр звучить лише найважливіше: пікірування > загроза > увага
+  for (const t of msg.tracks) {
+    if (t.coasting || t.side !== "enemy") { announced.dive.delete(t.id); continue; }
+    if (t.diving) { if (!announced.dive.has(t.id)) { announced.dive.add(t.id); loudest = "dive"; } } else announced.dive.delete(t.id);
+    const kind = t.level === "CRITICAL" ? "critical" : t.level === "WARNING" ? "warning" : null;
+    if (kind && !announced[kind].has(t.id)) {
+      announced[kind].add(t.id); if (kind === "warning") announced.critical.delete(t.id);
+      if (loudest !== "dive" && (loudest !== "critical" || kind === "critical")) loudest = loudest === "critical" ? "critical" : kind;
+    }
+  }
+  if (loudest && !silent) alarm(loudest);   // при першому кадрі після відкриття сторінки мовчимо: лише оновлюємо, що вже відоме
+}
+document.getElementById("sound").addEventListener("click", () => {
+  soundOn = !soundOn;
+  try { localStorage.setItem("dw-sound", soundOn ? "on" : "off"); } catch (err) { /* не критично */ }
+  if (soundOn) { ensureAudio(); setTimeout(() => { lastAlarm = 0; alarm("warning"); updateSoundBtn(); }, 50); }   // пробний сигнал
+  updateSoundBtn();
+});
+addEventListener("pointerdown", ensureAudio, { once: true });
+addEventListener("keydown", ensureAudio, { once: true });
+updateSoundBtn();
 
 // Усі запити до API йдуть сюди: 401 означає, що входу немає або сесія скінчилась, тож ведемо на форму входу
 class LoginRequired extends Error {}

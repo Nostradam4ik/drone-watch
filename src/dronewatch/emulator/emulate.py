@@ -114,8 +114,12 @@ def scenario_swarm(rng: random.Random, count: int) -> list[Target]:
         alt, speed, t0 = rng.uniform(40, 120), rng.uniform(14, 20), 2.0 * k
         t1 = t0 + math.hypot(ax - sx, ay - sy) / speed
         t2 = t1 + math.hypot(ex - ax, ey - ay) / speed
-        out.append(Target(f"S{k}", [(t0, sx, sy, alt), (t1, ax, ay, alt), (t2, ex, ey, alt + rng.uniform(-20, 20))],
-                          SWARM_MODELS[k % len(SWARM_MODELS)]))
+        end_alt = alt + rng.uniform(-20, 20)   # викликається завжди: послідовність ГВЧ інших цілей не залежить від пікірування
+        wp = [(t0, sx, sy, alt), (t1, ax, ay, alt), (t2, ex, ey, end_alt)]
+        if k == 0:   # перший дрон наприкінці йде в пікірування до землі (кінцева фаза атаки)
+            wp = [(t0, sx, sy, alt), (t1, ax, ay, alt), (t1 + 0.75 * (t2 - t1), ax + 0.75 * (ex - ax), ay + 0.75 * (ey - ay), alt),
+                  (t2, ex, ey, 0.0)]
+        out.append(Target(f"S{k}", wp, SWARM_MODELS[k % len(SWARM_MODELS)]))
     return out
 
 

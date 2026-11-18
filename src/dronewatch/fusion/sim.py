@@ -31,8 +31,9 @@ def default_sensors(realistic: bool = False) -> list[Sensor]:
 class Target:
     """Рух по вершинах [(t, x, y, z), ...] з лінійною інтерполяцією: різкі повороти = маневри."""
 
-    def __init__(self, name: str, waypoints: Waypoints) -> None:
+    def __init__(self, name: str, waypoints: Waypoints, model: str | None = None) -> None:
         self.name = name
+        self.model = model   # ключ моделі з service/catalog.py, яку «розпізнає» RF-датчик; None = без ідентифікації
         self.wp = np.array(waypoints, float)
 
     def active(self, t: float) -> bool:
@@ -53,9 +54,14 @@ def default_targets() -> list[Target]:
     ]
 
 
-def swarm_targets(n: int = 8, seed: int = 7) -> list[Target]:
+# Склад роя для демо: суміш ворожих, своїх і цивільних (ключі з service/catalog.py)
+SWARM_MODELS = ["geran-2", "orlan-10", "leleka-100", "lancet-3", "anafi-usa", "dji-mini-4", "furia", "zala-421"]
+
+
+def swarm_targets(n: int = 8, seed: int = 7, models: bool = False, dive: bool = False) -> list[Target]:
     """Рій: n дронів входять із різних боків колами радіусом ~800 м, перетинають центр і вилітають.
-    Шляхи перетинаються, тож у тріангуляції пеленгів неминуче з'являються «примарні» перетини."""
+    Шляхи перетинаються, тож у тріангуляції пеленгів неминуче з'являються «примарні» перетини.
+    models: призначити кожному модель; dive: перший дрон наприкінці йде в пікірування до землі (кінцева фаза атаки)."""
     rng = np.random.default_rng(seed)
     targets = []
     for k in range(n):
@@ -68,7 +74,12 @@ def swarm_targets(n: int = 8, seed: int = 7) -> list[Target]:
         speed = rng.uniform(14, 20)
         t1 = t0 + np.linalg.norm(aim - start) / speed
         t2 = t1 + np.linalg.norm(end - aim) / speed
-        targets.append(Target(f"S{k}", [(t0, *start, alt), (t1, *aim, alt), (t2, *end, alt + rng.uniform(-20, 20))]))
+        end_alt = alt + rng.uniform(-20, 20)   # викликається завжди, щоб послідовність ГВЧ (а отже й інші цілі) не змінювалась
+        wp = [(t0, *start, alt), (t1, *aim, alt), (t2, *end, end_alt)]
+        if dive and k == 0:   # за 75% другого плеча пікірує до землі
+            td = t1 + 0.75 * (t2 - t1)
+            wp = [(t0, *start, alt), (t1, *aim, alt), (td, *(aim + 0.75 * (end - aim)), alt), (t2, *end, 0.0)]
+        targets.append(Target(f"S{k}", wp, SWARM_MODELS[k % len(SWARM_MODELS)] if models else None))
     return targets
 
 
