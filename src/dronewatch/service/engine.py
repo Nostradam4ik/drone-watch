@@ -24,7 +24,7 @@ import numpy as np
 from dronewatch.fusion.models import Floats, Sensor
 from dronewatch.fusion.tracker import Tracker
 from dronewatch.service.auth import SensorAuth
-from dronewatch.service.catalog import describe
+from dronewatch.service.catalog import DRONES, UNKNOWN_MODEL, describe
 
 Level = Literal["NONE", "WARNING", "CRITICAL"]
 SensorState = Literal["OK", "WAITING", "LOST"]
@@ -71,7 +71,7 @@ class _Screened:
     """Підсумок перевірки пакета подій (без замка): що можна класти в буфер і що відхилено та чому."""
     beats: list[str] = field(default_factory=list)
     parsed: list[Measurement] = field(default_factory=list)
-    idents: list[tuple[str, float, str]] = field(default_factory=list)   # (датчик, пеленг у математичних координатах, ключ моделі)
+    idents: dict[int, str] = field(default_factory=dict)   # індекс у parsed -> ключ моделі (гине разом зі своїм вимірюванням)
     invalid: int = 0
     dropped: int = 0
     denied: int = 0
@@ -126,7 +126,9 @@ class Engine:
         self.buffer: list[Measurement] = []
         self.buf_count: Counter[str] = Counter()   # подій у буфері від кожного датчика (для стелі)
         self.ident_buffer: list[tuple[str, float, str]] = []
-        self.idents: dict[int, Counter[str]] = {}   # track_id -> голоси за модель від RF-датчиків (виграє найчастіша)
+        # track_id -> датчик -> голоси за модель. Один датчик дає один голос на трек за скан, а ключі моделей обмежені каталогом,
+        # тож памʼять тут обмежена числом треків x датчиків x розміром каталогу
+        self.idents: dict[int, dict[str, Counter[str]]] = {}
         # Один замок на весь змінюваний стан: його беруть і HTTP-потоки (ingest, state), і потік MQTT, і цикл сканів.
         self.lock = threading.Lock()
         self.max_level: dict[int, Level] = {}   # track_id -> найвищий рівень, що вже дав тривогу
@@ -196,7 +198,7 @@ class Engine:
                 model = e.get("drone_model")
                 # лише RF-датчик розпізнає протокол дрона; модель від радара чи мікрофона ігноруємо, а не довіряємо
                 if isinstance(model, str) and 0 < len(model) <= MAX_MODEL_LEN and self.sensors[sid].label == "rf":
-                    out.idents.append((sid, float(z[1][0]), model))
+                    out.idents[len(out.parsed) - 1] = model if model in DRONES else UNKNOWN_MODEL
         return out
 
     def _commit(self, screened: _Screened, now: float) -> IngestResult:
@@ -204,16 +206,18 @@ class Engine:
         with self.lock:
             for sid in screened.beats:
                 self._mark(sid, now)
-            for z in screened.parsed:
+            for i, z in enumerate(screened.parsed):
                 if self.buf_count[z[0]] >= self.max_events_per_sensor:   # остаточна перевірка: буфер спільний між потоками
                     dropped += 1
                     continue
                 self.buf_count[z[0]] += 1
                 self.buffer.append(z)
+                model = screened.idents.get(i)
+                # лише для прийнятого вимірювання, тобто під тією ж стелею датчика
+                if model is not None and len(self.ident_buffer) < MAX_IDENTS_PER_SCAN:
+                    self.ident_buffer.append((z[0], float(z[1][0]), model))
                 self._mark(z[0], now)
                 accepted += 1
-            room = MAX_IDENTS_PER_SCAN - len(self.ident_buffer)
-            self.ident_buffer.extend(screened.idents[:max(room, 0)])
             self.stats["events_in"] += accepted
             self.stats["heartbeats"] += len(screened.beats)
             self.stats["events_rejected"] += screened.invalid
@@ -267,9 +271,11 @@ class Engine:
 
     def _assign_idents(self) -> None:
         """Привʼязує RF-ідентифікації (модель дрона) до треків за пеленгом: береться трек із найближчим пеленгом від того
-        RF-датчика, але лише якщо він у межах IDENT_GATE і однозначно ближчий за решту. Під self.lock."""
+        RF-датчика, але лише якщо він у межах IDENT_GATE і однозначно ближчий за решту. Під self.lock.
+        Один датчик дає не більше одного голосу на трек за скан; якщо за скан він назвав для треку різні моделі, голосу немає."""
         idents, self.ident_buffer = self.ident_buffer, []
         tracks = self.tracker.tracks
+        scan: dict[tuple[int, str], set[str]] = {}
         for sid, az, model in idents:
             pos = self.sensors[sid].pos
             diffs = sorted(
@@ -279,19 +285,27 @@ class Engine:
                 continue
             if len(diffs) > 1 and diffs[1][0] - diffs[0][0] < IDENT_AMBIGUITY:
                 continue
-            self.idents.setdefault(diffs[0][1], Counter())[model] += 1
+            scan.setdefault((diffs[0][1], sid), set()).add(model)
+        for (tid, sid), models in scan.items():
+            if len(models) == 1:
+                self.idents.setdefault(tid, {}).setdefault(sid, Counter())[next(iter(models))] += 1
 
     def _identity(self, track_id: int) -> dict[str, Any]:
-        """Що відомо про тип цілі: модель, чия вона й звідки це відомо. Без RF-ідентифікації model = None."""
-        votes = self.idents.get(track_id)
-        if not votes:
-            return {"model": None, "model_name": None, "side": "unknown", "country": None, "drone_kind": None, "shape": None,
-                    "identified_by": None}
-        model = votes.most_common(1)[0][0]
+        """Що відомо про тип цілі: модель, чия вона й звідки це відомо. Без RF-ідентифікації model = None.
+        Якщо різні RF-датчики називають різні моделі, це суперечність: «свій/ворог» не вгадуємо, а позначаємо її явно."""
+        none = {"model": None, "model_name": None, "side": "unknown", "country": None, "drone_kind": None, "shape": None,
+                "identified_by": None, "identity_conflict": False}
+        per_sensor = {sid: c.most_common(1)[0][0] for sid, c in self.idents.get(track_id, {}).items() if c}
+        models = set(per_sensor.values())
+        if not models:
+            return none
+        if len(models) > 1:
+            return {**none, "identity_conflict": True}
+        model = next(iter(models))
         info = describe(model)
         assert info is not None
         return {"model": model, "model_name": info["name"], "side": info["side"], "country": info["country"],
-                "drone_kind": info["kind"], "shape": info["shape"], "identified_by": "rf"}
+                "drone_kind": info["kind"], "shape": info["shape"], "identified_by": "rf", "identity_conflict": False}
 
     def _highest_zone(self, pos: Floats) -> Zone | None:
         """Зона найвищого рівня, що містить точку (за рівних перемагає перша в списку); None, якщо точка поза зонами."""

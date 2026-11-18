@@ -544,11 +544,13 @@ function heading(t) {
 
 function dossierParts(t) {
   const side = SIDE[t.side] || SIDE.unknown, ll = toLL(t.x, t.y);
-  const ident = t.identified_by
+  const ident = t.identity_conflict
+    ? `<div class="hint">RF-датчики називають різні моделі для цієї цілі: приналежність не визначено, потрібна перевірка оператором.</div>`
+    : t.identified_by
     ? `<div class="hint">Тип і приналежність: RF-ідентифікація протоколу${cfg.demo ? " (симуляція: модель задає емулятор)" : ""}. Радар сам «свій/ворог» не визначає.</div>`
     : `<div class="hint">${esc(guessClass(t))}. Оцінка за швидкістю й висотою, не розпізнавання: RF-ідентифікації немає.</div>`;
   const head = `<div class="ttl"><span>ЦІЛЬ #${t.id}</span><b style="color:${side.color}">${side.label}</b></div>` +
-    `<div class="model">${esc(t.model_name || "тип не визначено")}</div>` +
+    `<div class="model">${esc(t.model_name || (t.identity_conflict ? "суперечливі дані RF" : "тип не визначено"))}</div>` +
     (t.drone_kind ? `<div class="sub">${esc(t.drone_kind)} · ${esc(t.country)}</div>` : "");
   const body = `<dl><dt>швидкість</dt><dd><b>${t.speed} м/с</b> · ${Math.round(t.speed * 3.6)} км/год</dd>` +
     `<dt>висота</dt><dd>${Math.round(t.z)} м</dd>` +

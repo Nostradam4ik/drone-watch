@@ -41,6 +41,9 @@ DRONES: dict[str, DroneInfo] = {
 }
 
 
+UNKNOWN_MODEL = "unknown"   # будь-який ключ поза каталогом зводиться до цього: памʼять на ключ не залежить від того, що шле датчик
+
+
 def describe(model: str | None) -> DroneInfo | None:
     """Опис за ключем моделі; None, якщо ідентифікації немає. Ключ поза каталогом дає «невідомий»."""
     if model is None:
