@@ -23,3 +23,6 @@ dist/
 .pytest_cache/
 .worktrees/
 .superpowers/
+
+# Оффлайн-карта (dronewatch-mapbuild): десятки МБ, відтворюється командою
+data/map/

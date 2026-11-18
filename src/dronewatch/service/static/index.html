@@ -4,11 +4,10 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Drone Watch</title>
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/static/webfonts/fonts.css">
 <link rel="stylesheet" href="/static/vendor/maplibre-gl.css">
 <script src="/static/vendor/maplibre-gl.js"></script>
+<script src="/static/vendor/pmtiles.js"></script>
 <style>
   :root {
     --ink: #060a10; --panel: #0b131c; --line: #1c2b38; --text: #dce7ee; --muted: #64808f;
@@ -268,11 +267,49 @@ const fc = features => ({ type: "FeatureCollection", features });
 const feat = (geometry, properties) => ({ type: "Feature", geometry, properties });
 const shortName = t => (t.model_name || "").split(" (")[0];
 
-const GLYPHS = "https://tiles.openfreemap.org/fonts/{fontstack}/{range}.pbf";
-const STYLE_URL = "https://tiles.openfreemap.org/styles/dark";   // тайли OpenStreetMap через OpenFreeMap: дані, не код
+const GLYPHS = "/static/fonts/{fontstack}/{range}.pbf";   // шрифти підписів лежать у нас: жодних запитів назовні
+const STYLE_URL = "https://tiles.openfreemap.org/styles/dark";   // ЛИШЕ з map.online_tiles: true; видає стороннім серверу, що ви розглядаєте
 const FONT = ["Noto Sans Regular"];
 // Порожній стиль: охоронні шари (зони, датчики, цілі) працюють і без тайлів, якщо мережі до карти немає.
 const BLANK_STYLE = { version: 8, glyphs: GLYPHS, sources: {}, layers: [{ id: "bg", type: "background", paint: { "background-color": "#060a10" } }] };
+
+// Власна карта (PMTiles зі схемою Protomaps): темний HUD-стиль і 3D-будівлі. Нічого не береться ззовні.
+function offlineStyle() {
+  const src = "pm", kind = list => ["in", ["get", "kind"], ["literal", list]];
+  const width = (w) => ["interpolate", ["exponential", 1.6], ["zoom"], 10, w * 0.4, 14, w * 1.6, 18, w * 9];
+  const road = (id, kinds, color, w, minzoom = 0) => ({ id, type: "line", source: src, "source-layer": "roads", minzoom,
+    filter: ["all", kind(kinds), ["!=", ["get", "is_tunnel"], true]], layout: { "line-cap": "round", "line-join": "round" },
+    paint: { "line-color": color, "line-width": width(w) } });
+  const h = ["coalesce", ["get", "height"], 8];
+  return {
+    version: 8, glyphs: GLYPHS,
+    sources: { [src]: { type: "vector", url: "pmtiles://" + location.origin + "/map/paris.pmtiles",
+      attribution: "© OpenStreetMap contributors · Protomaps" } },
+    layers: [
+      { id: "bg", type: "background", paint: { "background-color": "#060a10" } },
+      { id: "earth", type: "fill", source: src, "source-layer": "earth", paint: { "fill-color": "#0d1a24" } },
+      { id: "landuse", type: "fill", source: src, "source-layer": "landuse",
+        filter: kind(["park", "nature_reserve", "forest", "wood", "grass", "garden", "cemetery", "golf_course", "playground", "pitch", "recreation_ground"]),
+        paint: { "fill-color": "#0e2c30", "fill-opacity": 0.9 } },
+      { id: "water", type: "fill", source: src, "source-layer": "water", paint: { "fill-color": "#0a2a3c" } },
+      road("roads-path", ["path"], "#26394a", 1, 15),
+      road("roads-minor", ["minor_road"], "#2d4559", 1.6, 12),
+      road("roads-medium", ["medium_road"], "#3c5b73", 2.4, 10),
+      road("roads-major", ["major_road"], "#4d7490", 3.2, 8),
+      road("roads-highway", ["highway"], "#5f8fb0", 4.2, 6),
+      { id: "building-3d", type: "fill-extrusion", source: src, "source-layer": "buildings", minzoom: 13,
+        paint: { "fill-extrusion-color": ["interpolate", ["linear"], h, 0, "#14293a", 40, "#1b4a63", 120, "#2a6a8a"],
+          "fill-extrusion-height": h, "fill-extrusion-base": ["coalesce", ["get", "min_height"], 0], "fill-extrusion-opacity": 0.92 } },
+      { id: "road-names", type: "symbol", source: src, "source-layer": "roads", minzoom: 14, filter: ["has", "name"],
+        layout: { "symbol-placement": "line", "text-field": ["get", "name"], "text-font": FONT, "text-size": 10 },
+        paint: { "text-color": "#5f7a8c", "text-halo-color": "#060a10", "text-halo-width": 1.4 } },
+      { id: "place-names", type: "symbol", source: src, "source-layer": "places", minzoom: 9,
+        filter: kind(["locality", "neighbourhood", "macrohood"]),
+        layout: { "text-field": ["get", "name"], "text-font": FONT, "text-size": 12, "text-transform": "uppercase", "text-letter-spacing": 0.08 },
+        paint: { "text-color": "#7f98a8", "text-halo-color": "#060a10", "text-halo-width": 1.6 } },
+    ],
+  };
+}
 
 function hudStyle(style) {
   style.layers = style.layers.filter(l => l.id !== "building");
@@ -388,7 +425,12 @@ function setupRotateMode() {
 function initMap() {
   if (typeof maplibregl === "undefined") { mapTag("карту не завантажено (немає WebGL чи бібліотеки)"); return; }
   try {
-    map = new maplibregl.Map({ container: "map", style: BLANK_STYLE, center: toLL(0, 0), zoom: 14.6, pitch: 58, bearing: -18,
+    const mode = (cfg.map && cfg.map.mode) || "none";
+    if (mode === "offline") {
+      if (typeof pmtiles === "undefined") throw new Error("немає бібліотеки pmtiles");
+      maplibregl.addProtocol("pmtiles", new pmtiles.Protocol().tile);
+    }
+    map = new maplibregl.Map({ container: "map", style: mode === "offline" ? offlineStyle() : BLANK_STYLE, center: toLL(0, 0), zoom: 14.6, pitch: 58, bearing: -18,
       maxPitch: 80, attributionControl: { compact: true } });
   } catch (err) { mapTag("карту не завантажено: " + err.message); return; }
   map.addControl(new maplibregl.NavigationControl({ visualizePitch: true }), "bottom-right");
@@ -402,9 +444,15 @@ function initMap() {
   });
   map.on("mouseenter", "tracks-hit", () => { map.getCanvas().style.cursor = "pointer"; });
   map.on("mouseleave", "tracks-hit", () => { map.getCanvas().style.cursor = ""; });
-  fetch(STYLE_URL).then(r => { if (!r.ok) throw new Error("HTTP " + r.status); return r.json(); })
-    .then(style => map.setStyle(hudStyle(style), { diff: false }))   // без diff: інакше охоронні шари зникають, а style.load не повторюється
-    .catch(err => mapTag("тайли карти недоступні (" + err.message + "): охоронні шари працюють без підкладки"));
+  const mode = (cfg.map && cfg.map.mode) || "none";
+  if (mode === "online") {   // свідомо ввімкнено в конфігу: запити тайлів видають стороннім серверу, яку ділянку розглядає оператор
+    mapTag("карта з зовнішніх тайлів (map.online_tiles): ділянку видно стороннім");
+    fetch(STYLE_URL).then(r => { if (!r.ok) throw new Error("HTTP " + r.status); return r.json(); })
+      .then(style => map.setStyle(hudStyle(style), { diff: false }))   // без diff: інакше охоронні шари зникають, а style.load не повторюється
+      .catch(err => mapTag("тайли карти недоступні (" + err.message + "): охоронні шари працюють без підкладки"));
+  } else if (mode === "none") {
+    mapTag("підкладки карти немає: створіть файл командою dronewatch-mapbuild (зовнішні тайли вимкнено)");
+  }
 }
 
 // ---------- 3D-модель дрона в досьє ----------

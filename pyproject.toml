@@ -26,11 +26,13 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest>=9.2.0", "cryptography>=42", "ruff>=0.6", "mypy>=1.10", "types-PyYAML"]
+map = ["pmtiles>=3.8"]   # лише для dronewatch-mapbuild (вирізання оффлайн-карти); сервісу під час роботи не потрібна
 viz = ["matplotlib>=3.8"]   # лише для dronewatch.fusion.viz (малює карти треків)
 
 [project.scripts]
 dronewatch-serve = "dronewatch.service.serve:main"
 dronewatch-keygen = "dronewatch.service.keygen:main"
+dronewatch-mapbuild = "dronewatch.service.mapbuild:main"
 dronewatch-bench = "dronewatch.service.flood_bench:main"
 dronewatch-emulate = "dronewatch.emulator.emulate:main"
 
@@ -38,7 +40,7 @@ dronewatch-emulate = "dronewatch.emulator.emulate:main"
 where = ["src"]
 
 [tool.setuptools.package-data]
-"dronewatch.service" = ["static/*", "static/vendor/*", "*.yaml"]   # дашборд і конфіги лежать поруч із кодом і мають їхати разом із пакетом
+"dronewatch.service" = ["static/*", "static/vendor/*", "static/vendor/fonts/*/*", "static/vendor/webfonts/*", "*.yaml"]   # дашборд і конфіги лежать поруч із кодом і мають їхати разом із пакетом
 
 [tool.pytest.ini_options]
 pythonpath = ["tests"]   # тести імпортують одне одного (хелпери); сам пакет береться зі встановлення

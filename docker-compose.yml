@@ -67,6 +67,7 @@ services:
                                                # просто вимкнений (ai.enabled у deploy/config.yaml не стартує сервіс примусово)
     volumes:
       - ./deploy/config.yaml:/config/config.yaml:ro
+      - ./data/map:/app/data/map:ro   # оффлайн-карта (dronewatch-mapbuild); без файлу дашборд працює без підкладки, без зовнішніх запитів
       - incidents:/data          # журнал тривог переживає перезапуск
       - certs-ca:/certs:ro       # лише публічний ca.crt
       - certs-http:/tls:ro       # сертифікат і ключ сервісу: лише він їх бачить

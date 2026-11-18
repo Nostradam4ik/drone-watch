@@ -8,6 +8,7 @@ import contextlib
 import logging
 import math
 import os
+import re
 import sqlite3
 import time
 import uuid
@@ -90,6 +91,8 @@ class Runtime:
     scan: ScanHealth = field(default_factory=ScanHealth)
     ai: AiRuntime | None = None
     ai_tasks: set[asyncio.Task[None]] = field(default_factory=set)   # живі посилання на фонові задачі AI-індексації
+    map_file: Path | None = None   # власний PMTiles карти, якщо файл є на диску
+    map_online: bool = False       # дозвіл на онлайн-тайли (лише коли власного файлу немає)
 
 
 def get_runtime(conn: HTTPConnection) -> Runtime:
@@ -152,13 +155,15 @@ def build_runtime(cfg: config.Config) -> Runtime:
     demo = cfg.mode == "demo"
     sensors = make_sensors() if demo else config.build_sensors(cfg)   # demo: датчики симулятора, інакше з конфігу
     db_path = default_db_path()
+    map_file = Path(cfg.map.pmtiles)
     engine = build_engine(cfg, sensors, db_path)
     if demo:
         engine.calibration = {"done": True, "note": "еталонний політ + компенсація затримок"}
     else:
         engine.calibration = config.calibration_note(cfg)
     return Runtime(engine=engine, demo=demo, db_path=db_path, demo_src=DemoSource(sensors) if demo else None,
-                   mqtt=build_mqtt(cfg, engine), ai=build_ai(cfg))
+                   mqtt=build_mqtt(cfg, engine), ai=build_ai(cfg),
+                   map_file=map_file if map_file.is_file() else None, map_online=cfg.map.online_tiles)
 
 
 @asynccontextmanager
@@ -289,7 +294,8 @@ def index(user: Annotated[str | None, Depends(current_user)]) -> Response:
     return FileResponse(BASE / "static" / "index.html")
 
 
-VENDOR_FILES = {"maplibre-gl.js": "text/javascript", "maplibre-gl.css": "text/css", "three.module.min.js": "text/javascript"}
+VENDOR_FILES = {"maplibre-gl.js": "text/javascript", "maplibre-gl.css": "text/css", "three.module.min.js": "text/javascript",
+                "pmtiles.js": "text/javascript"}
 
 
 @app.get("/static/vendor/{name}", include_in_schema=False)
@@ -299,9 +305,47 @@ def vendor(name: str) -> Response:   # бібліотеки віддаємо с�
     return FileResponse(BASE / "static" / "vendor" / name, media_type=VENDOR_FILES[name])
 
 
+FONT_STACK = "Noto Sans Regular"   # єдиний шрифт, що лежить у static/vendor/fonts
+GLYPH_RANGE = re.compile(r"^\d{1,5}-\d{1,5}$")
+
+
+@app.get("/static/fonts/{stack}/{glyph_range}.pbf", include_in_schema=False)
+def font_glyphs(stack: str, glyph_range: str) -> Response:   # підписи на карті без жодного зовнішнього запиту
+    path = BASE / "static" / "vendor" / "fonts" / FONT_STACK / f"{glyph_range}.pbf"
+    if stack != FONT_STACK or not GLYPH_RANGE.match(glyph_range) or not path.is_file():
+        return Response(status_code=404)
+    return FileResponse(path, media_type="application/x-protobuf", headers={"Cache-Control": "public, max-age=86400"})
+
+
+WEBFONT_NAME = re.compile(r"^[A-Za-z0-9_-]+\.(css|woff2)$")
+
+
+@app.get("/static/webfonts/{name}", include_in_schema=False)
+def webfont(name: str) -> Response:   # шрифти інтерфейсу теж свої: жодних запитів до Google
+    path = BASE / "static" / "vendor" / "webfonts" / name
+    if not WEBFONT_NAME.match(name) or not path.is_file():
+        return Response(status_code=404)
+    kind = "text/css" if name.endswith(".css") else "font/woff2"
+    return FileResponse(path, media_type=kind, headers={"Cache-Control": "public, max-age=86400"})
+
+
+@app.get("/map/paris.pmtiles", dependencies=[Depends(require_user)], include_in_schema=False)
+def map_pmtiles(rt: RuntimeDep) -> Response:
+    """Власна карта одним файлом. Браузер читає її діапазонами (Range), це вміє FileResponse. Потрібен вхід: за самим
+    файлом видно, яку ділянку покриває система."""
+    if rt.map_file is None:
+        return Response(status_code=404)
+    return FileResponse(rt.map_file, media_type="application/octet-stream", headers={"Cache-Control": "private, max-age=3600"})
+
+
+def map_mode(rt: Runtime) -> str:
+    """offline: власний файл; online: сторонні тайли (лише з дозволу в конфігу); none: без підкладки, лише охоронні шари."""
+    return "offline" if rt.map_file is not None else "online" if rt.map_online else "none"
+
+
 @app.get("/api/config", dependencies=[Depends(require_user)])
 def get_config(rt: RuntimeDep) -> dict[str, Any]:
-    return {**rt.engine.config(), "demo": rt.demo}
+    return {**rt.engine.config(), "demo": rt.demo, "map": {"mode": map_mode(rt)}}
 
 
 @app.get("/api/health", response_model=None)   # повертає то dict, то JSONResponse(503): моделі відповіді тут нема

@@ -123,6 +123,13 @@ class OriginCfg(BaseModel):
     lon: float = Field(default=2.2945, ge=-180, le=180)
 
 
+class MapCfg(BaseModel):
+    """Підкладка карти дашборда. За замовчуванням ЛИШЕ власний файл (dronewatch-mapbuild): тайли з чужого сервера видають
+    йому, яку ділянку розглядає оператор, тому онлайн-тайли вмикаються свідомо (online_tiles: true) і лише без файлу."""
+    pmtiles: str = "data/map/paris.pmtiles"   # шлях відносно робочої теки сервісу
+    online_tiles: bool = False
+
+
 class Config(BaseModel):
     mode: Literal["demo", "live"] = "demo"
     scan_dt: float = Field(default=0.5, gt=0)
@@ -134,6 +141,7 @@ class Config(BaseModel):
     sensors: list[SensorCfg] = []
     zones: list[ZoneCfg] = []
     origin: OriginCfg = OriginCfg()
+    map: MapCfg = MapCfg()
     alerts: AlertsCfg = AlertsCfg()
     mqtt: MqttCfg | None = None
     auth: AuthCfg = AuthCfg()
