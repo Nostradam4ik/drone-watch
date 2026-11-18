@@ -67,4 +67,4 @@ def derive_zones(sensors: list[Sensor]) -> list[Zone]:
 def type_catalog() -> list[dict[str, Any]]:
     """Палітра для дашборда: що можна поставити й чим типи відрізняються."""
     return [{"id": k, "name": v["name"], "label": v["label"], "max_range": v["max_range"], "sigma": list(v["sigma"]), "pd": v["pd"],
-             "fov_deg": v.get("fov_deg", 360.0)} for k, v in SENSOR_TYPES.items()]
+             "fov_deg": v.get("fov_deg", 360.0), "real": v.get("real")} for k, v in SENSOR_TYPES.items()]

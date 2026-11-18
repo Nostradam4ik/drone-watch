@@ -46,6 +46,31 @@ SENSOR_TYPES: dict[str, dict[str, Any]] = {
 }
 
 
+# Реальні моделі. Правило: кожен параметр симуляції (max_range, fov, sigma, pd, clutter) або підтверджений виробником (known),
+# або чесно позначений припущенням (assumed): жодного мовчки вигаданого числа. Що виробник вказав, але симуляція не моделює,
+# лежить у extra. Дані зібрані з офіційних сторінок виробника, див. sources; перед польовим використанням звіряйте з даташитом.
+_ROBIN_SOURCES = ["https://www.robinradar.com/drone-detection-systems", "https://www.robinradar.com/products/iris-radar",
+                  "https://www.robinradar.com/news-events/robin-radar-deploys-off-the-shelf-cuas-radar-with-12km-range"]
+_ROBIN_EXTRA = ["огляд 60° по висоті (кут місця в симуляції не обмежується)",
+                "оновлення: 30 об/хв, 1 с на оберт (симуляція працює зі своїм кроком)",
+                "класифікація мікродоплером і нейромережею: відрізняє квадрокоптер, літак, птаха (не моделюється)"]
+_ROBIN_NOTE = ("5 і 12 км це «instrumented range» (технічна дальність радара), а не дальність виявлення малого дрона: "
+               "для малого дрона виробник її не вказує. У симуляції взято як є, реальна дальність по малих цілях буде меншою.")
+
+SENSOR_TYPES |= {
+    "robin-iris": {"name": "Robin Radar IRIS", "kind": "radar", "label": "radar", "max_range": 5000.0,
+                   "sigma": (5.0, 0.7, 1.5), "pd": 0.90, "clutter": 0.5,
+                   "real": {"vendor": "Robin Radar Systems", "model": "IRIS, стандартний режим", "sources": _ROBIN_SOURCES,
+                            "known": {"max_range": "5 км (instrumented range)", "fov": "360° по азимуту"},
+                            "assumed": ["sigma", "pd", "clutter"], "extra": _ROBIN_EXTRA, "note": _ROBIN_NOTE}},
+    "robin-iris-lrm": {"name": "Robin Radar IRIS, режим 12 км", "kind": "radar", "label": "radar", "max_range": 12000.0,
+                       "sigma": (5.0, 0.7, 1.5), "pd": 0.90, "clutter": 0.5,
+                       "real": {"vendor": "Robin Radar Systems", "model": "IRIS, Long Range Mode", "sources": _ROBIN_SOURCES,
+                                "known": {"max_range": "12 км (instrumented range, програмний режим LRM)", "fov": "360° по азимуту"},
+                                "assumed": ["sigma", "pd", "clutter"], "extra": _ROBIN_EXTRA, "note": _ROBIN_NOTE}},
+}
+
+
 def make_sensor(type_id: str, name: str, x: float, y: float, heading_deg: float = 0.0) -> Sensor:
     """Датчик із палітри в точці (x, y) метрів. Ідеальний: без зсуву й затримки (їх задають лише вбудовані датчики демо).
     heading_deg: куди він дивиться, компасні градуси (північ = 0, схід = 90); має значення лише для секторних типів."""

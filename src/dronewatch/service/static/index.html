@@ -138,6 +138,12 @@
   #palette button:hover { border-color: var(--muted); }
   #palette button.on { background: var(--sensor); color: #04100d; border-color: var(--sensor); }
   #editor .hint { color: var(--muted); font-size: 11px; line-height: 1.45; min-height: 3.2em; }
+  #palette .grp { flex: 1 0 100%; color: var(--muted); font: 600 10.5px var(--face-label); letter-spacing: .04em; text-transform: uppercase; margin-top: 3px; }
+  #palette button.real { border-color: #4fc3ff66; }
+  #palette button.real.on { background: var(--sensor); border-color: var(--sensor); }
+  .real-info { margin-top: 6px; padding: 6px 8px; border: 1px solid var(--line); border-left: 3px solid var(--sensor); border-radius: 3px; }
+  .real-info b { color: var(--text); font-weight: 600; } .real-info .assumed { color: var(--warn); }
+  .real-info a { color: var(--sensor); }
   #editor .linkbtn { justify-self: start; }
   #cov-row { font-size: 11.5px; color: var(--text); display: flex; align-items: center; gap: 6px; cursor: pointer; }
   #cov-stats { display: grid; gap: 3px; font: 11px var(--face-data); color: var(--muted); }
@@ -1024,10 +1030,26 @@ function drawCoverage(c) {
     `<div class="sub">RF може визначити модель дрона на <b style="margin-left:6px">${c.stats.ident} %</b> зони</div>`;
 }
 
+const PARAM_UA = { max_range: "дальність", fov: "сектор огляду", sigma: "точність", pd: "ймовірність виявлення", clutter: "хибні спрацювання" };
+
+// Реальна модель: що підтвердив виробник, що ми лише припустили, і де це написано
+function realInfoHtml(t) {
+  const r = t.real; if (!r) return "";
+  const safe = u => /^https:\/\//.test(u);
+  const links = r.sources.filter(safe).map((u, i) => `<a href="${esc(u)}" target="_blank" rel="noopener noreferrer">джерело ${i + 1}</a>`).join(", ");
+  return `<div class="real-info"><b>${esc(r.vendor)} · ${esc(r.model)}</b><br>` +
+    `Підтверджено виробником: ${esc(Object.values(r.known).join("; "))}.<br>` +
+    `<span class="assumed">Припущено (виробник не вказав): ${esc(r.assumed.map(k => PARAM_UA[k] || k).join(", "))}.</span><br>` +
+    `${esc(r.note)}<br>Не моделюється: ${esc(r.extra.join("; "))}.<br>${links}</div>`;
+}
+
 function renderPalette() {
-  document.getElementById("palette").innerHTML = `<button type="button" data-tool="" class="${tool ? "" : "on"}">↖ курсор</button>` +
-    cfg.sensor_types.map(t => `<button type="button" data-tool="${esc(t.id)}" class="${tool === t.id ? "on" : ""}" title="${esc(sensorSpec(t))}">${esc(t.name)}</button>`).join("");
-  document.getElementById("palette-hint").textContent = tool ? sensorSpec(typeInfo(tool)) + " Клікніть по карті, щоб поставити; Esc: курсор."
+  const btn = t => `<button type="button" data-tool="${esc(t.id)}" class="${tool === t.id ? "on" : ""}${t.real ? " real" : ""}" title="${esc(sensorSpec(t))}">${esc(t.name)}</button>`;
+  const generic = cfg.sensor_types.filter(t => !t.real), real = cfg.sensor_types.filter(t => t.real);
+  document.getElementById("palette").innerHTML = `<button type="button" data-tool="" class="${tool ? "" : "on"}">↖ курсор</button>` + generic.map(btn).join("") +
+    (real.length ? `<div class="grp">Реальні моделі (дані виробника)</div>` + real.map(btn).join("") : "");
+  const info = tool && typeInfo(tool);
+  document.getElementById("palette-hint").innerHTML = info ? esc(sensorSpec(info) + " Клікніть по карті, щоб поставити; Esc: курсор.") + realInfoHtml(info)
     : "Курсор: тягніть датчики, × у списку прибирає. Оберіть тип, щоб поставити новий кліком по карті. Буферна й критична зони йдуть за радарами.";
   if (map) map.getCanvas().style.cursor = editing && tool ? "crosshair" : "";
 }
