@@ -4,77 +4,159 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Drone Watch</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<script type="importmap">{ "imports": { "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js" } }</script>
 <style>
   :root {
-    --bg: #0b1117; --panel: #111a23; --line: #1f2d3a; --text: #d7e2ea; --muted: #7d92a3;
-    --ok: #3fb5a3; --warn: #f2a93b; --crit: #ef4b5b; --sensor: #6aa7ff;
+    --ink: #060a10; --panel: #0b131c; --line: #1c2b38; --text: #dce7ee; --muted: #64808f;
+    --ok: #33e6c2; --warn: #ffb020; --crit: #ff3b63; --sensor: #4fc3ff;
+    --face-label: "Space Grotesk", "Segoe UI", sans-serif;
+    --face-data: "JetBrains Mono", ui-monospace, "SF Mono", Menlo, Consolas, monospace;
   }
   * { box-sizing: border-box; }
-  body { margin: 0; background: var(--bg); color: var(--text); font: 14px/1.4 system-ui, "Segoe UI", sans-serif;
+  ::selection { background: var(--ok); color: #04100d; }
+  :focus-visible { outline: 2px solid var(--ok); outline-offset: 1px; }
+  body { margin: 0; background: var(--ink); color: var(--text); font: 13px/1.45 var(--face-data);
          height: 100vh; display: grid; grid-template-rows: auto 1fr; overflow: hidden; }
-  header { display: flex; flex-wrap: wrap; gap: 8px 24px; align-items: center; padding: 10px 16px;
+
+  header { display: flex; flex-wrap: wrap; gap: 7px 20px; align-items: center; padding: 10px 18px;
            border-bottom: 1px solid var(--line); background: var(--panel); }
-  header h1 { font-size: 16px; margin: 0; letter-spacing: .04em; }
-  .badge { padding: 2px 10px; border-radius: 999px; font-size: 12px; border: 1px solid var(--line); color: var(--muted); }
-  .badge.live { color: var(--ok); border-color: var(--ok); }
-  .badge.off { color: var(--crit); border-color: var(--crit); }
-  .stat { color: var(--muted); } .stat b { color: var(--text); font-variant-numeric: tabular-nums; }
+  .brand { display: flex; align-items: center; gap: 9px; margin-right: 4px; }
+  .blip { position: relative; width: 10px; height: 10px; border-radius: 50%; background: var(--ok); flex: none; }
+  .blip::after { content: ""; position: absolute; inset: -5px; border: 1px solid var(--ok); border-radius: 50%;
+                 animation: ping 2.4s cubic-bezier(.2,.7,.3,1) infinite; }
+  @keyframes ping { 0% { transform: scale(.5); opacity: .9; } 100% { transform: scale(2.1); opacity: 0; } }
+  header h1 { font: 700 17px/1 var(--face-label); margin: 0; letter-spacing: -.01em; color: var(--text); }
+
+  /* HUD-текстура на всій сторінці: скляні сканлайни + вінʼєтка по краях. Один глобальний шар атмосфери,
+     а не ефект на кожному елементі — свідомо один акцент на весь екран. */
+  #hud {
+    position: fixed; inset: 0; pointer-events: none; z-index: 9;
+    background:
+      repeating-linear-gradient(0deg, #000 0px, #000 1px, transparent 1px, transparent 3px),
+      radial-gradient(ellipse at center, transparent 55%, #000a 100%);
+    opacity: .5; mix-blend-mode: overlay;
+  }
+
+  .chip { font: 500 11px/1 var(--face-label); letter-spacing: .02em; color: var(--muted); background: var(--ink);
+          border: 1px solid var(--line); border-left: 3px solid var(--line); border-radius: 3px; padding: 5px 9px 4px; }
+  .chip.live { color: var(--ok); border-left-color: var(--ok); }
+  .chip.off { color: var(--crit); border-left-color: var(--crit); }
+  .stat { color: var(--muted); font-size: 12px; } .stat b { color: var(--text); font-weight: 600; font-variant-numeric: tabular-nums; }
   .spacer { flex: 1; }
-  .linkbtn { background: none; border: 1px solid var(--line); color: var(--muted); border-radius: 6px; padding: 2px 10px; font: inherit; cursor: pointer; }
+  .linkbtn { background: none; border: 1px solid var(--line); color: var(--muted); border-radius: 3px; padding: 4px 11px;
+             font: 500 11px var(--face-label); letter-spacing: .02em; cursor: pointer; }
   .linkbtn:hover { color: var(--text); border-color: var(--muted); }
-  main { display: grid; grid-template-columns: 1fr 340px; min-height: 0; }
-  #mapwrap { position: relative; min-height: 0; }
-  canvas { width: 100%; height: 100%; display: block; }
-  #legend { position: absolute; left: 12px; bottom: 12px; background: #0b1117cc; border: 1px solid var(--line);
-            border-radius: 8px; padding: 8px 12px; font-size: 12px; color: var(--muted); display: grid; gap: 4px; }
-  #legend i { display: inline-block; width: 10px; height: 10px; border-radius: 50%; margin-right: 6px; vertical-align: -1px; }
+
+  main { display: grid; grid-template-columns: 1fr 348px; min-height: 0; }
+  #mapwrap { position: relative; min-height: 0; background: radial-gradient(ellipse at center, #0a141d 0%, var(--ink) 72%); }
+  canvas { width: 100%; height: 100%; display: block; position: absolute; inset: 0; }
+  #sweep { position: absolute; inset: 0; pointer-events: none; mix-blend-mode: screen; opacity: .16;
+           background: conic-gradient(from 0deg, var(--ok) 0deg, transparent 28deg, transparent 360deg);
+           animation: spin 7s linear infinite; transform-origin: 50% 50%; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  @media (prefers-reduced-motion: reduce) { #sweep, .blip::after { animation: none; } }
+
+  /* Кутові HUD-дужки навколо скопа — рамка приладу, не декоративна картка */
+  .corner { position: absolute; width: 22px; height: 22px; border: 2px solid var(--ok); opacity: .55; pointer-events: none; }
+  .corner.tl { top: 10px; left: 10px; border-right: 0; border-bottom: 0; }
+  .corner.tr { top: 10px; right: 10px; border-left: 0; border-bottom: 0; }
+  .corner.bl { bottom: 10px; left: 10px; border-right: 0; border-top: 0; }
+  .corner.br { bottom: 10px; right: 10px; border-left: 0; border-top: 0; }
+
+  #dossier { position: absolute; top: 12px; left: 12px; width: 232px; background: #060a10dd; border: 1px solid var(--line);
+             border-left: 3px solid var(--ok); border-radius: 4px; padding: 11px 13px; backdrop-filter: blur(2px); }
+  #dossier.hidden { display: none; }
+  #dossier .ttl { font: 600 12px var(--face-label); color: var(--ok); margin-bottom: 7px; display: flex; justify-content: space-between; }
+  #dossier .ttl button { background: none; border: none; color: var(--muted); cursor: pointer; font-size: 13px; padding: 0 2px; }
+  #dossier dl { margin: 0; display: grid; grid-template-columns: auto 1fr; gap: 3px 10px; font: 12px var(--face-data); }
+  #dossier dt { color: var(--muted); } #dossier dd { margin: 0; text-align: right; }
+  #dossier .hint { grid-column: 1 / -1; color: var(--muted); font-size: 10.5px; margin-top: 4px; border-top: 1px solid var(--line); padding-top: 6px; }
+
+  #legend { position: absolute; left: 12px; bottom: 12px; background: #060a10cc; border: 1px solid var(--line);
+            border-radius: 4px; padding: 9px 13px; font: 11.5px/1.7 var(--face-data); color: var(--muted); display: grid; gap: 3px;
+            backdrop-filter: blur(2px); }
+  #legend i { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 7px; vertical-align: -1px; }
   #legend label { cursor: pointer; color: var(--text); }
-  aside { border-left: 1px solid var(--line); background: var(--panel); display: grid; grid-template-rows: auto 1fr auto auto auto; min-height: 0; }
-  h2 { margin: 0; padding: 10px 16px; font-size: 12px; text-transform: uppercase; letter-spacing: .08em; color: var(--muted);
-       border-bottom: 1px solid var(--line); }
+
+  aside { border-left: 1px solid var(--line); background: var(--panel); display: grid; grid-template-rows: auto 1fr auto auto auto;
+          min-height: 0; overflow-y: auto; }   /* запобіжник: якщо все разом не влазить у висоту вікна, прокручується бокова панель,
+                                                   а не ховається форма AI за межами екрана */
+  h2 { margin: 0; padding: 9px 16px 8px 13px; font: 600 12.5px/1 var(--face-label); color: var(--text);
+       border-left: 3px solid var(--accent, var(--line)); border-bottom: 1px solid var(--line); }
+  h2.hd-alerts { --accent: var(--crit); } h2.hd-sensors { --accent: var(--sensor); }
+  h2.hd-tracks { --accent: var(--ok); } h2.hd-ai { --accent: var(--ok); }
+
   #alerts { overflow-y: auto; min-height: 0; }
-  .alert { padding: 8px 16px; border-bottom: 1px solid var(--line); display: grid; gap: 2px; }
-  .alert .lvl { font-weight: 600; font-size: 12px; letter-spacing: .05em; }
+  .alert { padding: 9px 16px 9px 13px; border-bottom: 1px solid var(--line); border-left: 3px solid var(--line); display: grid; gap: 3px; }
+  .alert.CRITICAL { border-left-color: var(--crit); } .alert.WARNING { border-left-color: var(--warn); }
+  .alert .lvl { font: 600 11.5px var(--face-label); letter-spacing: .03em; }
   .alert.CRITICAL .lvl { color: var(--crit); } .alert.WARNING .lvl { color: var(--warn); }
-  .alert .meta { color: var(--muted); font-size: 12px; }
-  .empty { padding: 16px; color: var(--muted); }
-  .sensor { display: flex; align-items: center; gap: 8px; padding: 5px 16px; font-size: 13px; }
-  .sensor i { width: 9px; height: 9px; border-radius: 50%; background: var(--ok); flex: none; }
-  .sensor.WAITING i { background: var(--warn); } .sensor.LOST i { background: var(--crit); }
-  .sensor .st { margin-left: auto; color: var(--muted); font-size: 12px; }
+  .alert .id { color: var(--muted); font-weight: 500; }
+  .alert .meta { color: var(--muted); font-size: 11.5px; display: flex; align-items: center; gap: 7px; }
+  .alert .meta .sep { width: 1px; height: 10px; background: var(--line); }
+  .empty { padding: 18px 16px; color: var(--muted); font-size: 12px; }
+
+  .sensor { display: flex; align-items: center; gap: 9px; padding: 6px 16px 6px 13px; font-size: 12.5px; border-left: 3px solid transparent; }
+  .sensor i { width: 8px; height: 8px; border-radius: 50%; background: var(--ok); flex: none; box-shadow: 0 0 6px 0 var(--ok); }
+  .sensor.WAITING i { background: var(--warn); box-shadow: 0 0 6px 0 var(--warn); }
+  .sensor.LOST { border-left-color: var(--crit); } .sensor.LOST i { background: var(--crit); box-shadow: none; }
+  .sensor .st { margin-left: auto; color: var(--muted); font-size: 11.5px; }
   .sensor.LOST .st { color: var(--crit); font-weight: 600; } .sensor.WAITING .st { color: var(--warn); }
-  #degraded { flex: 1 0 100%; background: #ef4b5b22; border: 1px solid var(--crit); border-radius: 6px; color: var(--crit); padding: 6px 12px; font-size: 13px; }
-  #tracks { max-height: 38vh; overflow-y: auto; border-top: 1px solid var(--line); }
-  table { width: 100%; border-collapse: collapse; font-size: 12px; font-variant-numeric: tabular-nums; }
-  th, td { padding: 4px 8px; text-align: left; } th { color: var(--muted); font-weight: 500; position: sticky; top: 0; background: var(--panel); }
-  tr.sel { background: #1b2a38; } tr { cursor: pointer; }
-  td.NONE { color: var(--ok); } td.WARNING { color: var(--warn); } td.CRITICAL { color: var(--crit); }
-  #ai-box { border-top: 1px solid var(--line); display: grid; grid-template-rows: auto auto auto; max-height: 34vh; }
-  #ai-log { overflow-y: auto; padding: 6px 16px; display: grid; gap: 6px; min-height: 0; }
-  .ai-msg { font-size: 12px; padding: 4px 8px; border-radius: 6px; }
-  .ai-q { background: #1b2a38; color: var(--text); justify-self: end; max-width: 90%; }
-  .ai-a { background: #0b1117; border: 1px solid var(--line); color: var(--text); max-width: 90%; }
-  .ai-trace { color: var(--muted); font-size: 11px; margin-top: 4px; }
-  #ai-form { display: flex; gap: 6px; padding: 8px 16px; border-top: 1px solid var(--line); }
-  #ai-q-input { flex: 1; background: var(--bg); border: 1px solid var(--line); color: var(--text); border-radius: 6px; padding: 5px 8px; font: inherit; }
-  #ai-form button { background: var(--sensor); border: none; color: #0b1117; border-radius: 6px; padding: 5px 12px; font: inherit; cursor: pointer; font-weight: 600; }
-  #ai-form button:disabled { opacity: .5; cursor: default; }
+  #degraded { flex: 1 0 100%; background: #ff386318; border: 1px solid var(--crit); border-radius: 3px; color: var(--crit);
+              padding: 7px 12px; font: 12px var(--face-data); }
+
+  #tracks { max-height: 36vh; overflow-y: auto; border-top: 1px solid var(--line); }
+  table { width: 100%; border-collapse: collapse; font: 12px var(--face-data); font-variant-numeric: tabular-nums; }
+  th, td { padding: 5px 10px; text-align: right; } th:first-child, td:first-child { text-align: left; }
+  th { color: var(--muted); font-weight: 500; font-size: 11px; letter-spacing: .03em; position: sticky; top: 0; background: var(--panel); }
+  tr.sel { background: #16222e; } tr { cursor: pointer; }
+  tr:hover { background: #0f1822; }
+  td.NONE, dd.NONE { color: var(--ok); } td.WARNING, dd.WARNING { color: var(--warn); } td.CRITICAL, dd.CRITICAL { color: var(--crit); font-weight: 600; }
+
+  #ai-box { border-top: 1px solid var(--line); display: grid; grid-template-rows: auto minmax(0, 1fr) auto; max-height: 34vh; min-height: 150px; }
+  #ai-log { overflow-y: auto; padding: 10px 13px; display: grid; gap: 8px; min-height: 0; }
+  .ai-msg { font-size: 12px; line-height: 1.5; }
+  .ai-q { color: var(--muted); justify-self: end; text-align: right; max-width: 92%; }
+  .ai-q::before { content: "› "; color: var(--ok); }
+  .ai-a { background: var(--ink); border: 1px solid var(--line); border-left: 3px solid var(--ok); border-radius: 3px;
+          color: var(--text); padding: 8px 10px; max-width: 94%; }
+  .caret { display: inline-block; width: 6px; height: 12px; background: var(--ok); margin-left: 1px; vertical-align: -2px;
+           animation: blink 1s steps(1) infinite; }
+  @keyframes blink { 50% { opacity: 0; } }
+  @media (prefers-reduced-motion: reduce) { .caret { animation: none; } }
+  .tool-trace { color: var(--muted); font-size: 10.5px; margin-top: 7px; display: flex; flex-wrap: wrap; gap: 5px; }
+  .tool-chip { border: 1px solid var(--line); border-radius: 3px; padding: 2px 6px; }
+  #ai-form { display: flex; gap: 7px; padding: 10px 13px; border-top: 1px solid var(--line); }
+  #ai-q-input { flex: 1; background: var(--ink); border: 1px solid var(--line); color: var(--text); border-radius: 3px;
+                padding: 7px 9px; font: 12.5px var(--face-data); }
+  #ai-q-input::placeholder { color: var(--muted); }
+  #ai-form button { background: var(--ok); border: none; color: #04100d; border-radius: 3px; padding: 7px 14px;
+                    font: 600 12px var(--face-label); cursor: pointer; }
+  #ai-form button:hover:not(:disabled) { filter: brightness(1.08); }
+  #ai-form button:disabled { opacity: .45; cursor: default; }
+
   #toast { position: absolute; right: 12px; top: 12px; display: grid; gap: 6px; pointer-events: none; }
-  .toast { background: #0b1117e6; border: 1px solid var(--crit); color: var(--text); padding: 8px 12px; border-radius: 8px; font-size: 13px; }
-  .toast.WARNING { border-color: var(--warn); }
+  .toast { background: #060a10ee; border: 1px solid var(--crit); border-left: 3px solid var(--crit); color: var(--text);
+           padding: 8px 12px; border-radius: 3px; font: 12px var(--face-data); }
+  .toast.WARNING { border-color: var(--warn); border-left-color: var(--warn); }
+
   @media (max-width: 800px) { main { grid-template-columns: 1fr; grid-template-rows: 55vh 1fr; } aside { border-left: 0; border-top: 1px solid var(--line); } }
 </style>
 </head>
 <body>
+<div id="hud"></div>
 <header>
-  <h1>DRONE WATCH</h1>
-  <span id="conn" class="badge off">немає звʼязку</span>
-  <span id="mode" class="badge"></span>
-  <span id="calib" class="badge"></span>
-  <span id="mqtt" class="badge" hidden></span>
-  <span id="sens" class="badge"></span>
-  <span id="overload" class="badge off" hidden></span>
-  <span id="denied" class="badge off" hidden></span>
+  <div class="brand"><span class="blip"></span><h1>DRONE WATCH</h1></div>
+  <span id="conn" class="chip off">немає звʼязку</span>
+  <span id="mode" class="chip"></span>
+  <span id="calib" class="chip"></span>
+  <span id="mqtt" class="chip" hidden></span>
+  <span id="sens" class="chip"></span>
+  <span id="overload" class="chip off" hidden></span>
+  <span id="denied" class="chip off" hidden></span>
   <span class="stat">Треків: <b id="s-tracks">0</b></span>
   <span class="stat">Кандидатів: <b id="s-tent">0</b></span>
   <span class="stat">Подій: <b id="s-ev">0</b></span>
@@ -86,31 +168,35 @@
 </header>
 <main>
   <div id="mapwrap">
+    <canvas id="city3d"></canvas>
     <canvas id="map"></canvas>
+    <div id="sweep"></div>
+    <span class="corner tl"></span><span class="corner tr"></span><span class="corner bl"></span><span class="corner br"></span>
+    <div id="dossier" class="hidden"></div>
     <div id="toast"></div>
     <div id="legend">
-      <div><i style="background:#3fb5a3"></i>трек поза зонами</div>
-      <div><i style="background:#f2a93b"></i>у буферній зоні</div>
-      <div><i style="background:#ef4b5b"></i>у критичній зоні</div>
-      <div><i style="background:#6aa7ff"></i>датчик</div>
+      <div><i style="background:var(--ok)"></i>трек поза зонами</div>
+      <div><i style="background:var(--warn)"></i>у буферній зоні</div>
+      <div><i style="background:var(--crit)"></i>у критичній зоні</div>
+      <div><i style="background:var(--sensor)"></i>датчик</div>
       <label id="truth-row" hidden><input type="checkbox" id="truth"> показати істинні позиції (лише демо)</label>
     </div>
   </div>
   <aside>
     <div>
-      <h2>Тривоги</h2>
+      <h2 class="hd-alerts">Тривоги</h2>
     </div>
     <div id="alerts"><div class="empty">Тривог немає</div></div>
     <div id="sensors-box">
-      <h2>Датчики</h2>
+      <h2 class="hd-sensors">Датчики</h2>
       <div id="sensors"></div>
     </div>
     <div>
-      <h2>Активні треки</h2>
+      <h2 class="hd-tracks">Активні треки</h2>
       <div id="tracks"><table><thead><tr><th>ID</th><th>Рівень</th><th>V, м/с</th><th>H, м</th><th>Датчики</th></tr></thead><tbody id="tbody"></tbody></table></div>
     </div>
     <div id="ai-box">
-      <h2>AI-асистент</h2>
+      <h2 class="hd-ai">AI-асистент</h2>
       <div id="ai-log"><div class="empty">Запитайте про стан чи минулі інциденти</div></div>
       <form id="ai-form">
         <input id="ai-q-input" maxlength="500" placeholder="Напр.: що зараз у Зоні A?" autocomplete="off">
@@ -119,8 +205,83 @@
     </div>
   </aside>
 </main>
+<script type="module">
+// Декоративний 3D-силует міста позаду 2D-скопа. Не прив'язаний до реальних координат: це атмосфера, не дані.
+// Якщо Three.js не завантажився (мережа), показуємо мітку «3D вимкнено», а 2D-трекінг (окремий <script>) працює далі.
+const cv3 = document.getElementById("city3d");
+try {
+  const THREE = await import("three");
+  const renderer = new THREE.WebGLRenderer({ canvas: cv3, antialias: true, alpha: true });
+  const scene = new THREE.Scene();
+  scene.fog = new THREE.FogExp2(0x060a10, 0.00035);
+
+  const camera = new THREE.PerspectiveCamera(48, 1, 10, 8000);
+  camera.position.set(0, 1250, 1350);
+  camera.lookAt(0, 0, 0);
+
+  scene.add(new THREE.AmbientLight(0x1c2b38, 1.6));
+
+  function building(x, z, w, d, h) {
+    const geo = new THREE.BoxGeometry(w, h, d);
+    const box = new THREE.Mesh(geo, new THREE.MeshBasicMaterial({ color: 0x102232 }));
+    box.position.set(x, h / 2, z);
+    scene.add(box);
+    const edges = new THREE.LineSegments(new THREE.EdgesGeometry(geo),
+      new THREE.LineBasicMaterial({ color: 0x33e6c2, transparent: true, opacity: .75 }));
+    edges.position.copy(box.position);
+    scene.add(edges);
+  }
+
+  let seed = 11;   // власний детермінований ГВЧ: місто не «стрибає» інакше на кожному перезавантаженні
+  function rnd() { seed = (seed * 9301 + 49297) % 233280; return seed / 233280; }
+  for (let i = 0; i < 42; i++) {
+    const a = rnd() * Math.PI * 2, r = 680 + rnd() * 900;   // кільце навколо центру: місто навколо об'єкта, не під ним
+    building(Math.cos(a) * r, Math.sin(a) * r, 50 + rnd() * 90, 50 + rnd() * 90, 60 + rnd() * 260);
+  }
+
+  function eiffel(x, z, k) {   // впізнаваний силует: ґратчаста вежа зі звужених ярусів
+    const group = new THREE.Group();
+    const mat = new THREE.LineBasicMaterial({ color: 0x7ffbe4, transparent: true, opacity: .95 });
+    let prevR = 90 * k, prevY = 0;
+    for (const [r, y] of [[60, 160], [34, 300], [16, 400], [4, 470]]) {
+      const pts = [];
+      for (let q = 0; q <= 4; q++) {
+        const ang = (q / 4) * Math.PI * 2 + Math.PI / 4;
+        pts.push(new THREE.Vector3(Math.cos(ang) * prevR, prevY, Math.sin(ang) * prevR));
+        pts.push(new THREE.Vector3(Math.cos(ang) * r * k, y * k, Math.sin(ang) * r * k));
+      }
+      group.add(new THREE.LineSegments(new THREE.BufferGeometry().setFromPoints(pts), mat));
+      prevR = r * k; prevY = y * k;
+    }
+    group.position.set(x, 0, z);
+    scene.add(group);
+  }
+  eiffel(-760, -620, 1.7);
+
+  function resize3d() {
+    const r = cv3.getBoundingClientRect(), d = Math.min(devicePixelRatio || 1, 2);
+    renderer.setPixelRatio(d); renderer.setSize(r.width, r.height, false);
+    camera.aspect = r.width / (r.height || 1); camera.updateProjectionMatrix();
+  }
+  addEventListener("resize", resize3d);
+  resize3d();
+
+  const reducedMotion = matchMedia("(prefers-reduced-motion: reduce)").matches;
+  (function loop3d(t) {
+    if (!reducedMotion) scene.rotation.y = t * 0.00005;   // повільний оберт: атмосфера, не ще один центр уваги
+    renderer.render(scene, camera);
+    requestAnimationFrame(loop3d);
+  })(0);
+} catch (err) {
+  console.warn("3D-місто вимкнено:", err);
+  const tag = document.createElement("div");
+  tag.textContent = "3D вимкнено: " + (err && err.message ? err.message : err);
+  tag.style.cssText = "position:absolute;right:14px;bottom:14px;font:11px monospace;color:#64808f;pointer-events:none";
+  document.getElementById("mapwrap").appendChild(tag);
+}
+</script>
 <script>
-const COLORS = { NONE: "#3fb5a3", WARNING: "#f2a93b", CRITICAL: "#ef4b5b" };
+const COLORS = { NONE: "#33e6c2", WARNING: "#ffb020", CRITICAL: "#ff3b63" };
 const LEVEL_UA = { NONE: "—", WARNING: "увага", CRITICAL: "загроза" };
 const KIND_UA = { radar: "радар", rf: "RF", acoustic: "акуст." };
 const SENSOR_UA = { OK: "справний", WAITING: "очікуємо", LOST: "немає звʼязку" };
@@ -129,6 +290,11 @@ const cv = document.getElementById("map"), ctx = cv.getContext("2d");
 let cfg = null, state = null, selected = null, trails = new Map(), seenAlerts = new Set(), view = { s: 0.4 }, firstMsg = true;
 
 function esc(s) { return String(s).replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c])); }
+
+// Відповідь AI — звичайний текст з markdown-розміткою (**жирний**, переноси рядків), а не HTML. Усе спершу
+// екранується через esc(), і лише тоді controlled-регексом додаються свої ж безпечні теги — вхід моделі
+// ніколи не потрапляє в розмітку як є.
+function mdLite(s) { return esc(s).replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>").replace(/\n/g, "<br>"); }
 
 function resize() {
   const r = cv.getBoundingClientRect(), d = devicePixelRatio || 1;
@@ -147,10 +313,10 @@ const W = () => cv.getBoundingClientRect().width, H = () => cv.getBoundingClient
 const px = x => W() / 2 + x * view.s, py = y => H() / 2 - y * view.s;
 
 function draw() {
-  ctx.clearRect(0, 0, W(), H());
+  ctx.clearRect(0, 0, W(), H()); ctx.shadowBlur = 0;
   if (!cfg) return;
   // сітка кожні 250 м
-  ctx.lineWidth = 1; ctx.strokeStyle = "#16222d"; ctx.fillStyle = "#4b6071"; ctx.font = "11px system-ui";
+  ctx.lineWidth = 1; ctx.strokeStyle = "#16222d"; ctx.fillStyle = "#4b6071"; ctx.font = "11px 'JetBrains Mono', monospace";
   const step = 250, ex = Math.max(W(), H()) / view.s / 2;
   for (let v = -Math.ceil(ex / step) * step; v <= ex; v += step) {
     ctx.beginPath(); ctx.moveTo(px(v), 0); ctx.lineTo(px(v), H()); ctx.stroke();
@@ -168,11 +334,11 @@ function draw() {
   cfg.sensors.forEach(s => {
     const lost = sensorState(s.id) === "LOST";
     ctx.beginPath(); ctx.arc(px(s.pos[0]), py(s.pos[1]), s.max_range * view.s, 0, 7);
-    ctx.strokeStyle = lost ? "#ef4b5b55" : "#6aa7ff33"; ctx.setLineDash(lost ? [3, 5] : []); ctx.stroke(); ctx.setLineDash([]);
+    ctx.strokeStyle = lost ? "#ff386355" : "#4fc3ff33"; ctx.setLineDash(lost ? [3, 5] : []); ctx.stroke(); ctx.setLineDash([]);
     const x = px(s.pos[0]), y = py(s.pos[1]);
     ctx.beginPath(); ctx.moveTo(x, y - 8); ctx.lineTo(x + 7, y + 6); ctx.lineTo(x - 7, y + 6); ctx.closePath();
-    ctx.fillStyle = lost ? "#ef4b5b" : "#6aa7ff"; ctx.fill();
-    ctx.fillStyle = lost ? "#ef4b5b" : "#8fb6ee"; ctx.fillText(s.id + (lost ? " — НЕМАЄ ЗВʼЯЗКУ" : ""), x + 10, y + 4);
+    ctx.fillStyle = lost ? "#ff3863" : "#4fc3ff"; ctx.fill();
+    ctx.fillStyle = lost ? "#ff3863" : "#8fd4ff"; ctx.fillText(s.id + (lost ? " — НЕМАЄ ЗВʼЯЗКУ" : ""), x + 10, y + 4);
   });
   if (!state) return;
   // істина (демо)
@@ -190,13 +356,67 @@ function draw() {
     const x = px(t.x), y = py(t.y);
     ctx.beginPath(); ctx.moveTo(x, y); ctx.lineTo(x + t.vx * view.s * 4, y - t.vy * view.s * 4); ctx.strokeStyle = c; ctx.stroke();
     if (t.level === "CRITICAL") { ctx.beginPath(); ctx.arc(x, y, 9 + 5 * pulse, 0, 7); ctx.strokeStyle = c + "99"; ctx.stroke(); }
+    ctx.shadowBlur = 11; ctx.shadowColor = c;                 // світіння лише на самій цілі — один акцент, не на всьому
     ctx.beginPath(); ctx.arc(x, y, 5, 0, 7); ctx.fillStyle = c; ctx.fill();
-    if (t.id === selected) { ctx.beginPath(); ctx.arc(x, y, 12, 0, 7); ctx.strokeStyle = "#fff"; ctx.lineWidth = 1.5; ctx.stroke(); }
-    ctx.fillStyle = "#d7e2ea"; ctx.fillText("#" + t.id + (t.coasting ? " ?" : ""), x + 9, y - 7);
+    ctx.shadowBlur = 0;
+    if (t.id === selected) reticle(x, y, 14);
+    ctx.fillStyle = "#dce7ee"; ctx.fillText("#" + t.id + (t.coasting ? " ?" : ""), x + 9, y - 7);
     ctx.globalAlpha = 1;
   });
 }
+
+// Рамка-прицільник (camera-lock reticle) навколо вибраної цілі — чотири кутові дужки замість суцільного кільця
+function reticle(x, y, r) {
+  const d = r * 0.6;
+  ctx.strokeStyle = "#fff"; ctx.lineWidth = 1.5;
+  for (const [sx, sy] of [[-1, -1], [1, -1], [-1, 1], [1, 1]]) {
+    ctx.beginPath();
+    ctx.moveTo(x + sx * r, y + sy * r - sy * d);
+    ctx.lineTo(x + sx * r, y + sy * r);
+    ctx.lineTo(x + sx * r - sx * d, y + sy * r);
+    ctx.stroke();
+  }
+}
 (function loop() { draw(); requestAnimationFrame(loop); })();
+
+// Системі бракує камери чи РЧ-відбитка моделі, щоб справді розпізнавати тип дрона — тому це явно позначена
+// евристика за швидкістю (реальне число з треку), а не вигадана класифікація.
+function guessClass(t) {
+  if (t.speed >= 22) return "швидкісний профіль (можливо, FPV)";
+  if (t.speed <= 6) return "повільний/завислий профіль";
+  return "типовий мультикоптерний профіль";
+}
+
+function updateDossier() {
+  const box = document.getElementById("dossier");
+  const t = state && state.tracks.find(tt => tt.id === selected);
+  if (!t) { box.classList.add("hidden"); return; }
+  box.classList.remove("hidden");
+  box.innerHTML =
+    `<div class="ttl"><span>ЦІЛЬ #${t.id}</span><button type="button" aria-label="закрити">×</button></div>` +
+    `<dl><dt>рівень</dt><dd class="${t.level}">${LEVEL_UA[t.level]}</dd>` +
+    `<dt>швидкість</dt><dd>${t.speed} м/с</dd>` +
+    `<dt>висота</dt><dd>${Math.round(t.z)} м</dd>` +
+    `<dt>координати</dt><dd>${Math.round(t.x)}, ${Math.round(t.y)}</dd>` +
+    `<dt>похибка</dt><dd>±${t.err} м</dd>` +
+    `<dt>довіра треку</dt><dd>${t.score}</dd>` +
+    `<dt>підтвердили</dt><dd>${esc(t.kinds.map(k => KIND_UA[k] || k).join(", ") || "—")}</dd>` +
+    `<div class="hint">${esc(guessClass(t))} — евристика за швидкістю, не розпізнавання моделі: немає камери чи РЧ-відбитка.</div></dl>`;
+  box.querySelector("button").onclick = () => { selected = null; updateDossier(); };
+}
+
+// Слово за словом — читається як «AI зараз думає», а не як статичний блок тексту, що просто зʼявився.
+async function revealAnswer(el, text) {
+  const words = text.split(" ");
+  let acc = "";
+  for (const w of words) {
+    acc += (acc ? " " : "") + w;
+    el.innerHTML = mdLite(acc) + '<span class="caret"></span>';
+    document.getElementById("ai-log").scrollTop = 1e9;
+    await new Promise(r => setTimeout(r, 16));
+  }
+  el.innerHTML = mdLite(text);
+}
 
 function toast(a) {
   const el = document.createElement("div");
@@ -214,14 +434,14 @@ function render(msg) {
   document.getElementById("s-t").textContent = msg.t.toFixed(0);
   const cal = document.getElementById("calib");
   cal.textContent = msg.calibration.done ? "калібрування: " + msg.calibration.note : "калібрування: не виконано";
-  cal.className = "badge " + (msg.calibration.done ? "live" : "off");
+  cal.className = "chip " + (msg.calibration.done ? "live" : "off");
 
   const mq = document.getElementById("mqtt");
   mq.hidden = !msg.mqtt;
   if (msg.mqtt) {
     const idle = msg.mqtt.connected && msg.mqtt.idle_s > 10;   // зʼєднання є, а подій немає: типовий симптом хибної ACL брокера
     mq.textContent = "MQTT " + msg.mqtt.host + (msg.mqtt.tls ? " · TLS" : " · без шифрування") + (!msg.mqtt.connected ? " — немає звʼязку" : idle ? " — подій немає " + Math.round(msg.mqtt.idle_s) + " с (перевірте ACL)" : "");
-    mq.className = "badge " + (msg.mqtt.connected && !idle ? "live" : "off");
+    mq.className = "chip " + (msg.mqtt.connected && !idle ? "live" : "off");
   }
 
   renderSensors(msg.sensors || []);
@@ -246,12 +466,13 @@ function render(msg) {
   const box = document.getElementById("alerts");
   if (msg.alerts.length) {
     box.innerHTML = msg.alerts.map(a =>
-      `<div class="alert ${a.level}"><span class="lvl">${a.level === "CRITICAL" ? "ЗАГРОЗА" : "УВАГА"} · #${a.track_id}</span>` +
-      `<span>${esc(a.zone)}</span><span class="meta">${new Date(a.ts * 1000).toLocaleTimeString()} · ${a.speed} м/с · ${esc(a.sensors.map(k => KIND_UA[k] || k).join(", "))}</span></div>`).join("");
+      `<div class="alert ${a.level}"><span><span class="lvl">${a.level === "CRITICAL" ? "ЗАГРОЗА" : "УВАГА"}</span> <span class="id">#${a.track_id} · ${esc(a.zone)}</span></span>` +
+      `<span class="meta"><span>${new Date(a.ts * 1000).toLocaleTimeString()}</span><span class="sep"></span><span>${a.speed} м/с</span><span class="sep"></span><span>${esc(a.sensors.map(k => KIND_UA[k] || k).join(", "))}</span></span></div>`).join("");
     msg.alerts.forEach(a => { const k = a.ts + ":" + a.track_id + ":" + a.level; if (!seenAlerts.has(k)) { seenAlerts.add(k); if (!firstMsg) toast(a); } });
   } else box.innerHTML = '<div class="empty">Тривог немає</div>';
   firstMsg = false;
   document.getElementById("truth-row").hidden = !(cfg && cfg.demo && msg.truth);
+  updateDossier();
 }
 
 function renderSensors(list) {
@@ -261,7 +482,7 @@ function renderSensors(list) {
   const lost = list.filter(s => s.state === "LOST"), ok = list.filter(s => s.state === "OK").length;
   const badge = document.getElementById("sens");
   badge.textContent = "датчики: " + ok + "/" + list.length;
-  badge.className = "badge " + (lost.length ? "off" : ok === list.length ? "live" : "");
+  badge.className = "chip " + (lost.length ? "off" : ok === list.length ? "live" : "");
   const banner = document.getElementById("degraded");
   banner.hidden = !lost.length;
   if (lost.length) {
@@ -272,7 +493,10 @@ function renderSensors(list) {
 }
 
 document.getElementById("tbody").addEventListener("click", e => {
-  const tr = e.target.closest("tr"); if (tr) selected = +tr.dataset.id;
+  const tr = e.target.closest("tr"); if (!tr) return;
+  const id = +tr.dataset.id;
+  selected = selected === id ? null : id;   // повторний клік знімає виділення
+  updateDossier();
 });
 addEventListener("resize", resize);
 
@@ -294,7 +518,7 @@ async function apiPost(path, body) {
 async function start() {
   cfg = await api("/api/config");
   const mode = document.getElementById("mode");
-  mode.textContent = cfg.demo ? "ДЕМО (симуляція)" : "бойовий режим"; mode.className = "badge " + (cfg.demo ? "" : "live");
+  mode.textContent = cfg.demo ? "ДЕМО (симуляція)" : "бойовий режим"; mode.className = "chip " + (cfg.demo ? "" : "live");
   const me = await api("/api/me");
   if (me.auth) {   // без автентифікації (демо) ні імені, ні кнопки виходу
     document.getElementById("who-name").textContent = me.user;
@@ -325,10 +549,10 @@ document.getElementById("ai-form").addEventListener("submit", async e => {
     const r = await apiPost("/api/ai/ask", { question });
     if (!r.ok) { aEl.textContent = "AI недоступний"; return; }
     const body = await r.json();
-    aEl.textContent = body.answer || "(порожня відповідь)";
+    await revealAnswer(aEl, body.answer || "(порожня відповідь)");
     if (body.tool_calls && body.tool_calls.length) {
-      const trace = document.createElement("div"); trace.className = "ai-trace";
-      trace.textContent = "інструменти: " + body.tool_calls.map(c => c.name).join(", ");
+      const trace = document.createElement("div"); trace.className = "tool-trace";
+      trace.innerHTML = body.tool_calls.map(c => `<span class="tool-chip">${esc(c.name)}</span>`).join("");
       aEl.appendChild(trace);
     }
   } catch (err) {
@@ -343,10 +567,10 @@ document.getElementById("ai-form").addEventListener("submit", async e => {
 function connect() {
   const ws = new WebSocket((location.protocol === "https:" ? "wss://" : "ws://") + location.host + "/ws");
   const conn = document.getElementById("conn");
-  ws.onopen = () => { conn.textContent = "на звʼязку"; conn.className = "badge live"; ws.send("hi"); };
+  ws.onopen = () => { conn.textContent = "на звʼязку"; conn.className = "chip live"; ws.send("hi"); };
   ws.onmessage = e => render(JSON.parse(e.data));
   ws.onclose = async () => {
-    conn.textContent = "немає звʼязку"; conn.className = "badge off";
+    conn.textContent = "немає звʼязку"; conn.className = "chip off";
     // Сервер закриває WebSocket і коли сесія скінчилась: тоді перепідключатись марно, потрібно знову увійти
     try { await api("/api/me"); } catch (e) { if (e instanceof LoginRequired) return; }   // мережева помилка: пробуємо знову
     setTimeout(connect, 2000);

@@ -8,6 +8,9 @@ venv/
 *.db
 *.log
 
+# Локальні секрети для docker compose (docker compose сам підхоплює .env у корені) — ніколи не комітиться
+.env
+
 # Артефакти інструментів
 .playwright-mcp/
 
