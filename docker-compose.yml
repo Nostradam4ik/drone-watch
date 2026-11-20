@@ -76,6 +76,25 @@ services:
       mosquitto: {condition: service_healthy}
     restart: unless-stopped
 
+  sandbox:                        # лише з профілем sandbox: демо-режим із розстановкою датчиків мишею, https://localhost:8001
+    profiles: ["sandbox"]
+    build: {context: ., dockerfile: docker/service.Dockerfile}
+    ports: ["127.0.0.1:8001:8000"]
+    environment:
+      CONFIG: /config/config.demo.yaml
+      TLS_CERT_FILE: /tls/http.crt     # той самий HTTPS, що й у основного сервісу: відкритого HTTP тут теж нема
+      TLS_KEY_FILE: /tls/http.key
+      TLS_CA_FILE: /certs/ca.crt
+      DB_PATH: /tmp/sandbox.db         # журнал демо-сеансу не змішується з журналом основного сервісу
+    volumes:
+      - ./deploy/config.demo.yaml:/config/config.demo.yaml:ro
+      - ./data/map:/app/data/map:ro
+      - certs-ca:/certs:ro
+      - certs-http:/tls:ro
+    depends_on:
+      certs: {condition: service_completed_successfully}
+    restart: unless-stopped
+
   qdrant:                         # лише з профілем ai: векторне сховище минулих інцидентів для AI-асистента
     profiles: ["ai"]
     image: qdrant/qdrant:latest

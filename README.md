@@ -105,7 +105,9 @@ EchoGuard, Blighter A422 (180°) і A402 (90°). Їхні даташити ле�
 щонайменше один радар або два пеленгові), перезапускає симуляцію й починає новий сеанс трекінгу. Датчики з палітри ідеальні: без
 зсувів і затримок. У `mode: live` розстановка недоступна (409): там датчики мають ключі й ACL брокера та задаються конфігом.
 
-Швидкий запуск без Docker: `python -m uvicorn dronewatch.service.app:app --port 8001` (мод demo із `src/dronewatch/service/config.yaml`).
+Запуск у Docker: `docker compose --profile sandbox up -d --build` піднімає demo на https://localhost:8001 (профіль `sandbox`, конфіг
+`deploy/config.demo.yaml`, без входу) поруч з основним бойовим сервісом на 8000. Без Docker: `python -m uvicorn
+dronewatch.service.app:app --port 8001` (demo із `src/dronewatch/service/config.yaml`).
 
 ## API
 

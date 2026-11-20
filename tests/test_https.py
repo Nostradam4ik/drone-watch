@@ -234,7 +234,12 @@ def test_demo_stack_serves_https_only():
     def holders(vol):
         return {n for n, s in sv.items() if any(str(v).startswith(vol + ":") for v in s.get("volumes", []))}
 
-    assert holders("certs-http") == {"certs", "service"} and holders("certs-server") == {"certs", "mosquitto"}
+    # sandbox це той самий сервіс у demo-режимі (профіль sandbox): так само лише HTTPS, лише localhost, без відкритого режиму
+    assert holders("certs-http") == {"certs", "service", "sandbox"} and holders("certs-server") == {"certs", "mosquitto"}
+    sb = sv["sandbox"]
+    assert sb["ports"] == ["127.0.0.1:8001:8000"] and "ALLOW_INSECURE_HTTP" not in sb["environment"]
+    assert sb["environment"]["TLS_CERT_FILE"] == "/tls/http.crt" and sb["profiles"] == ["sandbox"]
+    assert all(str(v).endswith(":ro") for v in sb["volumes"] if str(v).startswith(("certs-http:", "certs-ca:")))
     assert "certs-http" in compose["volumes"]
     assert all(str(v).endswith(":ro") for n in ("service",) for v in sv[n]["volumes"] if str(v).startswith(("certs-http:", "certs-ca:")))
     assert all(str(v).endswith(":ro") for v in sv["emulator"]["volumes"] if str(v).startswith("certs-ca:"))
