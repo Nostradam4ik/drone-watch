@@ -231,18 +231,31 @@ def _schedule_ai_indexing(rt: Runtime, alert: Alert) -> None:
     task.add_done_callback(rt.ai_tasks.discard)
 
 
+SEND_TIMEOUT_S = 1.0   # клієнт, що не прийняв кадр за цей час, відстає надто: відключаємо, а не гальмуємо скани решти
+
+
+async def _send(rt: Runtime, ws: WebSocket, payload: dict[str, Any]) -> None:
+    try:
+        await asyncio.wait_for(ws.send_json(payload), SEND_TIMEOUT_S)
+    except Exception:   # обрив, помилка або таймаут (TimeoutError): прибираємо клієнта з розсилки
+        rt.clients.pop(ws, None)
+        with contextlib.suppress(Exception):
+            await asyncio.wait_for(ws.close(code=1013), SEND_TIMEOUT_S)
+
+
 async def broadcast(rt: Runtime, access: DashboardAccess, payload: dict[str, Any]) -> None:
-    """Шле стан усім WebSocket-клієнтам; сесії, що скінчилися (або вийшли), закриває замість розсилки."""
+    """Шле стан усім WebSocket-клієнтам паралельно й з таймаутом: повільний клієнт не гальмує інших і скани.
+    Сесії, що скінчилися (або вийшли), закриває замість розсилки."""
+    sends = []
     for ws, token in list(rt.clients.items()):
         if not access.session_valid(token):   # сесія скінчилась або користувач вийшов: клієнту більше нічого не шлемо
             rt.clients.pop(ws, None)
             with contextlib.suppress(Exception):
                 await ws.close(code=1008)
             continue
-        try:
-            await ws.send_json(payload)
-        except Exception:
-            rt.clients.pop(ws, None)
+        sends.append(_send(rt, ws, payload))
+    if sends:
+        await asyncio.gather(*sends)
 
 
 async def scan_step(app: FastAPI, rt: Runtime) -> None:

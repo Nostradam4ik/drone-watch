@@ -55,6 +55,9 @@ class Alert(TypedDict):
     pos: list[float]
     speed: float
     sensors: list[str]
+    model: str | None        # модель за RF-ідентифікацією (None, якщо невідома)
+    model_name: str | None
+    side: str                # friend | enemy | unknown
 
 
 class SensorStatus(TypedDict):
@@ -152,6 +155,10 @@ class Engine:
         self.db.execute("""CREATE TABLE IF NOT EXISTS incidents (
             id INTEGER PRIMARY KEY AUTOINCREMENT, ts REAL, track_id INTEGER, level TEXT, zone TEXT,
             x REAL, y REAL, z REAL, speed REAL, sensors TEXT)""")
+        have = {r[1] for r in self.db.execute("PRAGMA table_info(incidents)")}
+        for col in ("model", "model_name", "side"):   # міграція старих журналів: нові колонки лишаються NULL у старих рядках
+            if col not in have:
+                self.db.execute(f"ALTER TABLE incidents ADD COLUMN {col} TEXT")
         self.db.commit()
 
     # --- вхід
@@ -382,16 +389,22 @@ class Engine:
                 continue
             if self.require_radar and self.tracker._in_radar_cover(tr) and t - tr.kinds["radar"] > 3.0:
                 continue  # у зоні радара тривогу без радарного підтвердження не піднімаємо
+            if self._identity(tr.id)["side"] == "friend":
+                continue  # своя ціль у зоні — не тривога (свій/ворог визначає каталог за RF-моделлю)
             zone = self._highest_zone(tr.x[:3])
             if zone is not None and LEVELS[zone.level] > LEVELS[self.max_level.get(tr.id, "NONE")]:
                 self.max_level[tr.id] = zone.level
+                ident = self._identity(tr.id)
                 new_alerts.append({"ts": self.clock(), "track_id": tr.id, "level": zone.level, "zone": zone.name,
                                    "pos": [round(float(v), 1) for v in tr.x[:3]],
                                    "speed": round(float(np.linalg.norm(tr.x[3:5])), 1),
-                                   "sensors": sorted(k for k, ts in tr.kinds.items() if t - ts < 3.0)})
+                                   "sensors": sorted(k for k, ts in tr.kinds.items() if t - ts < 3.0),
+                                   "model": ident["model"], "model_name": ident["model_name"], "side": ident["side"]})
         for a in new_alerts:
-            self.db.execute("INSERT INTO incidents (ts, track_id, level, zone, x, y, z, speed, sensors) VALUES (?,?,?,?,?,?,?,?,?)",
-                            (a["ts"], a["track_id"], a["level"], a["zone"], *a["pos"], a["speed"], ",".join(a["sensors"])))
+            self.db.execute("INSERT INTO incidents (ts, track_id, level, zone, x, y, z, speed, sensors, model, model_name, side)"
+                            " VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+                            (a["ts"], a["track_id"], a["level"], a["zone"], *a["pos"], a["speed"], ",".join(a["sensors"]),
+                             a["model"], a["model_name"], a["side"]))
         if new_alerts:
             self.db.commit()
             self.alerts = (new_alerts[::-1] + self.alerts)[:200]
@@ -437,7 +450,8 @@ class Engine:
         t = self.clock() - self.t0
         tracks = []
         for tr in self.tracker.confirmed():
-            zone = self._highest_zone(tr.x[:3])
+            ident = self._identity(tr.id)
+            zone = None if ident["side"] == "friend" else self._highest_zone(tr.x[:3])   # свої не підсвічуємо як загрозу
             tracks.append({
                 "id": tr.id, "x": round(float(tr.x[0]), 1), "y": round(float(tr.x[1]), 1), "z": round(float(tr.x[2]), 1),
                 "vx": round(float(tr.x[3]), 1), "vy": round(float(tr.x[4]), 1),
@@ -450,7 +464,7 @@ class Engine:
                 "diving": self.dive_scans.get(tr.id, 0) >= DIVE_SCANS,
                 # скільки секунд до землі за поточної швидкості зниження (лише коли ціль знижується)
                 "ttg": round(float(tr.x[2]) / -float(tr.x[5]), 1) if tr.x[5] < -0.5 and tr.x[2] > 0 else None,
-                **self._identity(tr.id),
+                **ident,
             })
         out: dict[str, Any] = {
             "t": round(t, 1), "tracks": tracks, "stats": dict(self.stats), "calibration": self.calibration,

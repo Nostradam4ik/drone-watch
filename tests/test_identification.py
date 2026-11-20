@@ -193,3 +193,34 @@ def test_ident_of_a_measurement_over_the_cap_is_not_counted():
     events += [{"sensor_id": "rf1", "ts": clock.now, "azimuth_deg": az, "drone_model": "geran-2"} for _ in range(50)]
     eng.ingest(events)
     assert eng.ident_buffer == []
+
+
+# ---------- свої не дають тривоги ----------
+def test_friend_in_critical_zone_raises_no_alert_but_enemy_does():
+    friend = run(["anafi-usa"], [(-100, 100, 50)], (5, 0))
+    assert friend.state()["tracks"][0]["side"] == "friend"
+    assert friend.state()["tracks"][0]["level"] == "NONE" and friend.alerts == []
+    enemy = run(["geran-2"], [(-100, 100, 50)], (5, 0))
+    assert enemy.alerts and enemy.state()["tracks"][0]["level"] == "WARNING"
+    unknown = run([None], [(-100, 100, 50)], (5, 0))
+    assert unknown.alerts
+
+
+def test_incident_journal_records_model_and_migrates_old_db(tmp_path):
+    import sqlite3
+    db = str(tmp_path / "old.db")
+    with sqlite3.connect(db) as old:   # журнал старого формату без колонок моделі
+        old.execute("CREATE TABLE incidents (id INTEGER PRIMARY KEY AUTOINCREMENT, ts REAL, track_id INTEGER, level TEXT, "
+                    "zone TEXT, x REAL, y REAL, z REAL, speed REAL, sensors TEXT)")
+        old.execute("INSERT INTO incidents (ts, track_id, level, zone, x, y, z, speed, sensors) VALUES (1,1,'WARNING','z',0,0,0,1,'radar')")
+    clock = Clock()
+    eng = Engine(make_engine(clock).sensors.values(), [Zone("z", 600, "WARNING")], clock=clock, min_age_s=0.0, db_path=db)
+    rng = random.Random(3)
+    for i in range(14):
+        eng.ingest(events_for(clock, [(-100 + 2.5 * i, 100, 50)], rng, ["geran-2"]))
+        eng.tick()
+        clock.now += 0.5
+    rows = eng.db.execute("SELECT model, model_name, side FROM incidents ORDER BY id").fetchall()
+    assert rows[0] == (None, None, None)
+    assert rows[-1][0] == "geran-2" and rows[-1][2] == "enemy" and rows[-1][1].startswith("Герань")
+    assert eng.alerts[0]["model"] == "geran-2"

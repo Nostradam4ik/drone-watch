@@ -17,7 +17,8 @@ from dronewatch.service.ai.errors import AiUnavailable
 
 
 def incident_text(row: dict[str, Any]) -> str:
-    return (f"Інцидент: трек {row['track_id']}, зона {row['zone']}, рівень {row['level']}, "
+    who = f"тип {row['model_name']} ({row['side']}), " if row.get("model_name") else ""   # старі рядки без моделі
+    return (f"Інцидент: трек {row['track_id']}, {who}зона {row['zone']}, рівень {row['level']}, "
             f"швидкість {row['speed']} м/с, підтверджено: {row['sensors']}, час {row['ts']}")
 
 
