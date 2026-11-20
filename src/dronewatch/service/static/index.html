@@ -486,7 +486,7 @@ function pushData() {
   set("tracks", tracks.map(t => feat({ type: "Point", coordinates: toLL(t.x, t.y) }, {
     id: t.id, prio: t.id === selected ? 0 : t.diving ? 1 : t.level === "CRITICAL" ? 2 : t.level === "WARNING" ? 3 : 4,
     color: (SIDE[t.side] || SIDE.unknown).color, opacity: t.coasting ? 0.4 : 1, selected: t.id === selected,
-    halo: t.diving ? COLORS.CRITICAL : COLORS[t.level], haloW: t.diving ? 4.5 : t.side === "friend" ? 1 : t.level === "CRITICAL" ? 3.5 : t.level === "WARNING" ? 2 : 0,   // «свій» лише приглушено: мітка не автентифікована
+    halo: t.diving ? COLORS.CRITICAL : COLORS[t.level], haloW: t.diving ? 4.5 : t.level === "CRITICAL" ? 3.5 : t.level === "WARNING" ? 2 : 0,
     label: "#" + t.id + (t.coasting ? " ?" : "") + (t.model_name ? " · " + shortName(t) : "") + " · " + Math.round(t.z) + " м" + (t.diving ? " ↓" : "")   // "↓" (U+2193) є у збережених діапазонах шрифту; "⬇" ні, а помилка гліфа ламає весь шар підписів,
   })));
   set("stalks", tracks.filter(t => !t.coasting && t.z > 1).flatMap(t => {
@@ -875,7 +875,7 @@ function render(msg) {
     const current = new Set();
     msg.alerts.forEach(a => {
       const k = a.ts + ":" + a.track_id + ":" + a.level; current.add(k);
-      if (!seenAlerts.has(k) && !firstMsg && a.side !== "friend") toast(a);
+      if (!seenAlerts.has(k) && !firstMsg) toast(a);
     });
     seenAlerts = current;   // памʼятаємо лише тривоги, що ще в списку: множина не росте безмежно
   } else if (lastAlerts !== "") { lastAlerts = ""; seenAlerts = new Set(); box.innerHTML = '<div class="empty">Тривог немає</div>'; }
