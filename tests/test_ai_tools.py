@@ -66,3 +66,31 @@ def test_call_tool_unknown_name_raises_keyerror():
     rt = _runtime()
     with pytest.raises(KeyError):
         tools.call_tool("delete_everything", {}, rt=rt, index=_FakeIndex())
+
+
+def test_get_incident_stats_counts_by_zone_and_status(tmp_path):
+    db_path = str(tmp_path / "incidents.db")
+    rt = app.Runtime(engine=Engine(default_sensors(), [], db_path=db_path), db_path=db_path)
+    ids = []
+    for zone in ("A", "A", "B"):
+        cur = rt.engine.db.execute("INSERT INTO incidents (ts, track_id, level, zone, x, y, z, speed, sensors) "
+                                   "VALUES (?,1,'WARNING',?,0,0,0,5,'r')", (rt.engine.clock(), zone))
+        ids.append(cur.lastrowid)
+    rt.engine.db.commit()
+    rt.engine.review_incident(ids[1], "dismissed", "op")
+    stats = {(r["zone"], r["status"]): r["count"] for r in tools.get_incident_stats(rt, days=7)}
+    assert stats == {("A", "new"): 1, ("A", "dismissed"): 1, ("B", "new"): 1}
+
+
+@pytest.mark.parametrize("days", ["x", None, -5, 10**9])
+def test_get_incident_stats_bad_days_does_not_crash(days):
+    assert tools.call_tool("get_incident_stats", {"days": days}, rt=_runtime(), index=_FakeIndex()) == []
+
+
+def test_tool_schemas_include_stats_and_stay_read_only(tmp_path):
+    assert "get_incident_stats" in {t["function"]["name"] for t in tools.TOOL_SCHEMAS}
+    db_path = str(tmp_path / "incidents.db")
+    rt = app.Runtime(engine=Engine(default_sensors(), [], db_path=db_path), db_path=db_path)
+    before = rt.engine.db.total_changes
+    tools.call_tool("get_incident_stats", {}, rt=rt, index=_FakeIndex())
+    assert rt.engine.db.total_changes == before

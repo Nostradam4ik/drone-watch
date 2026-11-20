@@ -17,6 +17,11 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
     {"type": "function", "function": {"name": "get_incidents", "description": "Останні записані тривоги з журналу.",
                                       "parameters": {"type": "object", "properties": {
                                           "limit": {"type": "integer", "description": "Скільки останніх записів (типово 10)"}}}}},
+    {"type": "function", "function": {"name": "get_incident_stats",
+                                      "description": "Скільки тривог за зонами й рішеннями оператора (new/confirmed/dismissed) за період; "
+                                                     "dismissed це хибні тривоги.",
+                                      "parameters": {"type": "object", "properties": {
+                                          "days": {"type": "integer", "description": "За скільки останніх днів (типово 7, макс. 365)"}}}}},
     {"type": "function", "function": {"name": "search_similar_incidents",
                                       "description": "Семантичний пошук схожих минулих інцидентів.",
                                       "parameters": {"type": "object", "properties": {
@@ -38,6 +43,12 @@ def get_incidents(rt: "Runtime", limit: int = 10) -> list[dict[str, Any]]:
     return read_incidents(rt.db_path, limit)
 
 
+def get_incident_stats(rt: "Runtime", days: Any = 7) -> list[dict[str, Any]]:
+    """Аргумент іде від LLM (недовірений вхід): нечислове значення замінюється на 7, решта стискається до 1..365."""
+    n = days if isinstance(days, int) and not isinstance(days, bool) else 7
+    return rt.engine.incident_stats(rt.engine.clock() - max(1, min(n, 365)) * 86400)
+
+
 def search_similar_incidents(index: "IncidentIndex", query: str, k: int = 3) -> list[str] | str:
     try:
         return index.search(query, k)
@@ -52,6 +63,8 @@ def call_tool(name: str, args: dict[str, Any], *, rt: "Runtime", index: "Inciden
         return get_sensors(rt)
     if name == "get_incidents":
         return get_incidents(rt, **({"limit": args["limit"]} if "limit" in args else {}))
+    if name == "get_incident_stats":
+        return get_incident_stats(rt, **({"days": args["days"]} if "days" in args else {}))
     if name == "search_similar_incidents":
         return search_similar_incidents(index, args["query"], **({"k": args["k"]} if "k" in args else {}))
     raise KeyError(name)
