@@ -47,6 +47,10 @@ OK, WAITING, LOST = "OK", "WAITING", "LOST"   # стан здоровʼя дат
 Measurement = tuple[str, Floats]               # (датчик, вимірювання у внутрішньому форматі трекера)
 
 
+VALID_REVIEW_STATUSES: tuple[str, ...] = ("new", "confirmed", "dismissed")
+MAX_REVIEW_NOTE = 500
+
+
 class Alert(TypedDict):
     ts: float
     track_id: int
@@ -58,6 +62,11 @@ class Alert(TypedDict):
     model: str | None        # модель за RF-ідентифікацією (None, якщо невідома)
     model_name: str | None
     side: str                # friend | enemy | unknown
+    id: int                  # rowid у журналі incidents
+    status: str              # new | confirmed | dismissed (рішення оператора; нічого не пригнічує)
+    reviewed_by: str | None
+    reviewed_at: float | None
+    review_note: str | None
 
 
 class SensorStatus(TypedDict):
@@ -156,9 +165,12 @@ class Engine:
             id INTEGER PRIMARY KEY AUTOINCREMENT, ts REAL, track_id INTEGER, level TEXT, zone TEXT,
             x REAL, y REAL, z REAL, speed REAL, sensors TEXT)""")
         have = {r[1] for r in self.db.execute("PRAGMA table_info(incidents)")}
-        for col in ("model", "model_name", "side"):   # міграція старих журналів: нові колонки лишаються NULL у старих рядках
-            if col not in have:
-                self.db.execute(f"ALTER TABLE incidents ADD COLUMN {col} TEXT")
+        for col, typ in (("model", "TEXT"), ("model_name", "TEXT"), ("side", "TEXT"), ("status", "TEXT"),
+                         ("reviewed_by", "TEXT"), ("reviewed_at", "REAL"), ("review_note", "TEXT")):
+            if col not in have:   # міграція старих журналів: нові колонки лишаються NULL у старих рядках (NULL status = new)
+                self.db.execute(f"ALTER TABLE incidents ADD COLUMN {col} {typ}")
+        self.db.execute("""CREATE TABLE IF NOT EXISTS incident_reviews (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, incident_id INTEGER, status TEXT, by TEXT, ts REAL, note TEXT)""")
         self.db.commit()
 
     # --- вхід
@@ -397,12 +409,14 @@ class Engine:
                                    "pos": [round(float(v), 1) for v in tr.x[:3]],
                                    "speed": round(float(np.linalg.norm(tr.x[3:5])), 1),
                                    "sensors": sorted(k for k, ts in tr.kinds.items() if t - ts < 3.0),
-                                   "model": ident["model"], "model_name": ident["model_name"], "side": ident["side"]})
+                                   "model": ident["model"], "model_name": ident["model_name"], "side": ident["side"],
+                                   "id": 0, "status": "new", "reviewed_by": None, "reviewed_at": None, "review_note": None})
         for a in new_alerts:
-            self.db.execute("INSERT INTO incidents (ts, track_id, level, zone, x, y, z, speed, sensors, model, model_name, side)"
-                            " VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
-                            (a["ts"], a["track_id"], a["level"], a["zone"], *a["pos"], a["speed"], ",".join(a["sensors"]),
-                             a["model"], a["model_name"], a["side"]))
+            cur = self.db.execute("INSERT INTO incidents (ts, track_id, level, zone, x, y, z, speed, sensors,"
+                                  " model, model_name, side, status) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,'new')",
+                                  (a["ts"], a["track_id"], a["level"], a["zone"], *a["pos"], a["speed"], ",".join(a["sensors"]),
+                                   a["model"], a["model_name"], a["side"]))
+            a["id"] = cur.lastrowid or 0
         if new_alerts:
             self.db.commit()
             self.alerts = (new_alerts[::-1] + self.alerts)[:200]
@@ -414,6 +428,37 @@ class Engine:
             if tid not in alive:
                 del self.idents[tid]
         return new_alerts
+
+    # --- рішення оператора
+    def review_incident(self, incident_id: int, status: str, by: str, note: str | None = None) -> dict[str, Any] | None:
+        """Записує рішення оператора (і в історію, і в сам рядок журналу). None, якщо такого інциденту нема.
+        Нічого не пригнічує: max_level, трекер і зони не чіпаються."""
+        if status not in VALID_REVIEW_STATUSES:
+            raise ValueError(f"недопустимий статус: {status}")
+        clean = (note or "").strip()[:MAX_REVIEW_NOTE] or None
+        with self.lock:
+            if self.db.execute("SELECT 1 FROM incidents WHERE id=?", (incident_id,)).fetchone() is None:
+                return None
+            ts = self.clock()
+            self.db.execute("INSERT INTO incident_reviews (incident_id, status, by, ts, note) VALUES (?,?,?,?,?)",
+                            (incident_id, status, by, ts, clean))
+            self.db.execute("UPDATE incidents SET status=?, reviewed_by=?, reviewed_at=?, review_note=? WHERE id=?",
+                            (status, by, ts, clean, incident_id))
+            self.db.commit()
+            for a in self.alerts:
+                if a["id"] == incident_id:
+                    a["status"], a["reviewed_by"], a["reviewed_at"], a["review_note"] = status, by, ts, clean
+            cur = self.db.execute("SELECT * FROM incidents WHERE id=?", (incident_id,))
+            cols = [c[0] for c in cur.description]
+            return dict(zip(cols, cur.fetchone(), strict=True))
+
+    def incident_stats(self, since_ts: float | None = None) -> list[dict[str, Any]]:
+        """Кількість інцидентів за зоною й статусом (NULL = new); since_ts відсікає старіші."""
+        with self.lock:
+            rows = self.db.execute("SELECT zone, COALESCE(status,'new'), count(*) FROM incidents WHERE ts >= ? "
+                                   "GROUP BY zone, COALESCE(status,'new') ORDER BY zone, 2",
+                                   (since_ts if since_ts is not None else float("-inf"),)).fetchall()
+        return [{"zone": z, "status": st, "count": n} for z, st, n in rows]
 
     # --- вихід
     def sensor_status(self) -> dict[str, SensorStatus]:
