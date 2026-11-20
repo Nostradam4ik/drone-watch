@@ -884,7 +884,7 @@ function render(msg) {
       `<div class="alert ${a.level}${a.side === "friend" ? " friend" : ""}${a.status !== "new" ? " reviewed" : ""}" data-track="${a.track_id}" title="Показати ціль на карті"><span><span class="lvl">${a.level === "CRITICAL" ? "ЗАГРОЗА" : "УВАГА"}</span> <span class="id">#${a.track_id} · ${esc(a.zone)}</span>${alertTag(msg, a)}</span>` +
       `<span class="meta"><span>${new Date(a.ts * 1000).toLocaleTimeString()}</span><span class="sep"></span><span>${a.speed} м/с</span><span class="sep"></span><span>${esc(a.sensors.map(k => KIND_UA[k] || k).join(", "))}</span></span>` +
       reviewHtml(a) + `</div>`).join("");
-    if (alertsHtml !== lastAlerts && !box.contains(document.activeElement && document.activeElement.closest("input[data-note]"))) { lastAlerts = alertsHtml; box.innerHTML = alertsHtml; }   // не перебудовуємо, поки оператор пише коментар
+    if (alertsHtml !== lastAlerts) { lastAlerts = alertsHtml; rebuildAlerts(box, alertsHtml); }   // чернетка коментаря не входить у HTML: набір тексту не перебудовує список
     const current = new Set();
     msg.alerts.forEach(a => {
       const k = a.ts + ":" + a.track_id + ":" + a.level; current.add(k);
@@ -909,7 +909,19 @@ function reviewHtml(a) {
     (done ? `<span class="st" title="${tip}">${a.status === "confirmed" ? "✓" : "✕"} ${REVIEW_UA[a.status]}</span>` : "") +
     `<button type="button" data-review="confirmed" class="${a.status === "confirmed" ? "on" : ""}">✓ Підтвердити</button>` +
     `<button type="button" data-review="dismissed" class="${a.status === "dismissed" ? "on" : ""}">✕ Відхилити</button>` +
-    `<input type="text" maxlength="500" placeholder="коментар (необов'язково)" value="${esc(noteDraft[a.id] || "")}" data-note></span>`;
+    `<input type="text" maxlength="500" placeholder="коментар (необов'язково)" data-note></span>`;
+}
+// Перебудова списку не повинна красти фокус у оператора, який пише коментар: зберігаємо поле й виділення, потім повертаємо
+function rebuildAlerts(box, html) {
+  const act = document.activeElement;
+  const keep = act && act.matches && act.matches("input[data-note]") && box.contains(act)
+    ? { id: act.closest(".rv").dataset.id, s: act.selectionStart, e: act.selectionEnd } : null;
+  box.innerHTML = html;
+  box.querySelectorAll("input[data-note]").forEach(i => { const v = noteDraft[i.closest(".rv").dataset.id]; if (v) i.value = v; });
+  if (keep) {
+    const i = box.querySelector(`.rv[data-id="${keep.id}"] input[data-note]`);
+    if (i) { i.focus(); i.setSelectionRange(keep.s, keep.e); }
+  }
 }
 async function sendReview(id, status) {
   try {

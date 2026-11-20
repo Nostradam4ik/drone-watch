@@ -120,3 +120,12 @@ def test_dashboard_has_operator_review_ui():
     assert "/api/incidents/${id}/review" in html and "data-review" in html
     assert ".alert.reviewed" in html and 'id="alerts-new"' in html
     assert "esc(a.review_note)" in html and "esc(a.reviewed_by" in html   # недовірений текст екранується
+
+
+def test_alert_list_is_not_frozen_while_typing_a_comment():
+    """Рев'ю: заморожування списку під час набору ховало нові тривоги, а чернетка в порівнюваному HTML
+    перебудовувала картку між mousedown і mouseup кнопки. Чернетка не входить у HTML, фокус відновлюється після перебудови."""
+    html = (STATIC / "index.html").read_text(encoding="utf-8")
+    assert 'closest("input[data-note]"))) { lastAlerts' not in html
+    assert 'value="${esc(noteDraft' not in html
+    assert "setSelectionRange" in html
