@@ -16,7 +16,7 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager, closing
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 
 from fastapi import Body, Depends, FastAPI, Header, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.exceptions import RequestValidationError
@@ -32,7 +32,7 @@ from dronewatch.service.ai.llm import MistralClient
 from dronewatch.service.ai.rag import IncidentIndex
 from dronewatch.service.auth import SensorAuth
 from dronewatch.service.dashboard_auth import LoginLimiter, SessionStore, Users
-from dronewatch.service.dashboard_web import DashboardAccess, current_user, require_user
+from dronewatch.service.dashboard_web import DashboardAccess, current_user, json_post_guard, require_user
 from dronewatch.service.demo import DemoSource, make_sensors
 from dronewatch.service.engine import Alert, Engine, SensorStatus, Zone
 from dronewatch.service.mqtt_in import MqttIngest
@@ -450,17 +450,35 @@ def post_events(events: Annotated[list[Detection], Body(max_length=MAX_HTTP_BATC
     return {"accepted": r.accepted, "rejected": r.rejected, "unauthorized": r.unauthorized}
 
 
-def read_incidents(db_path: str, limit: int = 100) -> list[dict[str, Any]]:
+def read_incidents(db_path: str, limit: int = 100, status: str | None = None) -> list[dict[str, Any]]:
     # окреме з'єднання на запит, і його треба закривати (раніше воно витікало); LIMIT -1 у SQLite = «без ліміту», тож clamp знизу
+    # status=new відповідає й NULL (рядки, записані до появи рішень оператора)
+    where, args = ("WHERE COALESCE(status,'new') = ?", (status,)) if status else ("", ())
     with closing(sqlite3.connect(db_path)) as db:
         db.row_factory = sqlite3.Row
-        rows = db.execute("SELECT * FROM incidents ORDER BY id DESC LIMIT ?", (max(1, min(limit, 1000)),)).fetchall()
+        rows = db.execute(f"SELECT * FROM incidents {where} ORDER BY id DESC LIMIT ?",
+                          (*args, max(1, min(limit, 1000)))).fetchall()
         return [dict(r) for r in rows]
 
 
 @app.get("/api/incidents", dependencies=[Depends(require_user)])
-def incidents(rt: RuntimeDep, limit: int = 100) -> list[dict[str, Any]]:
-    return read_incidents(rt.db_path, limit)
+def incidents(rt: RuntimeDep, limit: int = 100,
+              status: Literal["new", "confirmed", "dismissed"] | None = None) -> list[dict[str, Any]]:
+    return read_incidents(rt.db_path, limit, status)
+
+
+class ReviewRequest(BaseModel):
+    status: Literal["new", "confirmed", "dismissed"]
+    note: str | None = Field(default=None, max_length=500)
+
+
+@app.post("/api/incidents/{incident_id}/review", dependencies=[Depends(json_post_guard)])
+def review_incident(incident_id: int, body: ReviewRequest, rt: RuntimeDep, user: Annotated[str, Depends(require_user)]) -> dict[str, Any]:
+    """Рішення оператора (підтвердити/відхилити/повернути в new). Автор береться з сесії; нічого не пригнічує."""
+    row = rt.engine.review_incident(incident_id, body.status, user, body.note)
+    if row is None:
+        raise HTTPException(404, "Інциденту з таким id немає")
+    return row
 
 
 class AskRequest(BaseModel):
