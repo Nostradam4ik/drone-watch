@@ -140,7 +140,7 @@ class Tracker:
         return [r for r in self.radars
                 if r.name not in self.down and np.linalg.norm(tr.x[:3] - r.pos) < RADAR_COVER * r.max_range and r.in_fov(tr.x)]
 
-    def _in_radar_cover(self, tr: Track) -> bool:
+    def in_radar_cover(self, tr: Track) -> bool:
         return bool(self._cover_radars(tr))
 
     def _near_existing(self, pos: Floats) -> bool:

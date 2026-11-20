@@ -55,7 +55,13 @@ class Detection(BaseModel):
 
 
 def default_db_path() -> str:
-    return os.environ.get("DB_PATH", str(BASE / "incidents.db"))
+    """DB_PATH, інакше ./data/incidents.db відносно робочої теки (не всередині встановленого пакета)."""
+    env = os.environ.get("DB_PATH")
+    if env:
+        return env
+    path = Path.cwd() / "data" / "incidents.db"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    return str(path)
 
 
 @dataclass

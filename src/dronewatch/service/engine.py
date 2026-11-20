@@ -387,7 +387,7 @@ class Engine:
         for tr in self.tracker.confirmed():
             if tr.confirmed_at is None or tr.misses > self.max_coast or t - tr.confirmed_at < self.min_age_s:
                 continue
-            if self.require_radar and self.tracker._in_radar_cover(tr) and t - tr.kinds["radar"] > 3.0:
+            if self.require_radar and self.tracker.in_radar_cover(tr) and t - tr.kinds["radar"] > 3.0:
                 continue  # у зоні радара тривогу без радарного підтвердження не піднімаємо
             zone = self._highest_zone(tr.x[:3])
             if zone is not None and LEVELS[zone.level] > LEVELS[self.max_level.get(tr.id, "NONE")]:
