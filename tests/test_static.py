@@ -113,3 +113,10 @@ def test_pmtiles_file_supports_range_requests(client, tmp_path, monkeypatch):
     r = client.get("/map/paris.pmtiles", headers={"Range": "bytes=10-19"})
     assert r.status_code == 206 and r.content == data[10:20]
     assert client.get("/map/paris.pmtiles").content == data
+
+
+def test_dashboard_has_operator_review_ui():
+    html = (STATIC / "index.html").read_text(encoding="utf-8")
+    assert "/api/incidents/${id}/review" in html and "data-review" in html
+    assert ".alert.reviewed" in html and 'id="alerts-new"' in html
+    assert "esc(a.review_note)" in html and "esc(a.reviewed_by" in html   # недовірений текст екранується

@@ -118,7 +118,8 @@ dronewatch.service.app:app --port 8001` (demo із `src/dronewatch/service/confi
 | GET | `/api/state` | поточні треки і стан датчиків |
 | GET | `/api/sensors` | здоровʼя датчиків: `OK` / `WAITING` / `LOST` |
 | GET | `/api/config` | датчики й зони |
-| GET | `/api/incidents` | журнал тривог (SQLite; `DB_PATH`, за замовчуванням `./data/incidents.db`) |
+| GET | `/api/incidents` | журнал тривог (SQLite; `DB_PATH`, за замовчуванням `./data/incidents.db`); `?status=new\|confirmed\|dismissed` |
+| POST | `/api/incidents/{id}/review` | рішення оператора `{status, note?}`: підтвердити/відхилити (автор із сесії, історія зберігається). Рішення лише позначає тривогу: не пригнічує майбутні тривоги, трекер чи зони |
 | WS | `/ws` | потік стану 2 рази на секунду |
 
 Формат події (азимут компасний, від півночі за годинниковою стрілкою):

@@ -123,6 +123,14 @@
   .alert .lvl { font: 600 11.5px var(--face-label); letter-spacing: .03em; }
   .alert.CRITICAL .lvl { color: var(--crit); } .alert.WARNING .lvl { color: var(--warn); }
   .alert.friend { opacity: .6; }
+  .alert.reviewed { opacity: .55; }
+  .alert .rv { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; margin-top: 2px; cursor: default; }
+  .alert .rv button { font: 600 11px var(--face-label); padding: 2px 8px; border: 1px solid var(--line); background: transparent; color: var(--muted); border-radius: 3px; cursor: pointer; }
+  .alert .rv button:hover { color: var(--text, #dde); border-color: var(--muted); }
+  .alert .rv button.on { color: var(--text, #dde); border-color: var(--muted); }
+  .alert .rv input { flex: 1 1 100%; font: 11.5px var(--face-label); padding: 3px 6px; background: transparent; color: inherit; border: 1px solid var(--line); border-radius: 3px; }
+  .alert .rv .st { font: 600 11px var(--face-label); color: var(--muted); }
+  #alerts-new { margin-left: 8px; font-weight: 600; color: var(--crit); }
   .alert .id { color: var(--muted); font-weight: 500; }
   .alert .meta { color: var(--muted); font-size: 11.5px; display: flex; align-items: center; gap: 7px; }
   .alert .meta .sep { width: 1px; height: 10px; background: var(--line); }
@@ -266,7 +274,7 @@
   </div>
   <aside>
     <div>
-      <h2 class="hd-alerts">Тривоги</h2>
+      <h2 class="hd-alerts">Тривоги<span id="alerts-new" hidden></span></h2>
     </div>
     <div id="alerts"><div class="empty">Тривог немає</div></div>
     <div id="sensors-box">
@@ -817,7 +825,7 @@ async function revealAnswer(el, text) {
 function toast(a) {
   const el = document.createElement("div");
   el.className = "toast " + a.level;
-  el.textContent = (a.level === "CRITICAL" ? "ЗАГРОЗА: " : "Увага: ") + "ціль #" + a.track_id + " — " + a.zone;
+  el.textContent = a.text || ((a.level === "CRITICAL" ? "ЗАГРОЗА: " : "Увага: ") + "ціль #" + a.track_id + " — " + a.zone);
   document.getElementById("toast").appendChild(el);
   setTimeout(() => el.remove(), 6000);
 }
@@ -867,11 +875,16 @@ function render(msg) {
   if (tbodyHtml !== lastTbody) { lastTbody = tbodyHtml; document.getElementById("tbody").innerHTML = tbodyHtml; }   // не чіпаємо DOM, коли нічого не змінилось
 
   const box = document.getElementById("alerts");
+  const counter = document.getElementById("alerts-new");
+  const unreviewed = msg.alerts.filter(a => a.status === "new").length;
+  counter.hidden = !unreviewed; counter.textContent = unreviewed ? "· без рішення: " + unreviewed : "";
   if (msg.alerts.length) {
-    const alertsHtml = msg.alerts.map(a =>
-      `<div class="alert ${a.level}${a.side === "friend" ? " friend" : ""}" data-track="${a.track_id}" title="Показати ціль на карті"><span><span class="lvl">${a.level === "CRITICAL" ? "ЗАГРОЗА" : "УВАГА"}</span> <span class="id">#${a.track_id} · ${esc(a.zone)}</span>${alertTag(msg, a)}</span>` +
-      `<span class="meta"><span>${new Date(a.ts * 1000).toLocaleTimeString()}</span><span class="sep"></span><span>${a.speed} м/с</span><span class="sep"></span><span>${esc(a.sensors.map(k => KIND_UA[k] || k).join(", "))}</span></span></div>`).join("");
-    if (alertsHtml !== lastAlerts) { lastAlerts = alertsHtml; box.innerHTML = alertsHtml; }
+    const ordered = msg.alerts.map((a, i) => [a, i]).sort((x, y) => ((x[0].status === "new" ? 0 : 1) - (y[0].status === "new" ? 0 : 1)) || x[1] - y[1]).map(x => x[0]);
+    const alertsHtml = ordered.map(a =>
+      `<div class="alert ${a.level}${a.side === "friend" ? " friend" : ""}${a.status !== "new" ? " reviewed" : ""}" data-track="${a.track_id}" title="Показати ціль на карті"><span><span class="lvl">${a.level === "CRITICAL" ? "ЗАГРОЗА" : "УВАГА"}</span> <span class="id">#${a.track_id} · ${esc(a.zone)}</span>${alertTag(msg, a)}</span>` +
+      `<span class="meta"><span>${new Date(a.ts * 1000).toLocaleTimeString()}</span><span class="sep"></span><span>${a.speed} м/с</span><span class="sep"></span><span>${esc(a.sensors.map(k => KIND_UA[k] || k).join(", "))}</span></span>` +
+      reviewHtml(a) + `</div>`).join("");
+    if (alertsHtml !== lastAlerts && !box.contains(document.activeElement && document.activeElement.closest("input[data-note]"))) { lastAlerts = alertsHtml; box.innerHTML = alertsHtml; }   // не перебудовуємо, поки оператор пише коментар
     const current = new Set();
     msg.alerts.forEach(a => {
       const k = a.ts + ":" + a.track_id + ":" + a.level; current.add(k);
@@ -885,6 +898,35 @@ function render(msg) {
   pushData();
   updateDossier();
 }
+
+// Рішення оператора по тривозі. Усе від користувача (автор, коментар) іде через esc.
+const REVIEW_UA = { confirmed: "підтверджено", dismissed: "відхилено" };
+const noteDraft = {};   // id тривоги -> незавершений коментар (переживає перебудову DOM між сканами)
+function reviewHtml(a) {
+  const done = a.status !== "new";
+  const tip = done ? `${REVIEW_UA[a.status]} · ${esc(a.reviewed_by || "")} · ${new Date(a.reviewed_at * 1000).toLocaleString()}${a.review_note ? " · " + esc(a.review_note) : ""}` : "";
+  return `<span class="rv" data-id="${a.id}">` +
+    (done ? `<span class="st" title="${tip}">${a.status === "confirmed" ? "✓" : "✕"} ${REVIEW_UA[a.status]}</span>` : "") +
+    `<button type="button" data-review="confirmed" class="${a.status === "confirmed" ? "on" : ""}">✓ Підтвердити</button>` +
+    `<button type="button" data-review="dismissed" class="${a.status === "dismissed" ? "on" : ""}">✕ Відхилити</button>` +
+    `<input type="text" maxlength="500" placeholder="коментар (необов'язково)" value="${esc(noteDraft[a.id] || "")}" data-note></span>`;
+}
+async function sendReview(id, status) {
+  try {
+    const r = await fetch(`/api/incidents/${id}/review`, { method: "POST", credentials: "same-origin",
+      headers: { "Content-Type": "application/json" }, body: JSON.stringify({ status, note: noteDraft[id] || null }) });
+    if (!r.ok) throw new Error("HTTP " + r.status);
+    delete noteDraft[id];   // новий стан прийде з наступним скан-повідомленням
+    if (document.activeElement && document.activeElement.matches("input[data-note]")) document.activeElement.blur();   // інакше картка не перебудується
+  } catch (err) { toast({ level: "WARNING", text: "Не вдалося зберегти рішення (" + err.message + ")" }); }
+}
+document.getElementById("alerts").addEventListener("input", e => {
+  const inp = e.target.closest("input[data-note]"); if (inp) noteDraft[inp.closest(".rv").dataset.id] = inp.value;
+});
+document.getElementById("alerts").addEventListener("click", e => {
+  const btn = e.target.closest("button[data-review]"); if (!btn) return;
+  sendReview(+btn.closest(".rv").dataset.id, btn.dataset.review);
+});
 
 // Тип цілі в тривозі: беремо з поточного треку (тривога зберігає лише швидкість і зону)
 function alertTag(msg, a) {
@@ -952,6 +994,7 @@ document.getElementById("truth").addEventListener("change", pushData);
 
 // Клік по тривозі наводить карту на ціль і відкриває її досьє
 document.getElementById("alerts").addEventListener("click", e => {
+  if (e.target.closest(".rv")) return;   // кнопки й коментар рішення не наводять карту на ціль
   const card = e.target.closest(".alert[data-track]"); if (!card || !map) return;
   const id = +card.dataset.track;
   if (!state || !state.tracks.some(t => t.id === id)) { toast({ level: "WARNING", track_id: id, zone: "ціль вже не відстежується" }); return; }
