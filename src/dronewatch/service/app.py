@@ -384,6 +384,12 @@ async def put_layout(body: layout.Layout, rt: RuntimeDep) -> dict[str, Any]:
     return apply_layout(rt, layout.build(body))
 
 
+@app.get("/api/coverage", dependencies=[Depends(require_user)])
+def get_coverage(rt: RuntimeDep) -> dict[str, Any]:
+    """Покриття буферної зони поточними датчиками рушія (будь-який режим): те, що дашборд підсвічує за замовчуванням."""
+    return coverage.coverage(list(rt.engine.sensors.values()), rt.engine.zones)
+
+
 @app.post("/api/coverage", dependencies=[Depends(require_user)])
 async def post_coverage(body: layout.Layout) -> dict[str, Any]:
     """Що покриває ця розстановка в буферній зоні (клітинки з класом). Нічого не змінює: лише рахує для підсвітки в редакторі."""

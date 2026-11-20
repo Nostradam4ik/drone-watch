@@ -474,11 +474,19 @@ class Engine:
             out["truth"] = {k: [round(float(v), 1) for v in p[:3]] for k, p in truth.items()}
         return out
 
+    @staticmethod
+    def _sigma_display(s: Sensor) -> list[float]:
+        """Похибка датчика для людини: радар (дальність м, азимут °, кут місця °), пеленговий (азимут °)."""
+        if s.kind == "radar":
+            return [round(float(s.sigma[0]), 2), round(math.degrees(float(s.sigma[1])), 2), round(math.degrees(float(s.sigma[2])), 2)]
+        return [round(math.degrees(float(s.sigma[0])), 2)]
+
     def config(self) -> dict[str, Any]:
         return {
             "sensors": [{"id": s.name, "kind": s.kind, "label": s.label, "type": s.type_id, "pos": s.pos[:2].tolist(),
                          "max_range": s.max_range, "heading_deg": round(math_to_compass(s.heading), 1),
-                         "fov_deg": round(math.degrees(s.fov), 1)} for s in list(self.sensors.values())],
+                         "fov_deg": round(math.degrees(s.fov), 1), "pd": s.pd, "sigma": self._sigma_display(s)}
+                        for s in list(self.sensors.values())],
             "layout_rev": self.layout_rev,
             "zones": [z.as_dict() for z in self.zones],
             "origin": {"lat": self.origin[0], "lon": self.origin[1]},

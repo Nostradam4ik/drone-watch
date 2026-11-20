@@ -5,6 +5,7 @@ from typing import Any
 import numpy as np
 
 from dronewatch.fusion.models import Sensor
+from dronewatch.service.engine import Zone
 from dronewatch.service.layout import derive_zones
 
 BLIND, WEAK, GOOD, STRONG = 0, 1, 2, 3
@@ -27,12 +28,13 @@ def _grid_size(zones: list[Any]) -> float:
     return size
 
 
-def coverage(sensors: list[Sensor]) -> dict[str, Any]:
+def coverage(sensors: list[Sensor], zones: list[Zone] | None = None) -> dict[str, Any]:
     """Клас кожної клітинки буферних зон (зони виводяться з радарів, див. layout.derive_zones):
     strong: радар І (тріангуляція пеленгами або другий радар) І RF, тобто позиція з висотою, запасний канал і ідентифікація;
     good: є радар (позиція й висота); weak: покриває лише пеленговий датчик чи пара без надійного перетину (грубо, без висоти);
-    blind: не бачить жоден."""
-    zones = [z for z in derive_zones(sensors) if z.level == "WARNING"]
+    blind: не бачить жоден.
+    zones: зони рушія (бойовий режим бере їх із конфігу); без них зони виводяться з радарів, як у редакторі розстановки."""
+    zones = [z for z in (derive_zones(sensors) if zones is None else zones) if z.level == "WARNING"]
     if not zones:
         return {"cell": 0.0, "cells": [], "stats": dict.fromkeys(CLASS_NAMES, 0.0) | {"total": 0, "ident": 0.0}}
     size = _grid_size(zones)

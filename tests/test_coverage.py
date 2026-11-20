@@ -94,3 +94,24 @@ def test_coverage_endpoint_computes_without_changing_the_live_layout(client):
                                   {"sensors": [{"id": "r1", "type": "tank", "x": 0, "y": 0}]}])
 def test_coverage_endpoint_rejects_the_same_bad_layouts_as_the_editor(client, body):
     assert client.post("/api/coverage", json=body).status_code == 422
+
+
+def test_get_coverage_describes_the_current_sensors_and_matches_the_editor_preview(client):
+    body = {"sensors": [{"id": "radar1", "type": "radar-mid", "x": 0, "y": 0}, {"id": "rf1", "type": "rf", "x": 400, "y": -300},
+                        {"id": "ac1", "type": "acoustic", "x": -300, "y": 200}]}
+    client.delete("/api/layout")   # вбудована розстановка демо: ті самі позиції
+    current = client.get("/api/coverage").json()
+    preview = client.post("/api/coverage", json=body).json()
+    assert current["stats"] == preview["stats"] and current["cells"]
+
+
+def test_live_sensors_from_a_config_get_coverage_over_the_configured_zones():
+    """У бойовому режимі датчики з конфігу (тип radar/rf/acoustic, не з палітри), а зони теж з конфігу."""
+    from dronewatch.service.config import SensorCfg, build_sensors
+    from dronewatch.service.engine import Zone
+    cfg = config.Config.model_construct(sensors=[
+        SensorCfg(id="radar1", type="radar", position=[0, 0], max_range=1500),
+        SensorCfg(id="rf1", type="rf", position=[400, -300], max_range=1800)])
+    r = coverage(build_sensors(cfg), [Zone("Буферна", 600, "WARNING"), Zone("Критична", 250, "CRITICAL")])
+    assert r["stats"]["good"] + r["stats"]["strong"] == 100.0 and r["stats"]["ident"] == 100.0
+    assert max(abs(a) for a, _, _ in r["cells"]) * r["cell"] <= 600 + r["cell"]   # лише буферна зона, критична не береться
