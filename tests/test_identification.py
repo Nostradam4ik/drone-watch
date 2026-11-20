@@ -195,15 +195,13 @@ def test_ident_of_a_measurement_over_the_cap_is_not_counted():
     assert eng.ident_buffer == []
 
 
-# ---------- свої не дають тривоги ----------
-def test_friend_in_critical_zone_raises_no_alert_but_enemy_does():
+# ---------- мітка «свій» не глушить тривогу (RF-ідентифікація не автентифікована) ----------
+def test_friend_label_does_not_suppress_alert_or_journal_entry():
     friend = run(["anafi-usa"], [(-100, 100, 50)], (5, 0))
-    assert friend.state()["tracks"][0]["side"] == "friend"
-    assert friend.state()["tracks"][0]["level"] == "NONE" and friend.alerts == []
-    enemy = run(["geran-2"], [(-100, 100, 50)], (5, 0))
-    assert enemy.alerts and enemy.state()["tracks"][0]["level"] == "WARNING"
-    unknown = run([None], [(-100, 100, 50)], (5, 0))
-    assert unknown.alerts
+    t = friend.state()["tracks"][0]
+    assert t["side"] == "friend" and t["level"] == "WARNING", "підміна RF-мітки не повинна ховати ціль у зоні"
+    assert friend.alerts and friend.alerts[0]["side"] == "friend"
+    assert friend.db.execute("SELECT side FROM incidents").fetchall() == [("friend",)]
 
 
 def test_incident_journal_records_model_and_migrates_old_db(tmp_path):

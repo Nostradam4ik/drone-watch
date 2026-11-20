@@ -122,6 +122,7 @@
   .alert.CRITICAL { border-left-color: var(--crit); } .alert.WARNING { border-left-color: var(--warn); }
   .alert .lvl { font: 600 11.5px var(--face-label); letter-spacing: .03em; }
   .alert.CRITICAL .lvl { color: var(--crit); } .alert.WARNING .lvl { color: var(--warn); }
+  .alert.friend { opacity: .6; }
   .alert .id { color: var(--muted); font-weight: 500; }
   .alert .meta { color: var(--muted); font-size: 11.5px; display: flex; align-items: center; gap: 7px; }
   .alert .meta .sep { width: 1px; height: 10px; background: var(--line); }
@@ -485,7 +486,7 @@ function pushData() {
   set("tracks", tracks.map(t => feat({ type: "Point", coordinates: toLL(t.x, t.y) }, {
     id: t.id, prio: t.id === selected ? 0 : t.diving ? 1 : t.level === "CRITICAL" ? 2 : t.level === "WARNING" ? 3 : 4,
     color: (SIDE[t.side] || SIDE.unknown).color, opacity: t.coasting ? 0.4 : 1, selected: t.id === selected,
-    halo: t.diving ? COLORS.CRITICAL : COLORS[t.level], haloW: t.diving ? 4.5 : t.level === "CRITICAL" ? 3.5 : t.level === "WARNING" ? 2 : 0,
+    halo: t.diving ? COLORS.CRITICAL : COLORS[t.level], haloW: t.diving ? 4.5 : t.side === "friend" ? 1 : t.level === "CRITICAL" ? 3.5 : t.level === "WARNING" ? 2 : 0,   // «свій» лише приглушено: мітка не автентифікована
     label: "#" + t.id + (t.coasting ? " ?" : "") + (t.model_name ? " · " + shortName(t) : "") + " · " + Math.round(t.z) + " м" + (t.diving ? " ↓" : "")   // "↓" (U+2193) є у збережених діапазонах шрифту; "⬇" ні, а помилка гліфа ламає весь шар підписів,
   })));
   set("stalks", tracks.filter(t => !t.coasting && t.z > 1).flatMap(t => {
@@ -862,13 +863,13 @@ function render(msg) {
   const tbodyHtml = rows.map(t =>
     `<tr data-id="${t.id}" class="${t.id === selected ? "sel" : ""}"><td>#${t.id}</td>` +
     `<td class="l"><i class="sd" style="background:${(SIDE[t.side] || SIDE.unknown).color}"></i>${esc(t.model_name ? shortName(t) : "—")}${t.diving ? ' <b style="color:var(--crit)">⬇</b>' : ""}</td>` +
-    `<td class="${t.level}">${LEVEL_UA[t.level]}</td><td>${t.speed}</td><td>${Math.round(t.z)}</td></tr>`).join("");
+    `<td class="${t.level}"${t.side === "friend" ? ' style="opacity:.55" title="мітка «свій» з RF, не автентифікована"' : ""}>${LEVEL_UA[t.level]}</td><td>${t.speed}</td><td>${Math.round(t.z)}</td></tr>`).join("");
   if (tbodyHtml !== lastTbody) { lastTbody = tbodyHtml; document.getElementById("tbody").innerHTML = tbodyHtml; }   // не чіпаємо DOM, коли нічого не змінилось
 
   const box = document.getElementById("alerts");
   if (msg.alerts.length) {
     const alertsHtml = msg.alerts.map(a =>
-      `<div class="alert ${a.level}" data-track="${a.track_id}" title="Показати ціль на карті"><span><span class="lvl">${a.level === "CRITICAL" ? "ЗАГРОЗА" : "УВАГА"}</span> <span class="id">#${a.track_id} · ${esc(a.zone)}</span>${alertTag(msg, a)}</span>` +
+      `<div class="alert ${a.level}${a.side === "friend" ? " friend" : ""}" data-track="${a.track_id}" title="Показати ціль на карті"><span><span class="lvl">${a.level === "CRITICAL" ? "ЗАГРОЗА" : "УВАГА"}</span> <span class="id">#${a.track_id} · ${esc(a.zone)}</span>${alertTag(msg, a)}</span>` +
       `<span class="meta"><span>${new Date(a.ts * 1000).toLocaleTimeString()}</span><span class="sep"></span><span>${a.speed} м/с</span><span class="sep"></span><span>${esc(a.sensors.map(k => KIND_UA[k] || k).join(", "))}</span></span></div>`).join("");
     if (alertsHtml !== lastAlerts) { lastAlerts = alertsHtml; box.innerHTML = alertsHtml; }
     const current = new Set();

@@ -389,8 +389,6 @@ class Engine:
                 continue
             if self.require_radar and self.tracker._in_radar_cover(tr) and t - tr.kinds["radar"] > 3.0:
                 continue  # у зоні радара тривогу без радарного підтвердження не піднімаємо
-            if self._identity(tr.id)["side"] == "friend":
-                continue  # своя ціль у зоні — не тривога (свій/ворог визначає каталог за RF-моделлю)
             zone = self._highest_zone(tr.x[:3])
             if zone is not None and LEVELS[zone.level] > LEVELS[self.max_level.get(tr.id, "NONE")]:
                 self.max_level[tr.id] = zone.level
@@ -451,7 +449,7 @@ class Engine:
         tracks = []
         for tr in self.tracker.confirmed():
             ident = self._identity(tr.id)
-            zone = None if ident["side"] == "friend" else self._highest_zone(tr.x[:3])   # свої не підсвічуємо як загрозу
+            zone = self._highest_zone(tr.x[:3])   # рівень не залежить від side: мітка «свій» приходить з неавтентифікованого RF
             tracks.append({
                 "id": tr.id, "x": round(float(tr.x[0]), 1), "y": round(float(tr.x[1]), 1), "z": round(float(tr.x[2]), 1),
                 "vx": round(float(tr.x[3]), 1), "vy": round(float(tr.x[4]), 1),
