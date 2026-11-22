@@ -8,7 +8,7 @@ import yaml
 from pydantic import BaseModel, Field, ValidationError, field_validator, model_validator
 
 from dronewatch.fusion.models import Sensor
-from dronewatch.service.dashboard_auth import Role, parse_hash
+from dronewatch.service.dashboard_auth import Role, check_redis_url, parse_hash
 from dronewatch.service.engine import Zone
 
 
@@ -54,6 +54,14 @@ class DashboardCfg(BaseModel):
     auth: Literal["required", "disabled"] = "required"
     users: list[DashboardUser] = []
     session_ttl_s: float = Field(default=8 * 3600, gt=0, le=30 * 86400)   # скільки діє сесія після входу
+    session_store: Literal["memory", "redis"] = Field(default="memory", description="redis: сесії й ліміт входів спільні для процесів")
+    redis_url: str | None = Field(default=None, description="rediss://... (TLS) або redis://localhost; пароль краще в DRONEWATCH_REDIS_URL")
+
+    @model_validator(mode="after")
+    def _redis_ok(self) -> "DashboardCfg":
+        if self.redis_url is not None:
+            check_redis_url(self.redis_url)
+        return self
 
 
 class SensorCfg(BaseModel):

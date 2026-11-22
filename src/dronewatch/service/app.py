@@ -25,14 +25,22 @@ from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, Resp
 from pydantic import BaseModel, ConfigDict, Field
 
 from dronewatch.fusion.models import Sensor
-from dronewatch.service import config, coverage, dashboard_web, layout
+from dronewatch.service import config, coverage, dashboard_redis, dashboard_web, layout
 from dronewatch.service.ai import agent
 from dronewatch.service.ai.errors import AiUnavailable
 from dronewatch.service.ai.llm import MistralClient
 from dronewatch.service.ai.rag import IncidentIndex
 from dronewatch.service.audit import AuditEntry, AuditError, VerifyResult
 from dronewatch.service.auth import SensorAuth
-from dronewatch.service.dashboard_auth import LoginLimiter, SessionStore, UserEntry, Users, has_role
+from dronewatch.service.dashboard_auth import (
+    LoginLimiter,
+    SessionStore,
+    SessionStoreError,
+    UserEntry,
+    Users,
+    check_redis_url,
+    has_role,
+)
 from dronewatch.service.dashboard_web import (
     AUDIT_UNAVAILABLE,
     DashboardAccess,
@@ -258,14 +266,29 @@ def build_dashboard_access(cfg: config.Config) -> DashboardAccess:
         log.warning("демо без користувачів дашборда: лише перегляд (viewer). Щоб редагувати розкладку, додайте в dashboard.users "
                     "користувача з role: admin (dronewatch-keygen --dashboard-user ІМ'Я --role admin)")
         return DashboardAccess()
-    return DashboardAccess(Users({u.name: UserEntry(u.password_hash, u.role) for u in cfg.dashboard.users}),
-                           SessionStore(cfg.dashboard.session_ttl_s), LoginLimiter())
+    users = Users({u.name: UserEntry(u.password_hash, u.role) for u in cfg.dashboard.users})
+    if cfg.dashboard.session_store == "redis":
+        url = os.environ.get("DRONEWATCH_REDIS_URL") or cfg.dashboard.redis_url   # пароль краще в середовищі, не в конфігу
+        if not url:
+            raise ValueError("dashboard.session_store: redis потребує dashboard.redis_url або DRONEWATCH_REDIS_URL")
+        check_redis_url(url)
+        client = dashboard_redis.connect(url)   # недоступний Redis: сервіс не стартує (SessionStoreError)
+        log.info("сесії та ліміт входів спільні через Redis")
+        return DashboardAccess(users, dashboard_redis.RedisSessionStore(client, cfg.dashboard.session_ttl_s),
+                               dashboard_redis.RedisLoginLimiter(client))
+    return DashboardAccess(users, SessionStore(cfg.dashboard.session_ttl_s), LoginLimiter())
 
 
 app = FastAPI(title="Drone Watch", lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)   # схема API не публічна
 app.include_router(dashboard_web.router)
 app.middleware("http")(dashboard_web.add_security_headers)
 app.add_middleware(dashboard_web.BodyLimitMiddleware)   # зовнішній шар: завелике тіло відсікається до будь-якого розбору
+
+
+@app.exception_handler(SessionStoreError)
+async def session_store_error(request: Request, exc: SessionStoreError) -> JSONResponse:
+    """Спільне сховище сесій недоступне: 503 (fail-closed), без подробиць."""
+    return JSONResponse({"detail": "Сховище сесій недоступне"}, status_code=503, headers={"Retry-After": "5"})
 
 
 @app.exception_handler(RequestValidationError)
@@ -314,8 +337,14 @@ async def broadcast(rt: Runtime, access: DashboardAccess, payload: dict[str, Any
     """Шле стан усім WebSocket-клієнтам паралельно й з таймаутом: повільний клієнт не гальмує інших і скани.
     Сесії, що скінчилися (або вийшли), закриває замість розсилки."""
     sends = []
-    for ws, token in list(rt.clients.items()):
-        if not access.session_valid(token):   # сесія скінчилась або користувач вийшов: клієнту більше нічого не шлемо
+    clients = list(rt.clients.items())
+    try:   # у потоці: спільне сховище сесій (Redis) блокує, а цикл подій не має чекати
+        valid = await asyncio.to_thread(lambda: [access.session_valid(token) for _, token in clients])
+    except SessionStoreError:
+        log.error("сховище сесій недоступне: розсилку пропущено (fail-closed)")
+        return
+    for (ws, _token), ok in zip(clients, valid, strict=True):
+        if not ok:   # сесія скінчилась або користувач вийшов: клієнту більше нічого не шлемо
             rt.clients.pop(ws, None)
             with contextlib.suppress(Exception):
                 await ws.close(code=1008)
@@ -621,7 +650,11 @@ def get_audit(ident: AdminDep, request: Request, rt: RuntimeDep, limit: int = 10
 async def ws(websocket: WebSocket) -> None:
     rt: Runtime | None = getattr(websocket.app.state, "runtime", None)
     access: DashboardAccess = getattr(websocket.app.state, "access", None) or DashboardAccess()
-    ident = access.identity(websocket)
+    try:
+        ident = await asyncio.to_thread(access.identity, websocket)
+    except SessionStoreError:
+        await websocket.close(code=1013)   # спробуйте пізніше: сховище сесій недоступне
+        return
     # до accept: відмова тут стає HTTP 403 на рукостисканні, WebSocket навіть не відкривається. Origin захищає від чужих сайтів.
     # Роль перевіряється тут явно (WebSocket не проходить через require_role): невідома роль = відмова, як і в HTTP
     if rt is None or ident is None or not has_role(ident.role, "viewer") or not dashboard_web.origin_ok(websocket):
