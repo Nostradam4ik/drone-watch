@@ -39,6 +39,7 @@ DIVE_SCANS = 5                   # стільки сканів поспіль (�
 DIVE_DROP_M = 20.0               # і за вікно нижче висота справді впала щонайменше на стільки метрів (оцінка швидкості сама по собі шумить)
 DIVE_WINDOW_S = 4.0
 DIVE_RADAR_S = 1.5                # трек має мати радарне підтвердження не старіше за стільки секунд
+ALT_RADAR_S = 5.0                 # висота показується як виміряна, поки останній радарний вимір не старший за це (інакше UI: «—»)
 DIVE_MIN_AGE_S = 6.0             # трек молодший за це не оцінюємо: у щойно створеного треку швидкість ще не зійшлась і стрибає
 MAX_MODEL_LEN = 40
 DEFAULT_ORIGIN = (48.8584, 2.2945)   # Ейфелева вежа: куди на карті світу ставимо (0, 0) системи координат
@@ -495,6 +496,8 @@ class Engine:
         tracks = []
         for tr in self.tracker.confirmed():
             ident = self._identity(tr.id)
+            # висоту міряє лише радар; трек із самих пеленгів має припущені tracker.ASSUMED_ALT, а не виміряні метри
+            alt_known = t - tr.kinds["radar"] <= ALT_RADAR_S
             zone = self._highest_zone(tr.x[:3])   # рівень не залежить від side: мітка «свій» приходить з неавтентифікованого RF
             tracks.append({
                 "id": tr.id, "x": round(float(tr.x[0]), 1), "y": round(float(tr.x[1]), 1), "z": round(float(tr.x[2]), 1),
@@ -507,7 +510,8 @@ class Engine:
                 "vz": round(float(tr.x[5]), 1),
                 "diving": self.dive_scans.get(tr.id, 0) >= DIVE_SCANS,
                 # скільки секунд до землі за поточної швидкості зниження (лише коли ціль знижується)
-                "ttg": round(float(tr.x[2]) / -float(tr.x[5]), 1) if tr.x[5] < -0.5 and tr.x[2] > 0 else None,
+                "ttg": round(float(tr.x[2]) / -float(tr.x[5]), 1) if alt_known and tr.x[5] < -0.5 and tr.x[2] > 0 else None,
+                "alt_known": alt_known,
                 **ident,
             })
         out: dict[str, Any] = {

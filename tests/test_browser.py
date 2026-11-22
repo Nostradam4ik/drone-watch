@@ -114,7 +114,7 @@ def track(tid: int, level: str = "NONE", side: str = "unknown", **kw: Any) -> di
     t = {"id": tid, "x": 100.0 + tid, "y": 50.0, "z": 60.0, "vx": -10.0, "vy": 1.0, "vz": 0.0, "speed": 10.1, "err": 8.0,
          "score": 3.0, "kinds": ["radar", "rf"], "coasting": False, "level": level, "diving": False, "ttg": 20.0,
          "model": "dji-mini-4", "model_name": "DJI Mini 4 Pro", "side": side, "country": "КНР", "drone_kind": "квадрокоптер",
-         "shape": "quad", "identified_by": "rf", "identity_conflict": False}
+         "shape": "quad", "identified_by": "rf", "identity_conflict": False, "alt_known": True}
     t.update(kw)
     return t
 
@@ -201,6 +201,14 @@ def test_track_table_is_sorted_by_threat_and_friend_level_is_dimmed(dash):
     friend_level = rows.nth(1).locator("td").nth(2)
     expect(friend_level).to_have_text("увага")
     assert "opacity" in (friend_level.get_attribute("style") or "")
+
+
+def test_unmeasured_altitude_is_shown_as_a_dash_not_as_assumed_metres(dash):
+    dash.push(dash.state(tracks=[track(1, z=60.0, alt_known=False), track(2, z=83.4)]))
+    unknown = dash.page.locator('#tbody tr[data-id="1"] td').nth(4)
+    expect(unknown).to_have_text("—")
+    assert "висоту не виміряно" in (unknown.get_attribute("title") or "")
+    expect(dash.page.locator('#tbody tr[data-id="2"] td').nth(4)).to_have_text("83")
 
 
 def test_clicking_a_track_row_selects_and_second_click_deselects(dash):
