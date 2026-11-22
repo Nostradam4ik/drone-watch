@@ -74,6 +74,10 @@ function ensureFits(p, t) {
 }
 
 export function updateDossier() {
+  if (S.replay) {   // у записі досьє немає: бракує живих даних (тип, похибка), а вигадувати їх не будемо
+    if (S.popup) { const p = S.popup; S.popup = null; stopViewer(); p.remove(); }
+    return;
+  }
   const t = S.state && S.state.tracks.find(tt => tt.id === S.selected);
   if (!t || !S.map) {
     if (S.popup) { const p = S.popup; S.popup = null; stopViewer(); p.remove(); }

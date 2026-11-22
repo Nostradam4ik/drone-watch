@@ -44,7 +44,7 @@ function clearCoverage() {
 }
 
 export function scheduleCoverage() {
-  if (!document.getElementById("cov-on").checked || !S.cfg) return;
+  if (!document.getElementById("cov-on").checked || !S.cfg || S.replay) return;
   const sig = JSON.stringify(S.cfg.sensors.map(s => [s.id, s.type, s.pos, s.heading_deg]));
   if (sig === covSig || covTimer) return;   // розстановка та сама, або запит уже заплановано (піде з найновішою)
   covTimer = setTimeout(runCoverage, 120);

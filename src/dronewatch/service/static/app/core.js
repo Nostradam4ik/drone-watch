@@ -15,7 +15,8 @@ export const sensorState = id => ((S.state && S.state.sensors || []).find(s => s
 // cfg (/api/config), state (останній кадр з сервера), selected (id цілі), map і popup (MapLibre), me (/api/me), а також
 // стан редактора розстановки: editing, tool, drag, suppressClick, reloading.
 export const S = { cfg: null, state: null, selected: null, map: null, popup: null, me: null,
-  editing: false, tool: null, drag: null, suppressClick: false, reloading: false };
+  editing: false, tool: null, drag: null, suppressClick: false, reloading: false,
+  replay: null, liveMsg: null };   // replay: відтворення інциденту (replay.js); liveMsg: останній живий кадр, поки воно йде
 export const trails = new Map();   // id цілі -> останні точки шлейфу
 // Роль користувача з /api/me. Лише для показу: сервер усе одно відхиляє заборонені запити (403), UI ховає недоступне.
 export const ROLE_UA = { viewer: "перегляд", operator: "оператор", admin: "адмін" };

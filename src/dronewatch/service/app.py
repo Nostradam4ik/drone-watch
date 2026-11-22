@@ -12,6 +12,7 @@ import re
 import sqlite3
 import time
 import uuid
+import zlib
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager, closing
 from dataclasses import dataclass, field
@@ -58,6 +59,7 @@ from dronewatch.service.demo import DemoSource, make_sensors
 from dronewatch.service.engine import Alert, Engine, SensorStatus, Zone
 from dronewatch.service.mqtt_in import MqttIngest
 from dronewatch.service.occlusion import Buildings, LineOfSight
+from dronewatch.service.replay import ReplayOptions, read_replay
 from dronewatch.service.terrain import Terrain
 
 log = logging.getLogger("dronewatch")
@@ -150,7 +152,9 @@ def build_engine(cfg: config.Config, sensors: list[Sensor], db_path: str, zones:
                   min_age_s=cfg.alerts.min_age_s, require_radar=cfg.alerts.require_radar_in_cover,
                   max_coast=cfg.alerts.max_coast_scans, sensor_timeout_s=cfg.sensor_timeout_s,
                   max_events_per_sensor=cfg.max_events_per_sensor_scan, max_tracks=cfg.max_tracks, auth=auth,
-                  origin=(cfg.origin.lat, cfg.origin.lon))
+                  origin=(cfg.origin.lat, cfg.origin.lon),
+                  replay=ReplayOptions(cfg.replay.before_s, cfg.replay.after_s, cfg.replay.step_s, cfg.replay.retention_days)
+                  if cfg.replay.enabled else None)
 
 
 def build_mqtt(cfg: config.Config, engine: Engine) -> MqttIngest | None:
@@ -417,7 +421,7 @@ def vendor(name: str) -> Response:   # бібліотеки віддаємо с�
 # Код і стилі самого дашборда. JS це ES-модулі: index.html підключає лише main.js, решту він тягне через import (сервер віддає
 # тільки файли з цього списку, тож новий модуль треба додати сюди).
 APP_FILES = {"dashboard.css": "text/css", **{f"{n}.js": "text/javascript" for n in
-             ("core", "map", "viewer3d", "dossier", "panels", "sound", "editor", "audit", "main")}}
+             ("core", "map", "viewer3d", "dossier", "panels", "sound", "editor", "audit", "replay", "main")}}
 
 
 @app.get("/static/app/{name}", include_in_schema=False)
@@ -587,6 +591,20 @@ def read_incidents(db_path: str, limit: int = 100, status: str | None = None) ->
 def incidents(rt: RuntimeDep, limit: int = 100,
               status: Literal["new", "confirmed", "dismissed"] | None = None) -> list[dict[str, Any]]:
     return read_incidents(rt.db_path, limit, status)
+
+
+@app.get("/api/incidents/{incident_id}/replay", dependencies=[Depends(require_role("viewer"))])
+def incident_replay(incident_id: int, rt: RuntimeDep) -> dict[str, Any]:
+    """Кадри цілей навколо тривоги (див. replay.py) для відтворення на карті. Лише читання. 404: інциденту чи запису немає
+    (старі інциденти, вимкнений запис, прибрані за терміном)."""
+    try:
+        found = read_replay(rt.db_path, incident_id)
+    except (ValueError, sqlite3.Error, zlib.error) as e:   # зіпсований запис: не віддаємо напіввідновлене
+        log.error("відтворення інциденту %s не прочитано: %s", incident_id, e)
+        raise HTTPException(500, "Запис відтворення пошкоджено") from e
+    if found is None:
+        raise HTTPException(404, "Запису відтворення для цього інциденту немає")
+    return found
 
 
 class ReviewRequest(BaseModel):

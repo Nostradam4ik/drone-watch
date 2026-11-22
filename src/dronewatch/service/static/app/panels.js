@@ -4,10 +4,12 @@ import { select, toast, updateDossier } from "./dossier.js";
 import { realInfoHtml, reloadConfig, sensorSpec, typeInfo } from "./editor.js";
 import { isSector, pushData, shortName, toLL } from "./map.js";
 import { soundCheck } from "./sound.js";
+import { startReplay } from "./replay.js";
 import { stopViewer } from "./viewer3d.js";
 
 export function render(msg) {
-  S.state = msg;
+  S.liveMsg = msg;
+  if (!S.replay) S.state = msg;   // під час відтворення карта показує запис, а тривоги, тости й звук лишаються живими
   document.getElementById("s-tracks").textContent = msg.tracks.filter(t => !t.coasting).length;
   document.getElementById("s-tent").textContent = msg.tentative;
   document.getElementById("s-enemy").textContent = msg.tracks.filter(t => t.side === "enemy" && !t.coasting).length;
@@ -25,7 +27,7 @@ export function render(msg) {
     mq.className = "chip " + (msg.mqtt.connected && !idle ? "live" : "off");
   }
 
-  if (S.cfg && msg.layout_rev !== undefined && msg.layout_rev !== S.cfg.layout_rev && !S.drag && !S.reloading) {   // розстановку змінили деінде (інша вкладка)
+  if (!S.replay && S.cfg && msg.layout_rev !== undefined && msg.layout_rev !== S.cfg.layout_rev && !S.drag && !S.reloading) {   // розстановку змінили деінде (інша вкладка)
     S.reloading = true;
     reloadConfig().finally(() => { S.reloading = false; });
   }
@@ -38,17 +40,17 @@ export function render(msg) {
   if (shed) ov.textContent = "перевантаження: відкинуто " + st.events_dropped + " подій" + (st.tracks_capped ? ", треків " + st.tracks_capped : "");
 
   const ids = new Set(msg.tracks.map(t => t.id));
-  msg.tracks.forEach(t => {
+  if (!S.replay) msg.tracks.forEach(t => {
     const tr = trails.get(t.id) || []; tr.push([t.x, t.y]); if (tr.length > 60) tr.shift(); trails.set(t.id, tr);
   });
-  [...trails.keys()].forEach(id => { if (!ids.has(id)) trails.delete(id); });
+  if (!S.replay) [...trails.keys()].forEach(id => { if (!ids.has(id)) trails.delete(id); });
 
   const rows = msg.tracks.filter(t => !t.coasting).sort((a, b) => ({ CRITICAL: 2, WARNING: 1, NONE: 0 }[b.level] - { CRITICAL: 2, WARNING: 1, NONE: 0 }[a.level]) || a.id - b.id);
   const tbodyHtml = rows.map(t =>
     `<tr data-id="${t.id}" class="${t.id === S.selected ? "sel" : ""}"><td>#${t.id}</td>` +
     `<td class="l"><i class="sd" style="background:${(SIDE[t.side] || SIDE.unknown).color}"></i>${esc(t.model_name ? shortName(t) : "—")}${t.diving ? ' <b style="color:var(--crit)">⬇</b>' : ""}</td>` +
     `<td class="${t.level}"${t.side === "friend" ? ' style="opacity:.55" title="мітка «свій» з RF, не автентифікована"' : ""}>${LEVEL_UA[t.level]}</td><td>${t.speed}</td><td${t.alt_known === false ? ' title="висоту не виміряно: ціль бачать лише пеленгові датчики"' : ""}>${altText(t)}</td></tr>`).join("");
-  if (tbodyHtml !== lastTbody) { lastTbody = tbodyHtml; document.getElementById("tbody").innerHTML = tbodyHtml; }   // не чіпаємо DOM, коли нічого не змінилось
+  if (!S.replay && tbodyHtml !== lastTbody) { lastTbody = tbodyHtml; document.getElementById("tbody").innerHTML = tbodyHtml; }   // не чіпаємо DOM, коли нічого не змінилось
 
   const box = document.getElementById("alerts");
   const counter = document.getElementById("alerts-new");
@@ -59,7 +61,7 @@ export function render(msg) {
     const alertsHtml = ordered.map(a =>
       `<div class="alert ${a.level}${a.side === "friend" ? " friend" : ""}${a.status !== "new" ? " reviewed" : ""}" data-track="${a.track_id}" title="Показати ціль на карті"><span><span class="lvl">${a.level === "CRITICAL" ? "ЗАГРОЗА" : "УВАГА"}</span> <span class="id">#${a.track_id} · ${esc(a.zone)}</span>${alertTag(msg, a)}</span>` +
       `<span class="meta"><span>${new Date(a.ts * 1000).toLocaleTimeString()}</span><span class="sep"></span><span>${a.speed} м/с</span><span class="sep"></span><span>${esc(a.sensors.map(k => KIND_UA[k] || k).join(", "))}</span></span>` +
-      reviewHtml(a) + `</div>`).join("");
+      reviewHtml(a) + (a.id ? `<button type="button" class="rpbtn" data-replay="${a.id}" title="Показати, що відбувалось за хвилину до й після тривоги">▶ Відтворити</button>` : "") + `</div>`).join("");
     if (alertsHtml !== lastAlerts) { lastAlerts = alertsHtml; rebuildAlerts(box, alertsHtml); }   // чернетка коментаря не входить у HTML: набір тексту не перебудовує список
     const current = new Set();
     msg.alerts.forEach(a => {
@@ -71,9 +73,13 @@ export function render(msg) {
   soundCheck(msg, firstMsg);
   firstMsg = false;
   document.getElementById("truth-row").hidden = !(S.cfg && S.cfg.demo && msg.truth);
+  if (S.replay) return;
   pushData();
   updateDossier();
 }
+
+// Після відтворення таблиця цілей має перемалюватись, навіть якщо живий кадр не змінився
+export function invalidateTable() { lastTbody = null; }
 
 // Рішення оператора по тривозі. Усе від користувача (автор, коментар) іде через esc.
 let seenAlerts = new Set(), firstMsg = true, lastTbody = null, lastAlerts = null;
@@ -186,6 +192,7 @@ document.getElementById("truth").addEventListener("change", pushData);
 // Клік по тривозі наводить карту на ціль і відкриває її досьє
 document.getElementById("alerts").addEventListener("click", e => {
   if (e.target.closest(".rv")) return;   // кнопки й коментар рішення не наводять карту на ціль
+  const rp = e.target.closest("button[data-replay]"); if (rp) { startReplay(+rp.dataset.replay); return; }
   const card = e.target.closest(".alert[data-track]"); if (!card || !S.map) return;
   const id = +card.dataset.track;
   if (!S.state || !S.state.tracks.some(t => t.id === id)) { toast({ level: "WARNING", track_id: id, zone: "ціль вже не відстежується" }); return; }

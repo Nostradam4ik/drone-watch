@@ -11,6 +11,7 @@ Heartbeat (рекомендовано): {"sensor_id": "radar1", "heartbeat": tru
 вважається відмовою (безпечний бік: тривоги без цього датчика лишаються, а не зникають).
 """
 import contextlib
+import logging
 import math
 import sqlite3
 import threading
@@ -27,7 +28,9 @@ from dronewatch.fusion.tracker import Tracker
 from dronewatch.service.audit import AuditEntry, AuditError, AuditLog
 from dronewatch.service.auth import SensorAuth
 from dronewatch.service.catalog import DRONES, UNKNOWN_MODEL, describe
+from dronewatch.service.replay import SIDE_CODE, ReplayOptions, ReplayRecorder
 
+log = logging.getLogger("dronewatch.engine")
 Level = Literal["NONE", "WARNING", "CRITICAL"]
 SensorState = Literal["OK", "WAITING", "LOST"]
 LEVELS: dict[Level, int] = {"NONE": 0, "WARNING": 1, "CRITICAL": 2}
@@ -128,7 +131,8 @@ class Engine:
     def __init__(self, sensors: Iterable[Sensor], zones: list[Zone], db_path: str = ":memory:", scan_dt: float = 0.5,
                  min_age_s: float = 5.0, require_radar: bool = True, max_coast: int = 2, sensor_timeout_s: float = 5.0,
                  clock: Callable[[], float] = time.time, max_events_per_sensor: int = 150, max_tracks: int = 200,
-                 auth: SensorAuth | None = None, origin: tuple[float, float] = DEFAULT_ORIGIN) -> None:
+                 auth: SensorAuth | None = None, origin: tuple[float, float] = DEFAULT_ORIGIN,
+                 replay: ReplayOptions | None = None) -> None:
         # min_age_s: тривога лише для треку, підтвердженого щонайменше стільки секунд (відсів короткоживучих хибних)
         # require_radar: у зоні радара тривога лише з радарним підтвердженням; max_coast: скільки сканів без детекцій трек ще «живий»
         self.min_age_s, self.require_radar, self.max_coast = min_age_s, require_radar, max_coast
@@ -175,6 +179,7 @@ class Engine:
         self.db.execute("""CREATE TABLE IF NOT EXISTS incident_reviews (
             id INTEGER PRIMARY KEY AUTOINCREMENT, incident_id INTEGER, status TEXT, by TEXT, ts REAL, note TEXT)""")
         self.db.commit()
+        self.replay = ReplayRecorder(self.db, replay) if replay is not None else None   # None: відтворення вимкнено
         self.audit = AuditLog(self.db, self.lock)   # той самий файл БД; append бере self.lock, тож під замком лише append_locked
 
     # --- вхід
@@ -193,6 +198,11 @@ class Engine:
         self.dive_scans.clear()
         self.z_hist.clear()
         self.max_level.clear()
+        if self.replay is not None:
+            try:
+                self.replay.flush()
+            except Exception:
+                log.exception("не вдалося дописати запис відтворення перед скиданням")
         self.t0 = self.clock()
 
     def set_sensors(self, sensors: Iterable[Sensor], zones: list[Zone] | None = None) -> None:
@@ -324,7 +334,38 @@ class Engine:
             for k, v in self.tracker.dropped.items():
                 self.stats[k] += v
             self.stats["scans"] += 1
-            return self._evaluate(t)
+            alerts = self._evaluate(t)
+            self._record_replay(alerts)
+            return alerts
+
+    def _record_replay(self, alerts: list[Alert]) -> None:
+        """Кадр для відтворення інцидентів (під self.lock). Збій запису лише в лог: трекінг від нього не залежить."""
+        if self.replay is None:
+            return
+        try:
+            self.replay.on_scan(self.clock(), self._replay_frame, alerts, self._replay_setup)
+        except Exception:
+            log.exception("запис для відтворення інцидентів не вдався")
+
+    def _replay_frame(self) -> list[list[Any]]:
+        """[id, x, y, z, vx, vy, рівень 0..2, приналежність e/f/u, coasting, висота виміряна, пікірує] для підтверджених цілей,
+        найнебезпечніші першими."""
+        rows: list[list[Any]] = []
+        t = self.clock() - self.t0
+        for tr in self.tracker.confirmed():
+            zone = self._highest_zone(tr.x[:3])
+            rows.append([tr.id, round(float(tr.x[0]), 1), round(float(tr.x[1]), 1), round(float(tr.x[2]), 1),
+                         round(float(tr.x[3]), 1), round(float(tr.x[4]), 1), LEVELS[zone.level] if zone else 0,
+                         SIDE_CODE.get(self._identity(tr.id)["side"], "u"), int(tr.misses > self.max_coast),
+                         int(t - tr.kinds["radar"] <= ALT_RADAR_S), int(self.dive_scans.get(tr.id, 0) >= DIVE_SCANS)])
+        rows.sort(key=lambda r: (-int(r[6]), int(r[0])))
+        assert self.replay is not None
+        return rows[: self.replay.opts.max_tracks_per_frame]
+
+    def _replay_setup(self) -> dict[str, Any]:
+        c = self.config()
+        keep = ("id", "label", "pos", "max_range", "heading_deg", "fov_deg")
+        return {"sensors": [{k: s[k] for k in keep} for s in c["sensors"]], "zones": c["zones"], "origin": c["origin"]}
 
     def _assign_idents(self) -> None:
         """Привʼязує RF-ідентифікації (модель дрона) до треків за пеленгом: береться трек із найближчим пеленгом від того
