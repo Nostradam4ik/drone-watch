@@ -55,6 +55,8 @@ def coverage(sensors: list[Sensor], zones: list[Zone] | None = None) -> dict[str
     bearings: list[tuple[Any, Any]] = []   # (покриває?, напрямок на датчик) для кожного пеленгового датчика
     for s in sensors:
         dx, dy = s.pos[0] - cx, s.pos[1] - cy
+        # уся дальність, а не tracker.RADAR_COVER (90%): тут питання «чи дасть датчик позицію», а 90% це запас лише для
+        # правила «радар мав побачити, інакше трек хибний». На краю (90-100%) радар позицію дає, але це правило там не діє.
         seen = np.hypot(dx, dy) <= s.max_range
         if s.fov < 2 * np.pi - 1e-9:   # секторний датчик бачить лише в межах свого кута огляду
             off = np.abs((np.arctan2(-dy, -dx) - s.heading + np.pi) % (2 * np.pi) - np.pi)
