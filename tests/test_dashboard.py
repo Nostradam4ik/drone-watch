@@ -139,6 +139,19 @@ def test_login_limiter_memory_is_bounded():
     assert len(lim._attempts) <= 60, len(lim._attempts)
 
 
+def test_login_limiter_refuses_new_keys_when_full_of_fresh_ones():
+    """Усі ключі свіжі (розподілений перебір з багатьох адрес): стеля не обходиться, нових адрес не приймаємо (fail-closed)."""
+    clock = Clock()
+    lim = LoginLimiter(max_failures=3, window_s=10, clock=clock, max_keys=50)
+    results = [lim.attempt(f"ip{i}") for i in range(200)]
+    assert len(lim._attempts) <= 50, len(lim._attempts)
+    assert results[:50] == [0.0] * 50
+    assert all(r > 0 for r in results[50:]), "нова адреса при повній таблиці: відмова з підказкою, коли повторити"
+    assert lim.attempt("ip0") == 0.0, "відомі адреси далі рахуються за звичайним правилом"
+    clock.now += 11
+    assert lim.attempt("ip999") == 0.0, "вікно минуло: місце звільнилось"
+
+
 def test_limiter_cannot_be_bypassed_by_a_parallel_burst():
     """Регрес із перевірки безпеки: «перевірити ліміт, потім записати невдачу» дозволяло залпу з 40 запитів пройти повністю."""
     import threading
@@ -376,7 +389,8 @@ def test_logs_never_contain_passwords_and_are_injection_safe():
         root.setLevel(old)
     text = "\n".join(r.getMessage() for r in records)
     assert "Wrong-Secret-Password-1" not in text and PASSWORD not in text
-    assert "fake line injected" in text and "\nINFO fake" not in text, "переніс рядка в імені не має підробляти запис у лозі"
+    assert "fake line injected" not in text, "невідоме ім'я (там може бути пароль) у лог не потрапляє, отже запису не підробити"
+    assert "\nINFO fake" not in text
     assert any("вхід: alice" in r.getMessage() for r in records) and any("невдалий вхід" in r.getMessage() for r in records)
 
 

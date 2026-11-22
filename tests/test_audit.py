@@ -85,6 +85,20 @@ def test_blocked_record_once_per_window():
     assert log.allow_blocked_record("1.2.3.4", 300) is True
 
 
+def test_blocked_record_overflow_still_lets_one_row_per_window(monkeypatch):
+    """Таблиця ключів повна свіжими: нові ключі не губляться мовчки, а ділять один запис на вікно."""
+    from dronewatch.service import audit
+    monkeypatch.setattr(audit, "MAX_BLOCKED_KEYS", 3)
+    now = [0.0]
+    log = AuditLog(sqlite3.connect(":memory:"), threading.Lock(), clock=lambda: now[0])
+    assert [log.allow_blocked_record(f"k{i}", 300) for i in range(3)] == [True] * 3
+    assert log.allow_blocked_record("k3", 300) is True, "один запис про переповнення"
+    assert log.allow_blocked_record("k4", 300) is False
+    assert log.allow_blocked_record("k5", 300) is False
+    now[0] = 400.0
+    assert log.allow_blocked_record("k6", 300) is True, "нове вікно: ключі прибрано, місце є"
+
+
 def test_surrogates_are_stripped_and_chain_stays_valid():
     assert clean("a\ud800b", 10) == "ab"
     _db, log = make_log()

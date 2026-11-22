@@ -96,6 +96,9 @@ class Users:
         self._entries = dict(entries)
         self._dummy = hash_password(secrets.token_urlsafe(16))   # для вирівнювання часу, коли імені немає
 
+    def knows(self, name: str) -> bool:
+        return name in self._entries
+
     def role_of(self, name: str) -> Role | None:
         """Роль користувача за поточним конфігом; None, якщо його там уже немає."""
         entry = self._entries.get(name)
@@ -224,6 +227,8 @@ class LoginLimiter:
                 return max(0.0, q[0] + self.window_s - now)
             if key not in self._attempts and len(self._attempts) >= self._max_keys:   # стеля памʼяті: прибираємо ключі без свіжих спроб
                 self._attempts = {k: r for k in list(self._attempts) if (r := self._recent(k, now))}
+                if len(self._attempts) >= self._max_keys:   # усі ключі свіжі: не росте далі, нову адресу не приймаємо (fail-closed)
+                    return max(1.0, min(r[0] for r in self._attempts.values()) + self.window_s - now)
             self._attempts.setdefault(key, deque()).append(now)
             return 0.0
 
