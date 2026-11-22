@@ -414,7 +414,8 @@ def vendor(name: str) -> Response:   # бібліотеки віддаємо с�
     return FileResponse(BASE / "static" / "vendor" / name, media_type=VENDOR_FILES[name])
 
 
-# Код і стилі самого дашборда. Порядок <script> в index.html важливий (звичайні скрипти зі спільними змінними, не модулі).
+# Код і стилі самого дашборда. JS це ES-модулі: index.html підключає лише main.js, решту він тягне через import (сервер віддає
+# тільки файли з цього списку, тож новий модуль треба додати сюди).
 APP_FILES = {"dashboard.css": "text/css", **{f"{n}.js": "text/javascript" for n in
              ("core", "map", "viewer3d", "dossier", "panels", "sound", "editor", "audit", "main")}}
 
