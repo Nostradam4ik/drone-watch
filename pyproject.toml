@@ -27,6 +27,7 @@ dependencies = [
 [project.optional-dependencies]
 dev = ["pytest>=9.2.0", "cryptography>=42", "ruff>=0.6", "mypy>=1.10", "types-PyYAML"]
 map = ["pmtiles>=3.8"]   # лише для dronewatch-mapbuild (вирізання оффлайн-карти); сервісу під час роботи не потрібна
+browser = ["playwright>=1.49"]   # лише для tests/test_browser.py (дашборд у Chromium); браузер ставить `playwright install chromium`
 viz = ["matplotlib>=3.8"]   # лише для dronewatch.fusion.viz (малює карти треків)
 
 [project.scripts]
@@ -47,6 +48,7 @@ pythonpath = ["tests"]   # тести імпортують одне одного
 testpaths = ["tests"]
 python_files = ["test_*.py"]
 addopts = "-ra"
+markers = ["browser: дашборд у справжньому браузері (Playwright); потрібні .[browser] і `playwright install chromium`"]
 filterwarnings = [
     "ignore:Using `httpx` with `starlette.testclient`:DeprecationWarning",
     "ignore:.*starlette.testclient.*:DeprecationWarning",
