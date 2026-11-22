@@ -7,7 +7,7 @@ from fastapi.routing import APIRoute, APIWebSocketRoute
 from fastapi.testclient import TestClient
 from starlette.websockets import WebSocketDisconnect
 
-from dronewatch.service import app, config
+from dronewatch.service import app, config, dashboard_web
 from dronewatch.service.audit import AuditError
 from dronewatch.service.dashboard_auth import LoginLimiter, SessionStore, UserEntry, Users, has_role
 from dronewatch.service.dashboard_web import ANONYMOUS, COOKIE, DashboardAccess
@@ -503,3 +503,45 @@ def test_denied_rows_have_a_global_cap_with_one_summary_row(demo_client, monkeyp
         assert demo_client.post("/api/incidents/1/review", json={"status": "confirmed"}).status_code == 403
     actions = _actions(demo_client)
     assert actions.count("denied") == 2 and actions.count("denied_flood") == 1
+
+
+# ---------- захист зміни стану: Content-Type/Origin і ліміт тіла ----------
+STATE_ALLOWLIST = {("POST", "/api/events")}   # ключ датчика, не cookie: CSRF тут немає чим скористатись
+
+
+def test_every_state_change_has_origin_guard():
+    missing = [(m, p) for m, p, dep in http_routes()
+               if m in ("POST", "PUT", "DELETE", "PATCH") and (m, p) not in STATE_ALLOWLIST and not has_marker(dep, "dw_state_guard")]
+    assert missing == []
+
+
+@pytest.mark.parametrize(("method", "path", "body"), [("PUT", "/api/layout", LAYOUT), ("POST", "/api/coverage", LAYOUT),
+                                                      ("POST", "/api/ai/ask", {"question": "?"})])
+def test_json_routes_reject_form_and_foreign_origin(demo_client, method, path, body):
+    login_as(demo_client, "admin")
+    assert demo_client.request(method, path, data="x=1").status_code == 415
+    assert demo_client.request(method, path, json=body, headers={"Origin": "http://evil.example"}).status_code == 403
+
+
+def test_delete_layout_rejects_foreign_origin(demo_client):
+    login_as(demo_client, "admin")
+    assert demo_client.delete("/api/layout", headers={"Origin": "http://evil.example"}).status_code == 403
+    assert demo_client.delete("/api/layout").status_code == 200
+
+
+def test_oversized_body_gets_413_by_content_length(demo_client):
+    login_as(demo_client, "admin")
+    r = demo_client.post("/api/coverage", content=b"x" * (dashboard_web.MAX_BODY_BYTES + 1), headers={"Content-Type": "application/json"})
+    assert r.status_code == 413
+
+
+def test_oversized_chunked_body_gets_413(demo_client):
+    login_as(demo_client, "admin")
+    big = (b"x" * 65536 for _ in range(dashboard_web.MAX_BODY_BYTES // 65536 + 2))   # генератор: без Content-Length
+    r = demo_client.post("/api/coverage", content=big, headers={"Content-Type": "application/json"})
+    assert r.status_code == 413
+
+
+def test_body_under_the_limit_still_works(demo_client):
+    login_as(demo_client, "admin")
+    assert demo_client.post("/api/coverage", json=LAYOUT).status_code == 200

@@ -26,8 +26,9 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest>=9.2.0", "cryptography>=42", "ruff>=0.6", "mypy>=1.10", "types-PyYAML"]
-map = ["pmtiles>=3.8"]   # лише для dronewatch-mapbuild (вирізання оффлайн-карти); сервісу під час роботи не потрібна
+map = ["pmtiles>=3.8", "pillow>=10"]   # лише для інструментів dronewatch-mapbuild, -buildings, -dem (оффлайн-дані); сервісу під час роботи не потрібні
 browser = ["playwright>=1.49"]   # лише для tests/test_browser.py (дашборд у Chromium); браузер ставить `playwright install chromium`
+redis = ["redis>=5"]   # лише для dashboard.session_store: redis (спільні сесії кількох процесів)
 viz = ["matplotlib>=3.8"]   # лише для dronewatch.fusion.viz (малює карти треків)
 
 [project.scripts]
@@ -35,6 +36,8 @@ dronewatch-serve = "dronewatch.service.serve:main"
 dronewatch-keygen = "dronewatch.service.keygen:main"
 dronewatch-audit = "dronewatch.service.audit_cli:main"
 dronewatch-mapbuild = "dronewatch.service.mapbuild:main"
+dronewatch-buildings = "dronewatch.service.buildings_build:main"
+dronewatch-dem = "dronewatch.service.dem_build:main"
 dronewatch-bench = "dronewatch.service.flood_bench:main"
 dronewatch-emulate = "dronewatch.emulator.emulate:main"
 

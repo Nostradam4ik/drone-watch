@@ -73,7 +73,8 @@ function drawCoverage(c) {
     { color: COVERAGE[k].color }))));
   document.getElementById("cov-stats").innerHTML = COVERAGE.slice().reverse().map(k =>
     `<div><i style="background:${k.color}"></i>${esc(k.label)}<b>${c.stats[k.name]} %</b></div>`).join("") +
-    `<div class="sub">RF може визначити модель дрона на <b style="margin-left:6px">${c.stats.ident} %</b> зони</div>`;
+    `<div class="sub">RF може визначити модель дрона на <b style="margin-left:6px">${c.stats.ident} %</b> зони</div>` +
+    `<div class="sub">${c.los ? "Радар і RF рахуються з урахуванням: " + [c.terrain && "рельєфу", c.buildings && "будинків"].filter(Boolean).join(" і ") + " (висота цілі " + esc(String(c.target_alt_m)) + " м)" : "Рельєф і будинки не враховано: немає файлів (dronewatch-dem, dronewatch-buildings)"}</div>`;
   return true;
 }
 

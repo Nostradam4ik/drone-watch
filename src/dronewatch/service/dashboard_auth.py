@@ -7,7 +7,8 @@
 - Перевірка сталочасова й однакова за тривалістю для відомого та невідомого імені (інакше за часом відповіді видно, які імена існують).
 - Сесія: довгий випадковий токен у cookie; на сервері лежить лише SHA-256 від нього, тож дамп памʼяті чи лог не дають готової сесії.
 - Підбір паролів обмежує `LoginLimiter` (за адресою клієнта).
-- Сесії в памʼяті одного процесу: перезапуск сервісу виходить усіх. Для кількох процесів потрібне спільне сховище."""
+- Сесії за замовчуванням у памʼяті одного процесу (перезапуск виходить усіх); для кількох процесів `dashboard.session_store: redis`
+  (`dashboard_redis.py`). Збій спільного сховища це `SessionStoreError` (503), ніколи не дозвіл."""
 import base64
 import hashlib
 import hmac
@@ -18,7 +19,8 @@ import time
 from collections import deque
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
-from typing import Literal
+from typing import Literal, Protocol
+from urllib.parse import urlsplit
 
 MIN_PASSWORD_LEN = 12        # keygen не видасть хеш для коротшого пароля
 MAX_PASSWORD_LEN = 256       # довший відкидаємо ще до хешування: інакше великі «паролі» стали б дешевою атакою на CPU
@@ -94,11 +96,46 @@ class Users:
         self._entries = dict(entries)
         self._dummy = hash_password(secrets.token_urlsafe(16))   # для вирівнювання часу, коли імені немає
 
+    def role_of(self, name: str) -> Role | None:
+        """Роль користувача за поточним конфігом; None, якщо його там уже немає."""
+        entry = self._entries.get(name)
+        return entry.role if entry else None
+
     def authenticate(self, name: str, password: str) -> Role | None:
         """Роль користувача, якщо пароль вірний; інакше None."""
         entry = self._entries.get(name)
         verified = verify_password(password, entry.password_hash if entry else self._dummy)
         return entry.role if entry is not None and verified else None
+
+
+class SessionStoreError(Exception):
+    """Спільне сховище сесій недоступне: сервіс відповідає 503 (fail-closed), а не вважає, що сесії чи ліміту нема."""
+
+
+class SessionStoreLike(Protocol):
+    ttl_s: float
+
+    def create(self, user: str, role: Role) -> str: ...
+    def get(self, token: str | None) -> "Session | None": ...
+    def revoke(self, token: str | None) -> bool: ...
+
+
+class LimiterLike(Protocol):
+    window_s: float
+
+    def attempt(self, key: str) -> float: ...
+    def reset(self, key: str) -> None: ...
+
+
+def check_redis_url(url: str) -> str:
+    """`rediss://` (TLS) або `redis://` лише на цю ж машину (127.0.0.1, ::1, localhost): сесійні токени й ліміти не мають
+    ходити мережею відкритим текстом. ValueError, якщо схема чи адреса не підходить."""
+    parts = urlsplit(url)
+    if parts.scheme == "rediss" and parts.hostname:
+        return url
+    if parts.scheme == "redis" and parts.hostname in ("localhost", "127.0.0.1", "::1"):
+        return url
+    raise ValueError("redis_url: потрібен rediss://хост (TLS); звичайний redis:// лише для localhost")
 
 
 @dataclass(slots=True)
