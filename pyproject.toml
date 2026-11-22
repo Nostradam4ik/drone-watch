@@ -36,6 +36,7 @@ dronewatch-keygen = "dronewatch.service.keygen:main"
 dronewatch-audit = "dronewatch.service.audit_cli:main"
 dronewatch-mapbuild = "dronewatch.service.mapbuild:main"
 dronewatch-bench = "dronewatch.service.flood_bench:main"
+dronewatch-eval = "dronewatch.service.evaluate:main"
 dronewatch-emulate = "dronewatch.emulator.emulate:main"
 
 [tool.setuptools.packages.find]
