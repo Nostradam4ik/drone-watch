@@ -33,6 +33,10 @@ STATIC = Path(__file__).resolve().parent / "static"
 COOKIE = "dw_session"
 ANONYMOUS = "(без входу)"   # ім'я користувача, коли автентифікацію вимкнено
 ANONYMOUS_ROLE: Role = "viewer"   # без входу лише перегляд: жодна зміна стану анонімові недоступна
+# Відмови (`denied`) у журнал не частіше одного рядка на адресу й користувача за це вікно: інакше будь-хто, хто може слати
+# запити (без входу це будь-який клієнт), роздуває incidents.db до повного диска, і тоді 503 отримують уже оператори.
+# У лог (log.warning) іде КОЖНА відмова.
+DENIED_WINDOW_S = 300.0
 AUDIT_UNAVAILABLE = "Журнал дій недоступний"
 
 
@@ -133,9 +137,12 @@ def require_role(min_role: Role) -> Callable[..., Identity]:
             raise HTTPException(401, "Потрібен вхід", headers={"WWW-Authenticate": "Session"})
         if not has_role(ident.role, min_role):
             method = conn.scope.get("method", "WS")
-            log.warning("відмова: %r (роль %r) %s %s, потрібна %s", ident.user, ident.role, method, conn.url.path, min_role)
-            audit_best_effort(conn, AuditEntry(ident.user, ident.role, "denied", f"{method} {conn.url.path} needs {min_role}",
-                                               "denied", client_ip(conn)))
+            ip = client_ip(conn)
+            log.warning("відмова: %r (роль %r) %s %s, потрібна %s, з %s", ident.user, ident.role, method, conn.url.path, min_role, ip)
+            audit = _audit_log(conn)
+            if audit is not None and audit.allow_blocked_record(f"denied:{ip}:{ident.user}", DENIED_WINDOW_S):
+                audit_best_effort(conn, AuditEntry(ident.user, ident.role, "denied", f"{method} {conn.url.path} needs {min_role}",
+                                                   "denied", ip))
             raise HTTPException(403, "Недостатньо прав")
         return ident
     dependency.dw_min_role = min_role  # type: ignore[attr-defined]
@@ -144,11 +151,12 @@ def require_role(min_role: Role) -> Callable[..., Identity]:
 
 
 def page_identity(conn: HTTPConnection) -> Identity | None:
-    """Для сторінки `/`: замість 401 повертає None, і сторінка веде на вхід. Роль перевіряє сам обробник."""
+    """Лише для сторінки `GET /`: замість 401 повертає None, і сторінка веде на вхід. Сама нічого НЕ забороняє (роль
+    перевіряє обробник), тож має окрему позначку `dw_page_only`, а не `dw_min_role`: guard-тест приймає її тільки для `GET /`."""
     return get_access(conn).identity(conn)
 
 
-page_identity.dw_min_role = "viewer"  # type: ignore[attr-defined]
+page_identity.dw_page_only = True  # type: ignore[attr-defined]
 
 
 def json_post_guard(request: Request) -> None:
@@ -195,6 +203,7 @@ def login(body: LoginIn, request: Request) -> Response:
         # Не частіше, ніж пропускає LoginLimiter (спроба вже зарахована вище); керівні символи з імені вилучає сам журнал
         audit_best_effort(request, AuditEntry(body.username, "", "login_failed", "", "failed", client))
         raise HTTPException(401, "Хибний логін або пароль")
+    # Успішний вхід пишемо щоразу (без агрегації): для нього потрібен справжній пароль, а scrypt і LoginLimiter обмежують темп
     audit_or_503(request, AuditEntry(body.username, role, "login", "", "ok", client))   # спершу журнал, потім сесія
     access.limiter.reset(client)
     token = access.sessions.create(body.username, role)

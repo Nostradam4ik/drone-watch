@@ -1,4 +1,4 @@
-"""Ролі на кожному маршруті й журнал дій для кожної дії (вхід, вихід, відмова, розкладка, покриття, рішення, читання журналу)."""
+"""Ролі на кожному маршруті й журнал дій для кожної дії (вхід, вихід, відмова, розкладка, рішення, читання журналу; перегляд покриття не пишеться)."""
 import asyncio
 from unittest.mock import Mock
 
@@ -22,16 +22,37 @@ ROUTE_ALLOWLIST = {("GET", "/login"), ("POST", "/api/login"), ("POST", "/api/log
 DOCS_ROUTES = {"/openapi.json", "/docs", "/docs/oauth2-redirect", "/redoc"}   # службові сторінки FastAPI (Starlette Route)
 
 
+PAGE_ONLY_ROUTES = {("GET", "/")}   # лише тут дозволена page_identity (dw_page_only): вона сама нічого не забороняє
+
+
+def has_marker(dependant, marker) -> bool:
+    return any(getattr(d.call, marker, None) is not None or has_marker(d, marker) for d in dependant.dependencies)
+
+
 def has_role_dependency(dependant) -> bool:
-    return any(getattr(d.call, "dw_min_role", None) is not None or has_role_dependency(d) for d in dependant.dependencies)
+    return has_marker(dependant, "dw_min_role")
 
 
-def http_routes():
+def guard_violations(routes):
+    """Маршрути без require_role (поза allowlist), а також page_identity будь-де, крім GET /."""
+    out = []
+    for m, path, dependant in routes:
+        if path.startswith("/static/") or m in ("HEAD", "OPTIONS") or (m, path) in ROUTE_ALLOWLIST:
+            continue
+        page_only = has_marker(dependant, "dw_page_only")
+        if page_only and (m, path) not in PAGE_ONLY_ROUTES:
+            out.append((m, path))   # позначка сторінки на API-маршруті: guard не має вважати це перевіркою ролі
+        elif not page_only and not has_role_dependency(dependant):
+            out.append((m, path))
+    return out
+
+
+def http_routes(application=None):
     """(метод, шлях, dependant) для кожного HTTP-маршруту, зокрема з include_router. FastAPI 0.16x не розгортає підключений
     роутер у app.routes (там лежить один `_IncludedRouter`), тож наївний обхід лише APIRoute пропустив би /api/me, /api/login
     тощо й guard проходив би порожньо. Невідомий тип маршруту валить тест: краще впасти, ніж мовчки нічого не перевірити."""
     out = []
-    for r in app.app.routes:
+    for r in (application or app.app).routes:
         if isinstance(r, APIRoute):
             out += [(m, r.path, r.dependant) for m in r.methods]
         elif hasattr(r, "effective_route_contexts"):
@@ -89,10 +110,32 @@ def _actions(c):
 
 # ---------- guard: жоден маршрут без ролі ----------
 def test_every_route_declares_a_role():
-    missing = [(m, path) for m, path, dependant in http_routes()
-               if not path.startswith("/static/") and m not in ("HEAD", "OPTIONS")
-               and (m, path) not in ROUTE_ALLOWLIST and not has_role_dependency(dependant)]
-    assert missing == []
+    assert guard_violations(http_routes()) == []
+
+
+def test_page_identity_on_an_api_route_fails_the_guard():
+    """page_identity нічого не забороняє: якщо її поставити на API-маршрут, guard має впасти, а не вважати маршрут захищеним."""
+    from typing import Annotated
+
+    from fastapi import Depends, FastAPI
+
+    from dronewatch.service.dashboard_web import Identity, page_identity, require_role
+    probe = FastAPI()
+
+    @probe.get("/")
+    def page(ident: Annotated[Identity | None, Depends(page_identity)]) -> dict:
+        return {}
+
+    @probe.get("/api/leak")
+    def leak(ident: Annotated[Identity | None, Depends(page_identity)]) -> dict:
+        return {}
+
+    @probe.post("/api/leak2")
+    def leak2(ident: Annotated[Identity | None, Depends(page_identity)],
+              _: Annotated[Identity, Depends(require_role("viewer"))]) -> dict:   # навіть разом із роллю: позначка лише для GET /
+        return {}
+
+    assert guard_violations(http_routes(probe)) == [("GET", "/api/leak"), ("POST", "/api/leak2")]
 
 
 def test_guard_sees_router_routes_and_allowlist_is_alive():
@@ -166,6 +209,30 @@ def test_denied_is_still_403_when_audit_fails(demo_client, monkeypatch):
     login_as(demo_client, "viewer")
     monkeypatch.setattr(_audit(demo_client), "append", Mock(side_effect=AuditError("ro")))
     assert demo_client.put("/api/layout", json=LAYOUT).status_code == 403
+
+
+def test_denied_rows_are_aggregated_but_every_denial_is_logged(demo_client, caplog):
+    """Флуд заборонених запитів не роздуває журнал: один `denied` на адресу й користувача за вікно; у лозі кожна відмова."""
+    login_as(demo_client, "viewer", user="vera")
+    with caplog.at_level("WARNING", logger="dronewatch.dashboard"):
+        for _ in range(50):
+            assert demo_client.delete("/api/layout").status_code == 403
+        assert demo_client.get("/api/audit").status_code == 403
+    rows = _audit(demo_client).read(1000)
+    assert [(r["action"], r["target"]) for r in rows] == [("denied", "DELETE /api/layout needs admin")]
+    assert sum("відмова" in r.getMessage() for r in caplog.records) == 51
+    login_as(demo_client, "viewer", user="otto")   # інший користувач з тієї ж адреси: окремий запис
+    demo_client.delete("/api/layout")
+    assert [r["user"] for r in _audit(demo_client).read()] == ["otto", "vera"]
+
+
+def test_denied_row_again_after_the_window(demo_client, monkeypatch):
+    from dronewatch.service import dashboard_web
+    monkeypatch.setattr(dashboard_web, "DENIED_WINDOW_S", 0.0)
+    login_as(demo_client, "viewer")
+    demo_client.delete("/api/layout")
+    demo_client.delete("/api/layout")
+    assert len(_audit(demo_client).read()) == 2
 
 
 def test_role_check_comes_before_body_validation(demo_client):
@@ -257,13 +324,16 @@ def test_audit_failure_blocks_layout_change(demo_client, monkeypatch):
     assert demo_client.get("/api/config").json()["sensors"] == before
 
 
-def test_coverage_preview_is_audited_and_blocked_without_audit(demo_client, monkeypatch):
+def test_coverage_preview_is_admin_only_but_not_audited(demo_client, monkeypatch):
+    """POST /api/coverage стану не змінює, а редактор кличе його щокілька сотень мс: у журнал не пишемо (і збій журналу
+    його не блокує). Право лишається admin (див. матрицю)."""
     login_as(demo_client, "admin")
     assert demo_client.post("/api/coverage", json=LAYOUT).status_code == 200
-    row = _audit(demo_client).read()[0]
-    assert (row["action"], row["result"], row["target"]) == ("coverage_set", "ok", "sensors=1")
-    monkeypatch.setattr(_audit(demo_client), "append", Mock(side_effect=AuditError("ro")))
-    assert demo_client.post("/api/coverage", json=LAYOUT).status_code == 503
+    assert _audit(demo_client).read() == []
+    append = Mock(side_effect=AuditError("ro"))
+    monkeypatch.setattr(_audit(demo_client), "append", append)
+    assert demo_client.post("/api/coverage", json=LAYOUT).status_code == 200
+    append.assert_not_called()
 
 
 # ---------- рішення по тривозі ----------
@@ -301,9 +371,22 @@ def test_audit_read_is_itself_audited(demo_client):
 def test_audit_read_limit_is_clamped(demo_client):
     login_as(demo_client, "admin")
     for _ in range(3):
-        demo_client.post("/api/coverage", json=LAYOUT)
+        demo_client.delete("/api/layout")   # по 2 рядки: started і ok
     assert len(demo_client.get("/api/audit?limit=-5").json()) == 1
-    assert len(demo_client.get("/api/audit").json()) == 4   # 3 coverage_set + попереднє audit_read
+    assert len(demo_client.get("/api/audit").json()) == 7   # 6 layout_reset + попереднє audit_read
+
+
+def test_audit_read_limit_has_a_ceiling_of_1000(demo_client):
+    from dronewatch.service.audit import AuditEntry
+    audit, eng = _audit(demo_client), demo_client.app.state.runtime.engine
+    with eng.lock:   # 1100 рядків одним комітом: швидше, ніж 1100 разів append
+        for i in range(1100):
+            audit.append_locked(AuditEntry("bulk", "admin", "layout_save", f"n={i}", "ok", "1.2.3.4"))
+        eng.db.commit()
+    login_as(demo_client, "admin")
+    rows = demo_client.get("/api/audit?limit=5000").json()
+    assert len(rows) == 1000 and rows[0]["target"] == "n=1099", "найновіші першими, не більше 1000"
+    assert _audit(demo_client).read()[0]["target"] == "limit=1000"
 
 
 def test_audit_read_blocked_when_audit_fails(demo_client, monkeypatch):
@@ -315,8 +398,9 @@ def test_audit_read_blocked_when_audit_fails(demo_client, monkeypatch):
 # ---------- WebSocket ----------
 def test_ws_rejects_unknown_role(demo_client):
     demo_client.cookies.set(COOKIE, demo_client.app.state.access.sessions.create("alice", "root"))  # type: ignore[arg-type]
-    with pytest.raises(WebSocketDisconnect), demo_client.websocket_connect("/ws"):
+    with pytest.raises(WebSocketDisconnect) as exc, demo_client.websocket_connect("/ws"):
         pass
+    assert exc.value.code == 1008
     assert not demo_client.app.state.runtime.clients
 
 
@@ -353,7 +437,12 @@ def test_demo_with_users_requires_login():
     assert access.enabled and access.users.authenticate("alice", PASSWORD) == "admin"
 
 
-def test_demo_without_users_is_view_only(caplog):
+def test_demo_without_users_is_view_only(caplog, tmp_path, monkeypatch):
     with caplog.at_level("WARNING", logger="dronewatch"):
         access = app.build_dashboard_access(config.Config(mode="demo"))
     assert not access.enabled and caplog.records
+    _demo_runtime(tmp_path, monkeypatch)
+    app.app.state.access = access
+    c = TestClient(app.app, raise_server_exceptions=False)
+    assert c.get("/api/me").json()["role"] == "viewer"
+    assert c.put("/api/layout", json=LAYOUT).status_code == 403

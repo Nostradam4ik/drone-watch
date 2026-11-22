@@ -443,10 +443,10 @@ def get_coverage(rt: RuntimeDep) -> dict[str, Any]:
 
 
 @app.post("/api/coverage")
-async def post_coverage(ident: AdminDep, request: Request, body: layout.Layout) -> dict[str, Any]:
+async def post_coverage(_: AdminDep, body: layout.Layout) -> dict[str, Any]:
     """Що покриває ця розстановка в буферній зоні (клітинки з класом). Нічого не змінює: лише рахує для підсвітки в редакторі.
-    Але це дія редактора (admin), тож спершу журнал: не записалось, 503."""
-    audit_or_503(request, AuditEntry(ident.user, ident.role, "coverage_set", f"sensors={len(body.sensors)}", "ok", client_ip(request)))
+    Лише для admin (інструмент редактора), але в журнал не пишеться: стану не змінює, а редактор кличе його щокілька сотень мс
+    під час перетягування, і журнал (та SQLite-коміти в циклі подій) потонули б у попередніх переглядах."""
     return coverage.coverage(layout.build(body))
 
 
