@@ -28,7 +28,7 @@ from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, Resp
 from pydantic import BaseModel, ConfigDict, Field
 
 from dronewatch.service.audit import AuditEntry, AuditError
-from dronewatch.service.dashboard_auth import MAX_PASSWORD_LEN, LoginLimiter, Role, SessionStore, Users, has_role, limiter_key
+from dronewatch.service.dashboard_auth import MAX_PASSWORD_LEN, LimiterLike, Role, SessionStoreLike, Users, has_role, limiter_key
 
 log = logging.getLogger("dronewatch.dashboard")
 STATIC = Path(__file__).resolve().parent / "static"
@@ -55,8 +55,8 @@ class Identity:
 class DashboardAccess:
     """Без аргументів автентифікація вимкнена (демо, розробка); з ними вхід обов'язковий."""
     users: Users | None = None
-    sessions: SessionStore | None = None
-    limiter: LoginLimiter | None = None
+    sessions: SessionStoreLike | None = None
+    limiter: LimiterLike | None = None
 
     @property
     def enabled(self) -> bool:
