@@ -77,7 +77,7 @@ def test_stats_add_up_and_cell_count_stays_bounded_for_a_huge_zone():
 @pytest.fixture
 def client(tmp_path, monkeypatch):
     monkeypatch.setenv("DB_PATH", str(tmp_path / "t.db"))
-    app.state.runtime = build_runtime(config.Config(mode="demo"))
+    app.state.runtime = build_runtime(config.Config(mode="demo", map=config.MapCfg(buildings=str(tmp_path / "none.npz"))))   # без будинків: тест не залежить від локального data/map/buildings.npz
     app.state.access = DashboardAccess()   # вхід вимкнено: анонім лише viewer, тож редагувати розкладку входимо як admin
     client = TestClient(app)
     login_as(client, "admin")
@@ -118,3 +118,29 @@ def test_live_sensors_from_a_config_get_coverage_over_the_configured_zones():
     r = coverage(build_sensors(cfg), [Zone("Буферна", 600, "WARNING"), Zone("Критична", 250, "CRITICAL")])
     assert r["stats"]["good"] + r["stats"]["strong"] == 100.0 and r["stats"]["ident"] == 100.0
     assert max(abs(a) for a, _, _ in r["cells"]) * r["cell"] <= 600 + r["cell"]   # лише буферна зона, критична не береться
+
+
+def test_coverage_endpoint_says_it_ignores_buildings_without_a_buildings_file(client):
+    r = client.post("/api/coverage", json={"sensors": [{"id": "r1", "type": "radar-short", "x": 0, "y": 0}]}).json()
+    assert r["los"] is False and r["target_alt_m"] == 30.0
+
+
+def test_coverage_endpoint_uses_buildings_and_sensor_height_when_the_file_exists(tmp_path, monkeypatch):
+    import numpy as np
+    lat0, lon0 = 48.8584, 2.2945
+    dlat, dlon = 1 / 111320, 1 / (111320 * np.cos(np.radians(lat0)))
+    wall = np.array([[lon0 + 100 * dlon, lat0 - 200 * dlat], [lon0 + 120 * dlon, lat0 - 200 * dlat],
+                     [lon0 + 120 * dlon, lat0 + 200 * dlat], [lon0 + 100 * dlon, lat0 + 200 * dlat]])
+    np.savez(tmp_path / "b.npz", lonlat=wall, starts=np.array([0, 4]), height=np.array([40], np.float32), min_height=np.zeros(1, np.float32))
+    monkeypatch.setenv("DB_PATH", str(tmp_path / "t.db"))
+    app.state.runtime = build_runtime(config.Config(mode="demo", map=config.MapCfg(buildings=str(tmp_path / "b.npz"))))
+    app.state.access = DashboardAccess()
+    c = TestClient(app)
+    login_as(c, "admin")
+
+    def good(height):
+        body = {"sensors": [{"id": "r1", "type": "radar-mid", "x": 0, "y": 0, "height": height}]}
+        r = c.post("/api/coverage", json=body).json()
+        assert r["los"] is True
+        return r["stats"]["good"]
+    assert good(0) < 100.0 and good(150) > good(0)

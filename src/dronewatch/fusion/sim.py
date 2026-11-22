@@ -104,12 +104,13 @@ SENSOR_TYPES |= {
 }
 
 
-def make_sensor(type_id: str, name: str, x: float, y: float, heading_deg: float = 0.0) -> Sensor:
+def make_sensor(type_id: str, name: str, x: float, y: float, heading_deg: float = 0.0, height: float = 0.0) -> Sensor:
     """Датчик із палітри в точці (x, y) метрів. Ідеальний: без зсуву й затримки (їх задають лише вбудовані датчики демо).
-    heading_deg: куди він дивиться, компасні градуси (північ = 0, схід = 90); має значення лише для секторних типів."""
+    heading_deg: куди він дивиться, компасні градуси (північ = 0, схід = 90); має значення лише для секторних типів.
+    height: висота над землею, м (для лінії видимості; сам трекер її не використовує)."""
     p = SENSOR_TYPES[type_id]
     sigma = (p["sigma"][0], *np.radians(p["sigma"][1:])) if p["kind"] == "radar" else (np.radians(p["sigma"][0]),)
-    s = Sensor(name, p["kind"], (x, y, 0.0), sigma, p["pd"], p["max_range"], p["clutter"], p["label"])
+    s = Sensor(name, p["kind"], (x, y, height), sigma, p["pd"], p["max_range"], p["clutter"], p["label"])
     s.type_id = type_id
     s.fov = np.radians(p.get("fov_deg", 360.0))
     s.heading = np.radians(90.0 - heading_deg)   # компас -> математичний кут
