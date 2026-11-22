@@ -435,7 +435,7 @@ def test_admin_sees_audit_tab_with_integrity_ok(dash_as):
     expect(d.page.locator("#audit-box")).to_be_visible()
     d.page.locator("#audit-box summary").click()
     expect(d.page.locator("#audit-body tr", has_text="login").first).to_be_visible()
-    expect(d.page.locator("#audit-integrity")).to_have_text("ланцюжок цілий")
+    expect(d.page.locator("#audit-integrity")).to_have_text("цілий на момент старту")
     assert not d.errors, d.errors
 
 

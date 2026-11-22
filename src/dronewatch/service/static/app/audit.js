@@ -14,7 +14,7 @@ async function loadAudit() {
     }));
     const h = await api("/api/health");
     const a = h && h.audit;
-    mark.textContent = !a ? "цілісність невідома" : a.ok ? "ланцюжок цілий" : "ПОШКОДЖЕНО з запису " + a.broken_at;
+    mark.textContent = !a ? "цілісність невідома" : a.ok ? "цілий на момент старту" : "ПОШКОДЖЕНО з запису " + a.broken_at;
     mark.className = "chip " + (a && a.ok ? "live" : "off");
   } catch (err) {
     if (err instanceof LoginRequired) return;

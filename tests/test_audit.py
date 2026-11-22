@@ -52,7 +52,7 @@ def test_deleted_middle_row_is_detected():
     db.execute("DROP TRIGGER audit_no_delete")
     db.execute("DELETE FROM audit_log WHERE id=2")
     db.commit()
-    assert log.verify().broken_at == 3
+    assert log.verify().broken_at == 2   # перший відсутній id
 
 
 def test_control_chars_are_stripped():
@@ -147,3 +147,43 @@ def test_create_false_makes_no_tables():
     db = sqlite3.connect(":memory:")
     AuditLog(db, threading.Lock(), create=False)
     assert db.execute("SELECT count(*) FROM sqlite_master").fetchone()[0] == 0
+
+
+# ---------- видалення з кінця й очищення ----------
+def _drop_triggers(db):
+    db.execute("DROP TRIGGER audit_no_delete")
+
+
+def test_deleted_tail_row_is_detected():
+    db, log = make_log()
+    for _ in range(3):
+        log.append(E)
+    _drop_triggers(db)
+    db.execute("DELETE FROM audit_log WHERE id = 3")
+    db.commit()
+    res = log.verify()
+    assert not res.ok and res.broken_at == 3
+
+
+def test_full_wipe_is_detected():
+    db, log = make_log()
+    log.append(E)
+    log.append(E)
+    _drop_triggers(db)
+    db.execute("DELETE FROM audit_log")
+    db.commit()
+    res = log.verify()
+    assert not res.ok and res.rows == 0 and res.broken_at == 1
+
+
+def test_empty_never_used_log_is_ok():
+    assert make_log()[1].verify().ok
+
+
+def test_rate_budget_per_window():
+    t = [100.0]
+    log = AuditLog(sqlite3.connect(":memory:"), threading.Lock(), clock=lambda: t[0])
+    assert [log.take("k", 2, 60.0) for _ in range(3)] == [True, True, False]
+    assert log.take("other", 2, 60.0)
+    t[0] += 61
+    assert log.take("k", 2, 60.0)

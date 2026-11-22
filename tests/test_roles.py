@@ -5,7 +5,6 @@ from unittest.mock import Mock
 import pytest
 from fastapi.routing import APIRoute, APIWebSocketRoute
 from fastapi.testclient import TestClient
-from starlette.routing import Route
 from starlette.websockets import WebSocketDisconnect
 
 from dronewatch.service import app, config
@@ -19,7 +18,9 @@ LAYOUT = {"sensors": [{"id": "r1", "type": "radar-mid", "x": 0, "y": 0}]}
 ROUTE_ALLOWLIST = {("GET", "/login"), ("POST", "/api/login"), ("POST", "/api/logout"), ("POST", "/api/events"), ("GET", "/api/health")}
 
 
-DOCS_ROUTES = {"/openapi.json", "/docs", "/docs/oauth2-redirect", "/redoc"}   # службові сторінки FastAPI (Starlette Route)
+# Статика без входу: лише ці чотири маршрути, що віддають файли зі списків дозволених. Новий маршрут під /static/ має пройти guard
+STATIC_ROUTES = {("GET", "/static/vendor/{name}"), ("GET", "/static/app/{name}"), ("GET", "/static/fonts/{stack}/{glyph_range}.pbf"),
+                 ("GET", "/static/webfonts/{name}")}
 
 
 PAGE_ONLY_ROUTES = {("GET", "/")}   # лише тут дозволена page_identity (dw_page_only): вона сама нічого не забороняє
@@ -37,7 +38,7 @@ def guard_violations(routes):
     """Маршрути без require_role (поза allowlist), а також page_identity будь-де, крім GET /."""
     out = []
     for m, path, dependant in routes:
-        if path.startswith("/static/") or m in ("HEAD", "OPTIONS") or (m, path) in ROUTE_ALLOWLIST:
+        if (m, path) in STATIC_ROUTES or m in ("HEAD", "OPTIONS") or (m, path) in ROUTE_ALLOWLIST:
             continue
         page_only = has_marker(dependant, "dw_page_only")
         if page_only and (m, path) not in PAGE_ONLY_ROUTES:
@@ -61,8 +62,6 @@ def http_routes(application=None):
                 out += [(m, ctx.path, ctx.dependant) for m in ctx.methods]
         elif isinstance(r, APIWebSocketRoute) and r.path == "/ws":
             continue   # WebSocket не має require_role: роль перевіряє сам обробник (test_ws_*)
-        elif isinstance(r, Route) and r.path in DOCS_ROUTES:
-            continue
         else:
             raise AssertionError(f"невідомий маршрут {r!r}: guard не вміє його перевірити")
     return out
@@ -120,7 +119,7 @@ def test_page_identity_on_an_api_route_fails_the_guard():
     from fastapi import Depends, FastAPI
 
     from dronewatch.service.dashboard_web import Identity, page_identity, require_role
-    probe = FastAPI()
+    probe = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
 
     @probe.get("/")
     def page(ident: Annotated[Identity | None, Depends(page_identity)]) -> dict:
@@ -470,3 +469,26 @@ def test_broken_chain_is_reported_but_service_runs(login_client, caplog):
     assert "ПОШКОДЖЕНО" in caplog.text
     login_as(login_client, "admin")
     assert login_client.get("/api/health").json()["audit"] == {"ok": False, "rows": 1, "broken_at": 1}
+
+
+def test_login_failed_rows_have_a_global_cap_with_one_summary_row(login_client, monkeypatch):
+    from dronewatch.service import dashboard_web
+    monkeypatch.setattr(dashboard_web, "LOGIN_FAILED_ROWS_PER_MIN", 3)
+    login_client.app.state.access.limiter.max_failures = 100   # адресний ліміт не заважає: перевіряємо саме спільну стелю
+    for _ in range(10):
+        assert login_client.post("/api/login", json={"username": "alice", "password": "wrong-password-123"}).status_code == 401
+    actions = _actions(login_client)
+    assert actions.count("login_failed") == 3
+    assert actions.count("login_failed_flood") == 1
+
+
+def test_openapi_and_docs_are_not_public(demo_client):
+    for path in ("/openapi.json", "/docs", "/redoc"):
+        assert demo_client.get(path).status_code == 404
+
+
+def test_ipv6_is_limited_per_64_network():
+    from dronewatch.service.dashboard_auth import limiter_key
+    assert limiter_key("2001:db8::1") == limiter_key("2001:db8::ffff") == "2001:db8::/64"
+    assert limiter_key("2001:db8:0:1::1") != limiter_key("2001:db8::1")
+    assert limiter_key("10.0.0.5") == "10.0.0.5" and limiter_key("?") == "?"

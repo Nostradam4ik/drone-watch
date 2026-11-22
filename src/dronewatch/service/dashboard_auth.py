@@ -11,6 +11,7 @@
 import base64
 import hashlib
 import hmac
+import ipaddress
 import secrets
 import threading
 import time
@@ -144,6 +145,15 @@ class SessionStore:
             return False
         with self._lock:
             return self._items.pop(self._key(token), None) is not None
+
+
+def limiter_key(ip: str) -> str:
+    """Ключ ліміту входів: IPv4 як є, IPv6 за мережею /64 (одному клієнтові дають цілу /64, інакше кожна адреса мала б свій ліміт)."""
+    try:
+        addr = ipaddress.ip_address(ip)
+    except ValueError:
+        return ip
+    return str(ipaddress.ip_network((addr, 64), strict=False)) if addr.version == 6 else ip
 
 
 class LoginLimiter:

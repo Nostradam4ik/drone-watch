@@ -26,7 +26,7 @@ from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, Resp
 from pydantic import BaseModel, ConfigDict, Field
 
 from dronewatch.service.audit import AuditEntry, AuditError
-from dronewatch.service.dashboard_auth import MAX_PASSWORD_LEN, LoginLimiter, Role, SessionStore, Users, has_role
+from dronewatch.service.dashboard_auth import MAX_PASSWORD_LEN, LoginLimiter, Role, SessionStore, Users, has_role, limiter_key
 
 log = logging.getLogger("dronewatch.dashboard")
 STATIC = Path(__file__).resolve().parent / "static"
@@ -37,6 +37,7 @@ ANONYMOUS_ROLE: Role = "viewer"   # без входу лише перегляд:
 # запити (без входу це будь-який клієнт), роздуває incidents.db до повного диска, і тоді 503 отримують уже оператори.
 # У лог (log.warning) іде КОЖНА відмова.
 DENIED_WINDOW_S = 300.0
+LOGIN_FAILED_ROWS_PER_MIN = 30   # стеля рядків login_failed на всіх адрес разом; понад неї один зведений рядок за хвилину
 AUDIT_UNAVAILABLE = "Журнал дій недоступний"
 
 
@@ -191,21 +192,26 @@ def login(body: LoginIn, request: Request) -> Response:
         raise HTTPException(404, "Автентифікацію дашборда вимкнено")
     client = client_ip(request)
     # Спроба резервується атомарно ДО перевірки пароля: інакше паралельний залп обходить ліміт (див. LoginLimiter)
-    if wait := access.limiter.attempt(client):
+    lkey = limiter_key(client)
+    if wait := access.limiter.attempt(lkey):
         log.warning("вхід заблоковано (забагато невдалих спроб) з %s", client)
         audit = _audit_log(request)
-        if audit is not None and audit.allow_blocked_record(client, access.limiter.window_s):   # один запис на адресу за вікно
+        if audit is not None and audit.allow_blocked_record(lkey, access.limiter.window_s):   # один запис на адресу за вікно
             audit_best_effort(request, AuditEntry(body.username, "", "login_blocked", "", "denied", client))
         raise HTTPException(429, "Забагато невдалих спроб, спробуйте пізніше", headers={"Retry-After": str(math.ceil(wait))})
     role = access.users.authenticate(body.username, body.password)
     if role is None:
         log.warning("невдалий вхід: ім'я %r з %s", body.username, client)   # %r екранує переноси рядків; пароля в лозі немає
         # Не частіше, ніж пропускає LoginLimiter (спроба вже зарахована вище); керівні символи з імені вилучає сам журнал
-        audit_best_effort(request, AuditEntry(body.username, "", "login_failed", "", "failed", client))
+        audit = _audit_log(request)
+        if audit is None or audit.take("login_failed", LOGIN_FAILED_ROWS_PER_MIN, 60.0):
+            audit_best_effort(request, AuditEntry(body.username, "", "login_failed", "", "failed", client))
+        elif audit.allow_blocked_record("login_failed_flood", 60.0):   # один зведений рядок за хвилину
+            audit_best_effort(request, AuditEntry("", "", "login_failed_flood", "", "denied", client))
         raise HTTPException(401, "Хибний логін або пароль")
     # Успішний вхід пишемо щоразу (без агрегації): для нього потрібен справжній пароль, а scrypt і LoginLimiter обмежують темп
     audit_or_503(request, AuditEntry(body.username, role, "login", "", "ok", client))   # спершу журнал, потім сесія
-    access.limiter.reset(client)
+    access.limiter.reset(lkey)
     token = access.sessions.create(body.username, role)
     log.info("вхід: %s з %s", body.username, client)
     response = JSONResponse({"user": body.username})

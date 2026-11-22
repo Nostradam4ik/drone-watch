@@ -60,6 +60,7 @@ class AuditLog:
         self._db, self._lock, self._clock = db, lock, clock
         self._blocked: dict[str, float] = {}
         self._blocked_lock = threading.Lock()
+        self._rates: dict[str, tuple[float, int]] = {}
         if not create:
             return
         db.execute("""CREATE TABLE IF NOT EXISTS audit_log (
@@ -104,16 +105,38 @@ class AuditLog:
             return [dict(zip(cols, r, strict=True)) for r in cur.fetchall()]
 
     def verify(self) -> VerifyResult:
-        """Іде по id, перераховує хеш і звіряє prev_hash; broken_at = id першого рядка, що не зійшовся."""
-        rows, prev, broken = 0, GENESIS, None
+        """Іде по id, перераховує хеш і звіряє prev_hash; id мусять іти підряд від 1, а останній дорівнювати лічильнику
+        AUTOINCREMENT (sqlite_sequence): так видно й видалення рядків з кінця чи повне очищення. broken_at = id першого
+        рядка, що не зійшовся (або першого відсутнього)."""
+        rows, prev, broken, expected = 0, GENESIS, None, 1
         with self._lock:
             for rid, ts, user, role, action, target, result, ip, prev_hash, h in self._db.execute(
                     f"SELECT {_COLS} FROM audit_log ORDER BY id"):
                 rows += 1
-                if broken is None and (prev_hash != prev or h != _digest(prev_hash, ts, user, role, action, target, result, ip)):
-                    broken = rid
-                prev = h
+                if broken is None:
+                    if rid != expected:
+                        broken = expected
+                    elif prev_hash != prev or h != _digest(prev_hash, ts, user, role, action, target, result, ip):
+                        broken = rid
+                prev, expected = h, rid + 1
+            seq_row = self._db.execute("SELECT seq FROM sqlite_sequence WHERE name = 'audit_log'").fetchone()
+        seq = seq_row[0] if seq_row else 0
+        if broken is None and seq != expected - 1:   # лічильник пам'ятає більше (кінець видалено) або менше, ніж є в таблиці
+            broken = min(seq, expected - 1) + 1
         return VerifyResult(ok=broken is None, rows=rows, broken_at=broken, head=prev)
+
+    def take(self, key: str, limit: int, window_s: float) -> bool:
+        """True, поки за вікно (фіксоване, від першого виклику) дано менше `limit` дозволів на ключ: спільна стеля на потік
+        рядків, щоб флуд з багатьох адрес не заповнив диск (адресний ліміт цього не гарантує)."""
+        with self._blocked_lock:
+            now = self._clock()
+            start, count = self._rates.get(key, (now, 0))
+            if now - start >= window_s:
+                start, count = now, 0
+            if count >= limit:
+                return False
+            self._rates[key] = (start, count + 1)
+            return True
 
     def allow_blocked_record(self, key: str, window_s: float) -> bool:
         """True не частіше одного разу за вікно на ключ (щоб флуд 429 не роздував журнал)."""

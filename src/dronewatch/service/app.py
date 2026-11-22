@@ -238,7 +238,7 @@ def build_dashboard_access(cfg: config.Config) -> DashboardAccess:
                            SessionStore(cfg.dashboard.session_ttl_s), LoginLimiter())
 
 
-app = FastAPI(title="Drone Watch", lifespan=lifespan)
+app = FastAPI(title="Drone Watch", lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)   # схема API не публічна
 app.include_router(dashboard_web.router)
 app.middleware("http")(dashboard_web.add_security_headers)
 
