@@ -49,7 +49,8 @@ class DashboardUser(BaseModel):
 
 class DashboardCfg(BaseModel):
     """required: дашборд, API читання й WebSocket лише після входу (за замовчуванням у live). disabled: явна відмова
-    (локальна розробка, довірена мережа); сервіс пише про це попередження. У demo автентифікація вимкнена завжди."""
+    (локальна розробка, довірена мережа); сервіс пише про це попередження. У demo вхід обов'язковий, якщо задано users;
+    без users demo лише для перегляду. Без входу анонім завжди має лише роль viewer."""
     auth: Literal["required", "disabled"] = "required"
     users: list[DashboardUser] = []
     session_ttl_s: float = Field(default=8 * 3600, gt=0, le=30 * 86400)   # скільки діє сесія після входу

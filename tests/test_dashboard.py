@@ -232,7 +232,7 @@ def test_login_session_logout_flow():
     assert PASSWORD not in ok.text and PASSWORD not in cookie
 
     assert c.get("/api/state").status_code == 200
-    assert c.get("/api/me").json() == {"user": "alice", "auth": True}
+    assert c.get("/api/me").json() == {"user": "alice", "role": "admin", "auth": True}
     assert c.get("/").status_code == 200 and "Drone Watch" in c.get("/").text
     assert c.get("/login").status_code == 303, "уже увійшли: форма входу не потрібна"
     full = c.get("/api/health").json()
@@ -380,15 +380,19 @@ def test_logs_never_contain_passwords_and_are_injection_safe():
     assert any("вхід: alice" in r.getMessage() for r in records) and any("невдалий вхід" in r.getMessage() for r in records)
 
 
-def test_auth_disabled_keeps_everything_open_as_before():
+def test_auth_disabled_gives_anonymous_viewer_only():
+    """Без входу читати можна все, що й раніше, але анонім лише viewer: жодна зміна стану (рішення, AI, розкладка, журнал)."""
     made = _client(auth=False)
     c, _, _ = made
     for path in ("/", "/api/state", "/api/config", "/api/sensors", "/api/incidents"):
         assert c.get(path).status_code == 200, path
     assert c.get("/login").status_code == 303, "форми входу немає, коли входу не вимагають"
     assert c.post("/api/login", json=LOGIN).status_code == 404
-    assert c.get("/api/me").json() == {"user": "(без входу)", "auth": False}
+    assert c.get("/api/me").json() == {"user": "(без входу)", "role": "viewer", "auth": False}
     assert "scan" in c.get("/api/health").json()
+    assert c.delete("/api/layout").status_code == 403
+    assert c.post("/api/incidents/1/review", json={"status": "confirmed"}).status_code == 403
+    assert c.get("/api/audit").status_code == 403
 
 
 def test_a_dashboard_session_does_not_grant_sensor_access():

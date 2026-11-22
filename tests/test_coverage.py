@@ -7,6 +7,7 @@ from dronewatch.service import config
 from dronewatch.service.app import app, build_runtime
 from dronewatch.service.coverage import BLIND, GOOD, MAX_CELLS, STRONG, WEAK, coverage
 from dronewatch.service.dashboard_web import DashboardAccess
+from helpers_auth import login_as
 
 
 def cls_at(result, x, y):
@@ -77,8 +78,10 @@ def test_stats_add_up_and_cell_count_stays_bounded_for_a_huge_zone():
 def client(tmp_path, monkeypatch):
     monkeypatch.setenv("DB_PATH", str(tmp_path / "t.db"))
     app.state.runtime = build_runtime(config.Config(mode="demo"))
-    app.state.access = DashboardAccess()
-    return TestClient(app)
+    app.state.access = DashboardAccess()   # вхід вимкнено: анонім лише viewer, тож редагувати розкладку входимо як admin
+    client = TestClient(app)
+    login_as(client, "admin")
+    return client
 
 
 def test_coverage_endpoint_computes_without_changing_the_live_layout(client):

@@ -13,6 +13,7 @@ from dronewatch.service.app import app, build_runtime
 from dronewatch.service.config import SensorCfg, build_sensors
 from dronewatch.service.coverage import BLIND, GOOD, coverage
 from dronewatch.service.dashboard_web import DashboardAccess
+from helpers_auth import login_as
 
 
 def hits(sensor, target_xy, seconds=20):
@@ -115,8 +116,10 @@ def test_emulator_respects_the_sector_and_old_configs_stay_circular():
 def client(tmp_path, monkeypatch):
     monkeypatch.setenv("DB_PATH", str(tmp_path / "t.db"))
     app.state.runtime = build_runtime(config.Config(mode="demo"))
-    app.state.access = DashboardAccess()
-    return TestClient(app)
+    app.state.access = DashboardAccess()   # вхід вимкнено: анонім лише viewer, тож редагувати розкладку входимо як admin
+    client = TestClient(app)
+    login_as(client, "admin")
+    return client
 
 
 def test_palette_offers_a_sector_radar_and_config_reports_heading_and_fov(client):

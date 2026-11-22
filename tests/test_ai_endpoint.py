@@ -55,7 +55,7 @@ def test_ask_without_ai_configured_returns_503():
 def test_ask_requires_login():
     client = _client(ai=_ai_runtime(_StubLlm()), logged_in=False)
     r = client.post("/api/ai/ask", json={"question": "що зараз?"})
-    assert r.status_code in (401, 403)
+    assert r.status_code == 401
 
 
 def test_ask_too_long_question_rejected():
@@ -97,16 +97,31 @@ def test_ask_rate_limited_after_many_requests():
 
 
 def test_ask_rate_limit_cannot_be_bypassed_by_rotating_the_session_cookie():
-    """Коли вхід вимкнено (demo), сире значення кукі ще не перевірене — якщо ключ ліміту береться прямо з нього,
-    клієнт обходить ліміт, просто відправляючи щоразу нове значення cookie. Ключ має братись з user (require_user),
-    тобто з уже перевіреної автентифікації, а не з неперевіреного заголовка клієнта."""
-    rt = app.Runtime(engine=Engine(default_sensors(), [Zone("z", 100, "WARNING")]),
-                     ai=_ai_runtime(_StubLlm(responses=[ChatResult(content="ок", tool_calls=[]) for _ in range(20)])))
-    app.app.state.runtime = rt
-    app.app.state.access = DashboardAccess()   # вхід вимкнено: будь-яке значення dw_session "проходить" як анонім
-    client = TestClient(app.app, raise_server_exceptions=False)
+    """Ключ ліміту має братись з уже перевіреного користувача (require_role), а не з сирого значення cookie: інакше той
+    самий оператор обходить ліміт, щоразу входячи наново (нова сесія = нове значення dw_session)."""
+    client = _client(ai=_ai_runtime(_StubLlm(responses=[ChatResult(content="ок", tool_calls=[]) for _ in range(20)])),
+                     logged_in=False)
+    sessions = app.app.state.access.sessions
     statuses = []
-    for i in range(15):
-        client.cookies.set("dw_session", f"forged-{i}")
+    for _ in range(15):
+        client.cookies.set("dw_session", sessions.create("operator", "operator"))
         statuses.append(client.post("/api/ai/ask", json={"question": "що?"}).status_code)
     assert 429 in statuses, "обертання кукі не повинно обходити ліміт запитів до AI"
+
+
+def test_ask_is_denied_to_anonymous_viewer_and_to_viewer():
+    """Без входу анонім лише viewer, а AI-асистент від operator."""
+    rt = app.Runtime(engine=Engine(default_sensors(), [Zone("z", 100, "WARNING")]), ai=_ai_runtime(_StubLlm()))
+    app.app.state.runtime = rt
+    app.app.state.access = DashboardAccess()
+    client = TestClient(app.app, raise_server_exceptions=False)
+    assert client.post("/api/ai/ask", json={"question": "що?"}).status_code == 403
+    viewer = _client(ai=_ai_runtime(_StubLlm()), logged_in=False)
+    viewer.cookies.set("dw_session", app.app.state.access.sessions.create("vera", "viewer"))
+    assert viewer.post("/api/ai/ask", json={"question": "що?"}).status_code == 403
+
+
+def test_ask_is_not_written_to_the_audit_log():
+    client = _client(ai=_ai_runtime(_StubLlm()), logged_in=True)
+    assert client.post("/api/ai/ask", json={"question": "що зараз?"}).status_code == 200
+    assert app.app.state.runtime.engine.audit.read() == []

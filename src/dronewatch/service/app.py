@@ -12,7 +12,7 @@ import re
 import sqlite3
 import time
 import uuid
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager, closing
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -30,9 +30,21 @@ from dronewatch.service.ai import agent
 from dronewatch.service.ai.errors import AiUnavailable
 from dronewatch.service.ai.llm import MistralClient
 from dronewatch.service.ai.rag import IncidentIndex
+from dronewatch.service.audit import AuditEntry, AuditError
 from dronewatch.service.auth import SensorAuth
-from dronewatch.service.dashboard_auth import LoginLimiter, SessionStore, UserEntry, Users
-from dronewatch.service.dashboard_web import DashboardAccess, current_user, json_post_guard, require_user
+from dronewatch.service.dashboard_auth import LoginLimiter, SessionStore, UserEntry, Users, has_role
+from dronewatch.service.dashboard_web import (
+    AUDIT_UNAVAILABLE,
+    DashboardAccess,
+    Identity,
+    audit_best_effort,
+    audit_or_503,
+    client_ip,
+    current_user,
+    json_post_guard,
+    page_identity,
+    require_role,
+)
 from dronewatch.service.demo import DemoSource, make_sensors
 from dronewatch.service.engine import Alert, Engine, SensorStatus, Zone
 from dronewatch.service.mqtt_in import MqttIngest
@@ -109,6 +121,9 @@ def get_runtime(conn: HTTPConnection) -> Runtime:
 
 
 RuntimeDep = Annotated[Runtime, Depends(get_runtime)]
+# Ролі маршрутів (viewer < operator < admin). Кожен маршрут, крім allowlist у tests/test_roles.py, мусить мати require_role
+OperatorDep = Annotated[Identity, Depends(require_role("operator"))]
+AdminDep = Annotated[Identity, Depends(require_role("admin"))]
 
 
 def build_engine(cfg: config.Config, sensors: list[Sensor], db_path: str, zones: list[Zone] | None = None) -> Engine:
@@ -192,11 +207,15 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
 
 def build_dashboard_access(cfg: config.Config) -> DashboardAccess:
-    """У demo входу немає (локальна розробка). У live за замовчуванням обов'язковий; вимкнути можна лише свідомо."""
-    if cfg.mode == "demo":
-        return DashboardAccess()
+    """Вхід обов'язковий у live (за замовчуванням) і в demo, якщо в конфігу є користувачі. Без входу (demo без користувачів
+    або свідоме `dashboard.auth: disabled`) анонім отримує лише viewer: читає, але нічого не змінює."""
     if cfg.dashboard.auth == "disabled":
-        log.warning("вхід у дашборд вимкнено (dashboard.auth: disabled): стан, тривоги й WebSocket відкриті всім, хто дістанеться порту")
+        log.warning("вхід у дашборд вимкнено (dashboard.auth: disabled): стан, тривоги й WebSocket відкриті для перегляду всім, "
+                    "хто дістанеться порту; рішення по тривогах, AI, розкладка й журнал недоступні без входу")
+        return DashboardAccess()
+    if cfg.mode == "demo" and not cfg.dashboard.users:
+        log.warning("демо без користувачів дашборда: лише перегляд (viewer). Щоб редагувати розкладку, додайте в dashboard.users "
+                    "користувача з role: admin (dronewatch-keygen --dashboard-user ІМ'Я --role admin)")
         return DashboardAccess()
     return DashboardAccess(Users({u.name: UserEntry(u.password_hash, u.role) for u in cfg.dashboard.users}),
                            SessionStore(cfg.dashboard.session_ttl_s), LoginLimiter())
@@ -307,8 +326,8 @@ async def scan_loop(app: FastAPI, rt: Runtime) -> None:
 
 
 @app.get("/")
-def index(user: Annotated[str | None, Depends(current_user)]) -> Response:
-    if user is None:   # сторінку без входу не віддаємо: людину веде на форму входу
+def index(ident: Annotated[Identity | None, Depends(page_identity)]) -> Response:
+    if ident is None or not has_role(ident.role, "viewer"):   # без входу (чи з невідомою роллю) сторінку не віддаємо: на форму входу
         return RedirectResponse("/login", status_code=303)
     return FileResponse(BASE / "static" / "index.html")
 
@@ -365,7 +384,7 @@ def webfont(name: str) -> Response:   # шрифти інтерфейсу теж
     return FileResponse(path, media_type=kind, headers={"Cache-Control": "public, max-age=86400"})
 
 
-@app.get("/map/paris.pmtiles", dependencies=[Depends(require_user)], include_in_schema=False)
+@app.get("/map/paris.pmtiles", dependencies=[Depends(require_role("viewer"))], include_in_schema=False)
 def map_pmtiles(rt: RuntimeDep) -> Response:
     """Власна карта одним файлом. Браузер читає її діапазонами (Range), це вміє FileResponse. Потрібен вхід: за самим
     файлом видно, яку ділянку покриває система."""
@@ -379,7 +398,7 @@ def map_mode(rt: Runtime) -> str:
     return "offline" if rt.map_file is not None else "online" if rt.map_online else "none"
 
 
-@app.get("/api/config", dependencies=[Depends(require_user)])
+@app.get("/api/config", dependencies=[Depends(require_role("viewer"))])
 def get_config(rt: RuntimeDep) -> dict[str, Any]:
     return {**rt.engine.config(), "demo": rt.demo, "map": {"mode": map_mode(rt)},
             "editable": rt.demo_src is not None, "sensor_types": layout.type_catalog(), "max_sensors": layout.MAX_SENSORS,
@@ -396,28 +415,45 @@ def apply_layout(rt: Runtime, sensors: list[Sensor]) -> dict[str, Any]:
     return {**rt.engine.config(), "demo": rt.demo}
 
 
-@app.put("/api/layout", dependencies=[Depends(require_user)])
-async def put_layout(body: layout.Layout, rt: RuntimeDep) -> dict[str, Any]:
+def audited_change[T](conn: HTTPConnection, ident: Identity, action: str, target: str, change: Callable[[], T]) -> T:
+    """Зміна стану з журналом: спершу `started` (не записалось, дії немає: 503), потім дія, потім `ok` чи `error`.
+    Результат пишеться «як вийде»: дія вже відбулася, і відкотити її через збій журналу було б гірше (стан наполовину)."""
+    def entry(result: str) -> AuditEntry:
+        return AuditEntry(ident.user, ident.role, action, target, result, client_ip(conn))
+    audit_or_503(conn, entry("started"))
+    try:
+        done = change()
+    except Exception:   # зокрема HTTPException 409: спроба була, і журнал це показує
+        audit_best_effort(conn, entry("error"))
+        raise
+    audit_best_effort(conn, entry("ok"))
+    return done
+
+
+@app.put("/api/layout")
+async def put_layout(ident: AdminDep, request: Request, body: layout.Layout, rt: RuntimeDep) -> dict[str, Any]:
     """Нова розстановка (повний список датчиків): додати, пересунути чи прибрати датчик це одна атомарна заміна."""
-    return apply_layout(rt, layout.build(body))
+    return audited_change(request, ident, "layout_save", f"sensors={len(body.sensors)}", lambda: apply_layout(rt, layout.build(body)))
 
 
-@app.get("/api/coverage", dependencies=[Depends(require_user)])
+@app.get("/api/coverage", dependencies=[Depends(require_role("viewer"))])
 def get_coverage(rt: RuntimeDep) -> dict[str, Any]:
     """Покриття буферної зони поточними датчиками рушія (будь-який режим): те, що дашборд підсвічує за замовчуванням."""
     return coverage.coverage(list(rt.engine.sensors.values()), rt.engine.zones)
 
 
-@app.post("/api/coverage", dependencies=[Depends(require_user)])
-async def post_coverage(body: layout.Layout) -> dict[str, Any]:
-    """Що покриває ця розстановка в буферній зоні (клітинки з класом). Нічого не змінює: лише рахує для підсвітки в редакторі."""
+@app.post("/api/coverage")
+async def post_coverage(ident: AdminDep, request: Request, body: layout.Layout) -> dict[str, Any]:
+    """Що покриває ця розстановка в буферній зоні (клітинки з класом). Нічого не змінює: лише рахує для підсвітки в редакторі.
+    Але це дія редактора (admin), тож спершу журнал: не записалось, 503."""
+    audit_or_503(request, AuditEntry(ident.user, ident.role, "coverage_set", f"sensors={len(body.sensors)}", "ok", client_ip(request)))
     return coverage.coverage(layout.build(body))
 
 
-@app.delete("/api/layout", dependencies=[Depends(require_user)])
-async def reset_layout(rt: RuntimeDep) -> dict[str, Any]:
+@app.delete("/api/layout")
+async def reset_layout(ident: AdminDep, request: Request, rt: RuntimeDep) -> dict[str, Any]:
     """Повернути вбудовані датчики демо."""
-    return apply_layout(rt, make_sensors())
+    return audited_change(request, ident, "layout_reset", "reset", lambda: apply_layout(rt, make_sensors()))
 
 
 @app.get("/api/health", response_model=None)   # повертає то dict, то JSONResponse(503): моделі відповіді тут нема
@@ -439,13 +475,13 @@ def health(user: Annotated[str | None, Depends(current_user)], rt: RuntimeDep) -
     return body if scanning else JSONResponse(body, status_code=503)
 
 
-@app.get("/api/sensors", dependencies=[Depends(require_user)])
+@app.get("/api/sensors", dependencies=[Depends(require_role("viewer"))])
 def sensors(rt: RuntimeDep) -> list[SensorStatus]:
     """Стан здоровʼя кожного датчика: OK / WAITING / LOST."""
     return list(rt.engine.sensor_status().values())
 
 
-@app.get("/api/state", dependencies=[Depends(require_user)])
+@app.get("/api/state", dependencies=[Depends(require_role("viewer"))])
 def state(rt: RuntimeDep) -> dict[str, Any]:
     return rt.engine.state()
 
@@ -473,7 +509,7 @@ def read_incidents(db_path: str, limit: int = 100, status: str | None = None) ->
         return [dict(r) for r in rows]
 
 
-@app.get("/api/incidents", dependencies=[Depends(require_user)])
+@app.get("/api/incidents", dependencies=[Depends(require_role("viewer"))])
 def incidents(rt: RuntimeDep, limit: int = 100,
               status: Literal["new", "confirmed", "dismissed"] | None = None) -> list[dict[str, Any]]:
     return read_incidents(rt.db_path, limit, status)
@@ -485,9 +521,15 @@ class ReviewRequest(BaseModel):
 
 
 @app.post("/api/incidents/{incident_id}/review", dependencies=[Depends(json_post_guard)])
-def review_incident(incident_id: int, body: ReviewRequest, rt: RuntimeDep, user: Annotated[str, Depends(require_user)]) -> dict[str, Any]:
-    """Рішення оператора (підтвердити/відхилити/повернути в new). Автор береться з сесії; нічого не пригнічує."""
-    row = rt.engine.review_incident(incident_id, body.status, user, body.note)
+def review_incident(incident_id: int, body: ReviewRequest, ident: OperatorDep, request: Request, rt: RuntimeDep) -> dict[str, Any]:
+    """Рішення оператора (підтвердити/відхилити/повернути в new). Автор береться з сесії; нічого не пригнічує.
+    Рішення й рядок журналу пишуться в одній транзакції: журнал не записався, рішення теж немає (503)."""
+    entry = AuditEntry(ident.user, ident.role, "review", f"incident={incident_id} status={body.status}", "ok", client_ip(request))
+    try:
+        row = rt.engine.review_incident(incident_id, body.status, ident.user, body.note, audit=entry)
+    except AuditError as e:
+        log.error("%s", e)
+        raise HTTPException(503, AUDIT_UNAVAILABLE) from e
     if row is None:
         raise HTTPException(404, "Інциденту з таким id немає")
     return row
@@ -503,16 +545,15 @@ class AskResponse(BaseModel):
 
 
 @app.post("/api/ai/ask", response_model=None)
-def ask_ai(body: AskRequest, rt: RuntimeDep, user: Annotated[str, Depends(require_user)]) -> AskResponse | JSONResponse:
-    """Чат-агент оператора: читає живий стан і минулі інциденти через тули, нічого не пише в систему.
-    503, якщо AI вимкнено чи недоступний — трекінг дронів від цього не залежить.
+def ask_ai(ident: OperatorDep, body: AskRequest, rt: RuntimeDep) -> AskResponse | JSONResponse:
+    """Чат-агент оператора: читає живий стан і минулі інциденти через тули, нічого не пише в систему (і в журнал дій теж:
+    лише читання, і запитів багато). 503, якщо AI вимкнено чи недоступний — трекінг дронів від цього не залежить.
 
-    Ключ ліміту запитів — user з require_user (уже перевірена сесія), а не сире значення cookie: інакше клієнт
-    обходив би ліміт, просто надсилаючи щоразу нове значення dw_session (особливо легко, коли вхід вимкнено й
-    cookie взагалі не звіряється з жодним сховищем сесій)."""
+    Ключ ліміту запитів — ім'я з require_role (уже перевірена сесія), а не сире значення cookie: інакше клієнт
+    обходив би ліміт, просто надсилаючи щоразу нове значення dw_session."""
     if rt.ai is None:
         return JSONResponse({"detail": "AI-асистент вимкнено або недоступний"}, status_code=503)
-    if wait := rt.ai.limiter.attempt(user):
+    if wait := rt.ai.limiter.attempt(ident.user):
         raise HTTPException(429, "Забагато запитів до AI-асистента, спробуйте пізніше",
                             headers={"Retry-After": str(math.ceil(wait))})
     try:
@@ -523,12 +564,23 @@ def ask_ai(body: AskRequest, rt: RuntimeDep, user: Annotated[str, Depends(requir
     return AskResponse(answer=result.answer, tool_calls=result.tool_calls)
 
 
+@app.get("/api/audit")
+def get_audit(ident: AdminDep, request: Request, rt: RuntimeDep, limit: int = 100) -> list[dict[str, Any]]:
+    """Журнал дій, найновіші першими (limit 1..1000). Читання журналу саме є дією: пишеться `audit_read`, а не записалось,
+    рядків не віддаємо (503)."""
+    rows = rt.engine.audit.read(limit)
+    audit_or_503(request, AuditEntry(ident.user, ident.role, "audit_read", f"limit={max(1, min(1000, limit))}", "ok", client_ip(request)))
+    return rows
+
+
 @app.websocket("/ws")
 async def ws(websocket: WebSocket) -> None:
     rt: Runtime | None = getattr(websocket.app.state, "runtime", None)
     access: DashboardAccess = getattr(websocket.app.state, "access", None) or DashboardAccess()
-    # до accept: відмова тут стає HTTP 403 на рукостисканні, WebSocket навіть не відкривається. Origin захищає від чужих сайтів
-    if rt is None or access.user(websocket) is None or not dashboard_web.origin_ok(websocket):
+    ident = access.identity(websocket)
+    # до accept: відмова тут стає HTTP 403 на рукостисканні, WebSocket навіть не відкривається. Origin захищає від чужих сайтів.
+    # Роль перевіряється тут явно (WebSocket не проходить через require_role): невідома роль = відмова, як і в HTTP
+    if rt is None or ident is None or not has_role(ident.role, "viewer") or not dashboard_web.origin_ok(websocket):
         await websocket.close(code=1008)
         return
     await websocket.accept()

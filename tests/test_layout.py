@@ -11,6 +11,7 @@ from dronewatch.service.dashboard_web import DashboardAccess
 from dronewatch.service.demo import DemoSource, make_sensors, to_event
 from dronewatch.service.engine import Engine, Zone
 from dronewatch.service.layout import LIMIT_M, MAX_SENSORS
+from helpers_auth import login_as
 
 
 def placed(sid, typ, x=0.0, y=0.0):
@@ -25,8 +26,10 @@ def one_radar():
 def client(tmp_path, monkeypatch):
     monkeypatch.setenv("DB_PATH", str(tmp_path / "t.db"))
     app.state.runtime = build_runtime(config.Config(mode="demo"))
-    app.state.access = DashboardAccess()
-    return TestClient(app)
+    app.state.access = DashboardAccess()   # вхід вимкнено: анонім лише viewer, тож редагувати розкладку входимо як admin
+    client = TestClient(app)
+    login_as(client, "admin")
+    return client
 
 
 # ---------- палітра ----------
