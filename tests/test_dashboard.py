@@ -139,7 +139,7 @@ def test_login_limiter_memory_is_bounded():
     assert len(lim._attempts) <= 60, len(lim._attempts)
 
 
-def test_login_limiter_refuses_new_keys_when_full_of_fresh_ones():
+def test_login_limiter_refuses_new_keys_when_full_of_fresh_ones(caplog):
     """Усі ключі свіжі (розподілений перебір з багатьох адрес): стеля не обходиться, нових адрес не приймаємо (fail-closed)."""
     clock = Clock()
     lim = LoginLimiter(max_failures=3, window_s=10, clock=clock, max_keys=50)
@@ -148,8 +148,12 @@ def test_login_limiter_refuses_new_keys_when_full_of_fresh_ones():
     assert results[:50] == [0.0] * 50
     assert all(r > 0 for r in results[50:]), "нова адреса при повній таблиці: відмова з підказкою, коли повторити"
     assert lim.attempt("ip0") == 0.0, "відомі адреси далі рахуються за звичайним правилом"
+    assert len([r for r in caplog.records if "таблиця лімітера" in r.getMessage()]) == 1, "у лозі один ERROR на вікно, а не на кожну спробу"
     clock.now += 11
     assert lim.attempt("ip999") == 0.0, "вікно минуло: місце звільнилось"
+    for i in range(200):   # таблиця знову забита: нове вікно, нове повідомлення
+        lim.attempt(f"again{i}")
+    assert len([r for r in caplog.records if "таблиця лімітера" in r.getMessage()]) == 2
 
 
 def test_limiter_cannot_be_bypassed_by_a_parallel_burst():
