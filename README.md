@@ -32,8 +32,9 @@ Python 3.12+. Пакет встановлюється з кореня репоз
     pytest -m browser            # сторінка, тривоги, рішення оператора, тости, екранування, AI-панель
 
 Код дашборда: `service/static/index.html` (лише розмітка) і `service/static/app/` (стилі та JS за темами: core, map,
-viewer3d, dossier, panels, sound, editor, main). Це звичайні `<script>` зі спільними змінними, не модулі, тож порядок
-підключення в index.html важливий: `core.js` першим, `main.js` останнім. Новий файл треба також додати в `APP_FILES` (app.py),
+viewer3d, dossier, panels, sound, editor, audit, main). Це ES-модулі: `index.html` підключає лише `main.js`, решту він тягне
+через `import`. Спільний змінний стан (`cfg`, `state`, `selected`, `map`, стан редактора) лежить в об'єкті `S` у `core.js`:
+модуль не може переприсвоїти чужу змінну. Бібліотеки `maplibregl` і `pmtiles` лишаються звичайними глобальними скриптами. Новий файл треба також додати в `APP_FILES` (app.py),
 інакше сервер його не віддасть (тест `test_app_dir_has_no_unlisted_files` про це нагадає).
 
 Демо-режим по відкритому HTTP (лише для localhost: ключі й стан ідуть без шифрування):

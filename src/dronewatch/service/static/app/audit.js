@@ -1,5 +1,7 @@
 // Вкладка «Журнал дій» (лише admin): таблиця з /api/audit і позначка цілісності ланцюжка з /api/health. Усі значення з журналу
 // (імена, цілі, коментарі приходять від користувачів) потрапляють у DOM лише через textContent, ніколи як HTML.
+import { LoginRequired, api, can } from "./core.js";
+
 async function loadAudit() {
   const body = document.getElementById("audit-body"), mark = document.getElementById("audit-integrity");
   try {
@@ -21,7 +23,7 @@ async function loadAudit() {
     mark.textContent = "журнал недоступний"; mark.className = "chip off";
   }
 }
-function initAudit() {
+export function initAudit() {
   const box = document.getElementById("audit-box");
   box.hidden = !can("admin");
   if (box.hidden) return;

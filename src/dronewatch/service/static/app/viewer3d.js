@@ -66,7 +66,7 @@ function buildDrone(shape, colorHex, ghost) {
   return { root, rotors };
 }
 
-function ensureViewer(host) {
+export function ensureViewer(host) {
   if (!three) return null;
   if (!viewer) {
     try {
@@ -95,7 +95,7 @@ function ensureViewer(host) {
   return viewer;
 }
 
-function setDroneModel(v, shape, colorHex, ghost) {
+export function setDroneModel(v, shape, colorHex, ghost) {
   const key = shape + colorHex + ghost;
   if (v.key === key) return;
   if (v.model) { v.scene.remove(v.model.root); v.model.root.traverse(o => { if (o.geometry) o.geometry.dispose(); if (o.material) o.material.dispose(); }); }
@@ -104,7 +104,7 @@ function setDroneModel(v, shape, colorHex, ghost) {
   v.key = key;
 }
 
-function startViewer() {
+export function startViewer() {
   if (!viewer || viewer.raf) return;
   const frame = () => {
     viewer.raf = requestAnimationFrame(frame);
@@ -116,4 +116,4 @@ function startViewer() {
   };
   frame();
 }
-function stopViewer() { if (viewer && viewer.raf) { cancelAnimationFrame(viewer.raf); viewer.raf = 0; } }
+export function stopViewer() { if (viewer && viewer.raf) { cancelAnimationFrame(viewer.raf); viewer.raf = 0; } }

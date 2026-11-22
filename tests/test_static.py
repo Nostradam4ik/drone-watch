@@ -58,12 +58,27 @@ def test_app_dir_has_no_unlisted_files():
     assert {p.name for p in (STATIC / "app").iterdir()} == set(APP_FILES)
 
 
-def test_index_loads_every_app_script_once_in_the_declared_order():
-    """Скрипти звичайні (не модулі) і ділять змінні верхнього рівня: main.js кличе start() і має йти останнім."""
+def test_index_loads_only_main_as_a_module_and_every_import_resolves():
+    """Єдина точка входу: <script type="module" src=main.js>. Решта файлів потрапляє через import, і кожен import має вказувати
+    на файл зі списку APP_FILES та на ім'я, яке той файл справді експортує (інакше сторінка мовчки не стартує)."""
     html = (STATIC / "index.html").read_text(encoding="utf-8")
-    scripts = re.findall(r'<script src="/static/app/([^"]+)"></script>', html)
-    assert scripts == [n for n in APP_FILES if n.endswith(".js")]
-    assert scripts[-1] == "main.js"
+    assert re.findall(r'<script src="/static/app/', html) == []   # жодних звичайних скриптів нашого коду
+    assert re.findall(r'<script type="module" src="/static/app/([^"]+)"></script>', html) == ["main.js"]
+    js = {n for n in APP_FILES if n.endswith(".js")}
+    exported = {n: set(re.findall(r"^export (?:async function|function|const|class)\s+(\w+)", (STATIC / "app" / n).read_text(encoding="utf-8"), re.M))
+                for n in js}
+    reached, todo = set(), ["main.js"]
+    while todo:
+        n = todo.pop()
+        if n in reached:
+            continue
+        reached.add(n)
+        for names, mod in re.findall(r'^import \{([^}]*)\} from "\./([\w.]+)";', (STATIC / "app" / n).read_text(encoding="utf-8"), re.M):
+            assert mod in js, f"{n} імпортує {mod}, якого немає в APP_FILES"
+            missing = {x.strip() for x in names.split(",")} - exported[mod]
+            assert not missing, f"{n} імпортує з {mod} неекспортоване: {missing}"
+            todo.append(mod)
+    assert reached == js, f"модулі, до яких не веде жоден import: {js - reached}"
     assert '<link rel="stylesheet" href="/static/app/dashboard.css">' in html
     assert "<style>" not in html and "<script>" not in html   # увесь код і стилі у файлах, не вбудовані
 
