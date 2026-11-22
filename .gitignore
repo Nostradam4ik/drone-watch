@@ -8,6 +8,9 @@ venv/
 *.db
 *.log
 
+# Локальні секрети для docker compose (docker compose сам підхоплює .env у корені) — ніколи не комітиться
+.env
+
 # Артефакти інструментів
 .playwright-mcp/
 
@@ -18,3 +21,16 @@ dist/
 .mypy_cache/
 .ruff_cache/
 .pytest_cache/
+.worktrees/
+.superpowers/
+
+# Оффлайн-карта (dronewatch-mapbuild): десятки МБ, відтворюється командою
+data/map/
+
+# Даташити виробників: лише локально, не в репозиторії (див. README, розділ про реальні моделі)
+docs/datasheets/
+
+# Локальне, не частина проєкту: налаштування редактора, згенерований CA-сертифікат, особисті документи
+.vscode/
+ca.crt
+candidature-fanatics/

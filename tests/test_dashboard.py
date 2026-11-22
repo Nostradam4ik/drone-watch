@@ -549,3 +549,32 @@ def test_real_https_login_cookie_and_emulator():
             srv.stop()
 
 
+
+
+def test_slow_websocket_client_is_dropped_and_does_not_stall_others(monkeypatch):
+    import asyncio
+    import time
+
+    from dronewatch.service import app as appmod
+    monkeypatch.setattr(appmod, "SEND_TIMEOUT_S", 0.2)
+
+    class Fast:
+        def __init__(self): self.sent = []
+        async def send_json(self, p): self.sent.append(p)
+        async def close(self, code=1000): pass
+
+    class Slow(Fast):
+        async def send_json(self, p): await asyncio.sleep(30)
+
+    class Rt:
+        clients: dict = None  # type: ignore[assignment]
+
+    class Acc:
+        def session_valid(self, token): return True
+
+    rt, fast, slow = Rt(), Fast(), Slow()
+    rt.clients = {slow: "t", fast: "t"}
+    t0 = time.monotonic()
+    asyncio.run(appmod.broadcast(rt, Acc(), {"x": 1}))
+    assert time.monotonic() - t0 < 2 and fast.sent == [{"x": 1}]
+    assert slow not in rt.clients and fast in rt.clients

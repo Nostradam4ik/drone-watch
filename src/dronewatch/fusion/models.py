@@ -26,10 +26,13 @@ class Sensor:
         self.name = name
         self.kind = kind
         self.label = label  # фізичний тип: radar / rf / acoustic
+        self.type_id = label  # модель з палітри (sim.SENSOR_TYPES), напр. radar-short; за замовчуванням збігається з label
         self.pos = np.asarray(pos, float)
         self.sigma = np.asarray(sigma, float)
         self.pd = pd
         self.max_range = max_range
+        self.heading = np.pi / 2    # куди дивиться датчик, рад, у системі азимута (схід = 0, проти годинникової); за замовчуванням північ
+        self.fov = 2 * np.pi        # ширина сектора огляду по азимуту, рад; 2π = круговий огляд
         self.clutter_rate = clutter_rate  # середня кількість хибних детекцій за скан
         self.R = np.diag(self.sigma ** 2)
         self.dim = 3 if kind == "radar" else 1
@@ -37,6 +40,13 @@ class Sensor:
         self.latency_comp = 0.0             # затримка, яку трекер знає і компенсує, с
         self.bias = np.zeros(self.dim)      # справжня систематична похибка (знає лише симулятор), на відміну від bias_est
         self.latency = 0.0                  # справжня затримка датчика (знає лише симулятор), на відміну від latency_comp
+
+    def in_fov(self, p: ArrayLike) -> bool:
+        """Чи потрапляє точка (за горизонтальним напрямком) у сектор огляду датчика. Дальність тут не перевіряється."""
+        if self.fov >= 2 * np.pi - 1e-9:
+            return True
+        d = np.asarray(p, float)[:2] - self.pos[:2]
+        return bool(abs(wrap(float(np.arctan2(d[1], d[0])) - self.heading)) <= self.fov / 2)
 
     def h(self, x: Floats) -> Floats:
         d = x[:3] - self.latency_comp * x[3:6] - self.pos  # де ціль була в момент вимірювання

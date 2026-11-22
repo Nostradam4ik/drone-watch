@@ -1,5 +1,6 @@
 # Запуск:  docker compose up --build
 # З емулятором датчиків:  docker compose --profile demo-sensors up --build
+# З AI-асистентом (Mistral + Qdrant):  MISTRAL_API_KEY=ваш_ключ docker compose --profile demo-sensors --profile ai up --build
 # Дашборд: https://localhost:8000     Брокер MQTT: localhost:8883 (лише TLS), топіки dronewatch/events/<sensor_id>
 #
 # Обидва порти прив'язані до 127.0.0.1 й обслуговують лише TLS: відкритих HTTP/MQTT-слухачів немає. Події датчиків вимагають
@@ -62,8 +63,11 @@ services:
       MQTT_CA_CERT: /certs/ca.crt      # з цим CA сервіс перевіряє сертифікат і ім'я хоста брокера
       MQTT_USER: dronewatch-service
       MQTT_PASSWORD: "8DgvEHMEllwyXmx4bD_eWc0NOTz690ll"   # ДЕМО-пароль (хеш у deploy/mosquitto.passwd)
+      MISTRAL_API_KEY: ${MISTRAL_API_KEY:-}   # свій, справжній ключ — ніколи не комітиться. Без нього AI-асистент
+                                               # просто вимкнений (ai.enabled у deploy/config.yaml не стартує сервіс примусово)
     volumes:
       - ./deploy/config.yaml:/config/config.yaml:ro
+      - ./data/map:/app/data/map:ro   # оффлайн-карта (dronewatch-mapbuild); без файлу дашборд працює без підкладки, без зовнішніх запитів
       - incidents:/data          # журнал тривог переживає перезапуск
       - certs-ca:/certs:ro       # лише публічний ca.crt
       - certs-http:/tls:ro       # сертифікат і ключ сервісу: лише він їх бачить
@@ -71,6 +75,33 @@ services:
       certs: {condition: service_completed_successfully}
       mosquitto: {condition: service_healthy}
     restart: unless-stopped
+
+  sandbox:                        # лише з профілем sandbox: демо-режим із розстановкою датчиків мишею, https://localhost:8001
+    profiles: ["sandbox"]
+    build: {context: ., dockerfile: docker/service.Dockerfile}
+    ports: ["127.0.0.1:8001:8000"]
+    environment:
+      CONFIG: /config/config.demo.yaml
+      TLS_CERT_FILE: /tls/http.crt     # той самий HTTPS, що й у основного сервісу: відкритого HTTP тут теж нема
+      TLS_KEY_FILE: /tls/http.key
+      TLS_CA_FILE: /certs/ca.crt
+      DB_PATH: /tmp/sandbox.db         # журнал демо-сеансу не змішується з журналом основного сервісу
+    volumes:
+      - ./deploy/config.demo.yaml:/config/config.demo.yaml:ro
+      - ./data/map:/app/data/map:ro
+      - certs-ca:/certs:ro
+      - certs-http:/tls:ro
+    depends_on:
+      certs: {condition: service_completed_successfully}
+    restart: unless-stopped
+
+  qdrant:                         # лише з профілем ai: векторне сховище минулих інцидентів для AI-асистента
+    profiles: ["ai"]
+    image: qdrant/qdrant:v1.18.0
+    volumes:
+      - qdrant-data:/qdrant/storage
+    restart: unless-stopped
+    # без published-порту: лише сервіс docker-compose мережі звертається до qdrant:6333, ззовні не видно
 
   emulator:                      # лише з профілем demo-sensors
     profiles: ["demo-sensors"]
@@ -90,3 +121,4 @@ volumes:
   certs-ca:
   certs-server:
   certs-http:
+  qdrant-data:

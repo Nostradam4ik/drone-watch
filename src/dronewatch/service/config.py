@@ -59,6 +59,8 @@ class SensorCfg(BaseModel):
     type: Literal["radar", "rf", "acoustic"]
     position: list[float] = Field(description="[east_m, north_m] відносно початку координат об'єкта")
     max_range: float = Field(gt=0)
+    heading_deg: float = Field(default=0.0, ge=0, lt=360, description="куди дивиться датчик, компасні градуси (північ = 0); для секторних")
+    fov_deg: float = Field(default=360.0, gt=0, le=360, description="ширина сектора огляду по азимуту; 360 = круговий огляд")
     noise: Noise = Noise()
     latency_s: float = Field(default=0.0, ge=0)
     bias: Bias = Bias()
@@ -97,6 +99,16 @@ class AlertsCfg(BaseModel):
     max_coast_scans: int = Field(default=2, ge=0)
 
 
+class AiCfg(BaseModel):
+    """AI-асистент оператора (RAG + tool-calling чат). enabled: true лише вмикає намір; якщо MISTRAL_API_KEY
+    не задано в оточенні, сервіс все одно стартує, а /api/ai/ask чесно каже, що AI недоступний."""
+    enabled: bool = False
+    model: str = "mistral-small-latest"
+    embedding_model: str = "mistral-embed"
+    qdrant_url: str = "http://localhost:6333"
+    max_tool_iterations: int = Field(default=4, ge=1, le=10)
+
+
 class MqttCfg(BaseModel):
     host: str
     port: int = Field(default=1883, ge=1, le=65535)   # з TLS брокер зазвичай слухає 8883
@@ -105,6 +117,19 @@ class MqttCfg(BaseModel):
     password: str | None = None
     tls: bool = False                         # шифрувати зʼєднання; сертифікат і ім'я хоста перевіряються завжди
     ca_cert: str | None = None                # довіряти лише цьому CA (PEM); задання ca_cert вмикає TLS
+
+
+class OriginCfg(BaseModel):
+    """Де на карті світу лежить точка (0, 0) системи координат датчиків (схід, північ у метрах). Лише для показу на карті."""
+    lat: float = Field(default=48.8584, ge=-90, le=90)    # за замовчуванням Ейфелева вежа
+    lon: float = Field(default=2.2945, ge=-180, le=180)
+
+
+class MapCfg(BaseModel):
+    """Підкладка карти дашборда. За замовчуванням ЛИШЕ власний файл (dronewatch-mapbuild): тайли з чужого сервера видають
+    йому, яку ділянку розглядає оператор, тому онлайн-тайли вмикаються свідомо (online_tiles: true) і лише без файлу."""
+    pmtiles: str = "data/map/paris.pmtiles"   # шлях відносно робочої теки сервісу
+    online_tiles: bool = False
 
 
 class Config(BaseModel):
@@ -117,10 +142,13 @@ class Config(BaseModel):
     sensor_timeout_s: float = Field(default=5.0, gt=0)   # тиша датчика довше за це = відмова (потрібен heartbeat від датчика)
     sensors: list[SensorCfg] = []
     zones: list[ZoneCfg] = []
+    origin: OriginCfg = OriginCfg()
+    map: MapCfg = MapCfg()
     alerts: AlertsCfg = AlertsCfg()
     mqtt: MqttCfg | None = None
     auth: AuthCfg = AuthCfg()
     dashboard: DashboardCfg = DashboardCfg()
+    ai: AiCfg = AiCfg()
 
     @model_validator(mode="after")
     def _check(self) -> Self:
@@ -180,6 +208,8 @@ def build_sensors(cfg: Config) -> list[Sensor]:
             s.bias_est = np.array([-math.radians(sc.bias.azimuth_deg)])
         s.latency = sc.latency_s
         s.latency_comp = sc.latency_s   # затримку вважаємо відомою (синхронізація годинників)
+        s.fov = math.radians(sc.fov_deg)
+        s.heading = math.radians(90.0 - sc.heading_deg)   # компас -> математичний кут
         sensors.append(s)
     return sensors
 
