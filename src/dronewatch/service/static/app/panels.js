@@ -74,6 +74,7 @@ const noteDraft = {};   // id тривоги -> незавершений ком�
 function reviewHtml(a) {
   const done = a.status !== "new";
   const tip = done ? `${REVIEW_UA[a.status]} · ${esc(a.reviewed_by || "")} · ${new Date(a.reviewed_at * 1000).toLocaleString()}${a.review_note ? " · " + esc(a.review_note) : ""}` : "";
+  if (!can("operator")) return `<span class="rv" data-id="${a.id}">${done ? `<span class="st" title="${tip}">${a.status === "confirmed" ? "✓" : "✕"} ${REVIEW_UA[a.status]}</span>` : ""}</span>`;
   return `<span class="rv" data-id="${a.id}">` +
     (done ? `<span class="st" title="${tip}">${a.status === "confirmed" ? "✓" : "✕"} ${REVIEW_UA[a.status]}</span>` : "") +
     `<button type="button" data-review="confirmed" class="${a.status === "confirmed" ? "on" : ""}">✓ Підтвердити</button>` +
@@ -96,6 +97,7 @@ async function sendReview(id, status) {
   try {
     const r = await fetch(`/api/incidents/${id}/review`, { method: "POST", credentials: "same-origin",
       headers: { "Content-Type": "application/json" }, body: JSON.stringify({ status, note: noteDraft[id] || null }) });
+    if (r.status === 403) { toast({ level: "WARNING", text: "Недостатньо прав" }); return; }
     if (!r.ok) throw new Error("HTTP " + r.status);
     delete noteDraft[id];   // новий стан прийде з наступним скан-повідомленням
     if (document.activeElement && document.activeElement.matches("input[data-note]")) document.activeElement.blur();   // інакше картка не перебудується

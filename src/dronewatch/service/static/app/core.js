@@ -13,6 +13,11 @@ const SENSOR_UA = { OK: "справний", WAITING: "очікуємо", LOST: "
 const sensorState = id => ((state && state.sensors || []).find(s => s.id === id) || {}).state;
 let cfg = null, state = null, selected = null, trails = new Map(), seenAlerts = new Set(), firstMsg = true, lastTbody = null, lastAlerts = null;
 let map = null, popup = null;
+// Роль користувача з /api/me. Лише для показу: сервер усе одно відхиляє заборонені запити (403), UI ховає недоступне.
+const ROLE_UA = { viewer: "перегляд", operator: "оператор", admin: "адмін" };
+const ROLE_RANK = { viewer: 0, operator: 1, admin: 2 };
+let me = null;
+const can = role => (ROLE_RANK[me && me.role] ?? -1) >= ROLE_RANK[role];
 
 function esc(s) { return String(s).replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c])); }
 

@@ -362,7 +362,7 @@ def vendor(name: str) -> Response:   # бібліотеки віддаємо с�
 
 # Код і стилі самого дашборда. Порядок <script> в index.html важливий (звичайні скрипти зі спільними змінними, не модулі).
 APP_FILES = {"dashboard.css": "text/css", **{f"{n}.js": "text/javascript" for n in
-             ("core", "map", "viewer3d", "dossier", "panels", "sound", "editor", "main")}}
+             ("core", "map", "viewer3d", "dossier", "panels", "sound", "editor", "audit", "main")}}
 
 
 @app.get("/static/app/{name}", include_in_schema=False)
