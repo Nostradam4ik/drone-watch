@@ -214,6 +214,34 @@ def test_page_loads_and_shows_live_tracks_from_the_real_websocket(server, browse
     assert not errors, "\n".join(errors)
 
 
+def test_sensor_height_is_edited_and_saved_with_the_layout(server, browser):
+    ctx = browser.new_context()
+    page = ctx.new_page()
+    errors = watch_errors(page)
+    assert sign_in(page, server["base"], "admin") == 200
+    page.goto(server["base"] + "/")
+    expect(page.locator("#sensors .sensor").first).to_be_visible(timeout=20_000)
+    page.locator("#edit-sensors").click()
+    field = page.locator("#sensors input[data-h]").first
+    expect(field).to_be_visible()
+    sid = field.get_attribute("data-h")
+    with page.expect_request(lambda r: r.url.endswith("/api/layout") and r.method == "PUT") as req:
+        field.fill("15")
+        field.press("Enter")
+    body = json.loads(req.value.post_data or "{}")
+    assert {s["id"]: s["height"] for s in body["sensors"]}[sid] == 15, "висота йде в тілі PUT"
+    assert all("height" in s for s in body["sensors"])
+    expect(page.locator(f'#sensors input[data-h="{sid}"]')).to_have_value("15")
+    # ще раз збереження іншим способом не скидає висоту (регрес: редактор раніше не надсилав height взагалі)
+    page.locator("#edit-sensors").click()
+    assert {s["id"]: s["height"] for s in login_json(server["base"], "admin", "/api/config")["sensors"]}[sid] == 15
+    page.locator("#edit-sensors").click()
+    with page.expect_request(lambda r: r.url.endswith("/api/layout") and r.method == "DELETE"):
+        page.locator("#layout-reset").click()   # повертаємо вбудовані датчики: решта тестів модуля чекає демо-розстановку
+    ctx.close()
+    assert not errors, "\n".join(errors)
+
+
 def test_static_app_files_load_without_404(server, browser):
     ctx = browser.new_context()
     page = ctx.new_page()

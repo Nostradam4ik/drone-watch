@@ -160,10 +160,12 @@ export function renderCatalog() {
 }
 
 export function renderSensors(list) {
+  if (document.activeElement && document.activeElement.matches && document.activeElement.matches("input[data-h]")) return;   // не перемальовуємо, поки вводять висоту
   const kindName = s => { const c = S.cfg && S.cfg.sensors.find(x => x.id === s.id), t = c && typeInfo(c.type); return t ? t.name : (KIND_UA[s.label] || s.label); };
   document.getElementById("sensors").innerHTML = list.map(s =>
     `<div class="sensor ${s.state}"><i></i><span>${esc(s.id)} <span class="st">${esc(kindName(s))}${esc(specOf(s))}</span></span>` +
     `<span class="st">${SENSOR_UA[s.state]}${s.state === "LOST" && s.age_s != null ? " · " + Math.round(s.age_s) + " с" : ""}</span>` +
+    (S.editing ? `<label class="sensor-h" title="Висота над землею, м (дах, щогла): впливає на лінію видимості">↑<input type="number" min="0" max="300" step="1" data-h="${esc(s.id)}" value="${esc(String(((S.cfg && S.cfg.sensors.find(x => x.id === s.id)) || {}).height || 0))}" aria-label="Висота датчика ${esc(s.id)}, м"> м</label>` : "") +
     (S.editing ? `<button class="del" type="button" data-del="${esc(s.id)}" title="Прибрати датчик" aria-label="Прибрати датчик ${esc(s.id)}">×</button>` : "") + `</div>` +
     (openSensors.has(s.id) ? `<div class="sensor-spec">${(() => { const c = S.cfg && S.cfg.sensors.find(x => x.id === s.id); return c ? ownSpecHtml(c) : ""; })()}</div>` : "")).join("");
   const lost = list.filter(s => s.state === "LOST"), ok = list.filter(s => s.state === "OK").length;

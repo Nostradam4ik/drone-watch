@@ -45,15 +45,15 @@ function clearCoverage() {
 
 export function scheduleCoverage() {
   if (!document.getElementById("cov-on").checked || !S.cfg || S.replay) return;
-  const sig = JSON.stringify(S.cfg.sensors.map(s => [s.id, s.type, s.pos, s.heading_deg]));
+  const sig = JSON.stringify(S.cfg.sensors.map(s => [s.id, s.type, s.pos, s.heading_deg, s.height]));
   if (sig === covSig || covTimer) return;   // розстановка та сама, або запит уже заплановано (піде з найновішою)
   covTimer = setTimeout(runCoverage, 120);
 }
 
 async function runCoverage() {
   covTimer = null;
-  const my = ++covSeq, sig = JSON.stringify(S.cfg.sensors.map(s => [s.id, s.type, s.pos, s.heading_deg]));
-  const body = { sensors: S.cfg.sensors.map(s => ({ id: s.id, type: s.type, x: round1(s.pos[0]), y: round1(s.pos[1]), heading: (s.heading_deg || 0) % 360 })) };
+  const my = ++covSeq, sig = JSON.stringify(S.cfg.sensors.map(s => [s.id, s.type, s.pos, s.heading_deg, s.height]));
+  const body = layoutBody();
   try {
     const r = S.editing   // у редакторі рахуємо розстановку, що ще тягнеться; поза ним беремо поточні датчики рушія (працює й у бойовому режимі)
       ? await fetch("/api/coverage", { method: "POST", credentials: "same-origin", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) })
@@ -140,9 +140,23 @@ export async function reloadConfig() {
   if (S.editing) renderPalette();
 }
 
+// Тіло PUT /api/layout і POST /api/coverage: висота йде разом з рештою, інакше збереження скинуло б її в нуль
+function layoutBody() {
+  return { sensors: S.cfg.sensors.map(s => ({ id: s.id, type: s.type, x: round1(s.pos[0]), y: round1(s.pos[1]),
+                                              heading: (s.heading_deg || 0) % 360, height: s.height || 0 })) };
+}
+
+export function setSensorHeight(id, value) {
+  const s = S.cfg.sensors.find(x => x.id === id); if (!s) return;
+  const h = Math.min(300, Math.max(0, Number.isFinite(value) ? round1(value) : 0));
+  if (h === (s.height || 0)) return;
+  s.height = h;
+  scheduleCoverage(); commitLayout();
+}
+
 function commitLayout() {
   layoutChain = layoutChain.then(async () => {
-    const body = { sensors: S.cfg.sensors.map(s => ({ id: s.id, type: s.type, x: round1(s.pos[0]), y: round1(s.pos[1]), heading: (s.heading_deg || 0) % 360 })) };
+    const body = layoutBody();
     try {
       const r = await fetch("/api/layout", { method: "PUT", credentials: "same-origin", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
       if (r.status === 401) { location.replace("/login"); return; }
@@ -168,7 +182,7 @@ export function addSensor(lngLat) {
   const cz = S.cfg.zones.length ? [S.cfg.zones.reduce((a, z) => a + z.center[0], 0) / S.cfg.zones.length, S.cfg.zones.reduce((a, z) => a + z.center[1], 0) / S.cfg.zones.length] : [0, 0];
   const heading = Math.hypot(cz[0] - x, cz[1] - y) < 10 ? 0 : round1((Math.atan2(cz[0] - x, cz[1] - y) * 180 / Math.PI + 360) % 360);
   S.cfg.sensors.push({ id: prefix + n, type: info.id, kind: info.label === "radar" ? "radar" : "bearing", label: info.label, pos: [x, y],
-                     max_range: info.max_range, fov_deg: info.fov_deg, heading_deg: heading, sigma: info.sigma, pd: info.pd });
+                     max_range: info.max_range, fov_deg: info.fov_deg, heading_deg: heading, height: 0, sigma: info.sigma, pd: info.pd });
   pushSensors(); previewZones(); commitLayout();
 }
 
@@ -246,7 +260,7 @@ document.getElementById("palette").addEventListener("click", e => {
   S.tool = b.dataset.tool || null; renderPalette();
 });
 document.getElementById("sensors").addEventListener("click", e => {
-  if (e.target.closest("a")) return;   // посилання на джерело в описі не згортає опис
+  if (e.target.closest("a") || e.target.closest(".sensor-h")) return;   // посилання в описі й поле висоти не згортають опис
   const row = e.target.closest(".sensor");
   if (row && !e.target.closest("button[data-del]")) {   // клік по датчику розгортає його опис
     const id = row.querySelector("span").firstChild.textContent.trim();
@@ -257,6 +271,12 @@ document.getElementById("sensors").addEventListener("click", e => {
   const b = e.target.closest("button[data-del]"); if (!b || !S.editing) return;
   S.cfg.sensors = S.cfg.sensors.filter(s => s.id !== b.dataset.del);
   pushSensors(); previewZones(); commitLayout();
+});
+document.getElementById("sensors").addEventListener("change", e => {
+  const inp = e.target.closest("input[data-h]"); if (!inp || !S.editing) return;
+  setSensorHeight(inp.dataset.h, inp.valueAsNumber);
+  inp.blur();   // після blur renderSensors знову малює список, уже з прийнятим (обрізаним до 0..300) значенням
+  renderSensors(S.state ? S.state.sensors || [] : []);
 });
 document.getElementById("layout-reset").addEventListener("click", () => {
   layoutChain = layoutChain.then(async () => {
