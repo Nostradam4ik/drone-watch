@@ -446,3 +446,27 @@ def test_demo_without_users_is_view_only(caplog, tmp_path, monkeypatch):
     c = TestClient(app.app, raise_server_exceptions=False)
     assert c.get("/api/me").json()["role"] == "viewer"
     assert c.put("/api/layout", json=LAYOUT).status_code == 403
+
+
+# ---------- audit у /api/health ----------
+def test_health_reports_audit_status_only_when_logged_in(login_client):
+    rt = login_client.app.state.runtime
+    rt.audit_status = app.check_audit_chain(rt)
+    assert rt.audit_status is not None and rt.audit_status.ok
+    assert "audit" not in login_client.get("/api/health").json()
+    login_as(login_client, "admin")
+    audit = login_client.get("/api/health").json()["audit"]
+    assert audit == {"ok": True, "rows": 0, "broken_at": None}
+
+
+def test_broken_chain_is_reported_but_service_runs(login_client, caplog):
+    rt = login_client.app.state.runtime
+    _audit(login_client).append(app.AuditEntry("a", "admin", "login", "", "ok", "1.1.1.1"))
+    rt.engine.db.execute("DROP TRIGGER audit_no_update")
+    rt.engine.db.execute("UPDATE audit_log SET ip='x' WHERE id=1")
+    rt.engine.db.commit()
+    with caplog.at_level("ERROR"):
+        rt.audit_status = app.check_audit_chain(rt)
+    assert "ПОШКОДЖЕНО" in caplog.text
+    login_as(login_client, "admin")
+    assert login_client.get("/api/health").json()["audit"] == {"ok": False, "rows": 1, "broken_at": 1}

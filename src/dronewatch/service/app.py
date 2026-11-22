@@ -30,7 +30,7 @@ from dronewatch.service.ai import agent
 from dronewatch.service.ai.errors import AiUnavailable
 from dronewatch.service.ai.llm import MistralClient
 from dronewatch.service.ai.rag import IncidentIndex
-from dronewatch.service.audit import AuditEntry, AuditError
+from dronewatch.service.audit import AuditEntry, AuditError, VerifyResult
 from dronewatch.service.auth import SensorAuth
 from dronewatch.service.dashboard_auth import LoginLimiter, SessionStore, UserEntry, Users, has_role
 from dronewatch.service.dashboard_web import (
@@ -111,6 +111,7 @@ class Runtime:
     ai_tasks: set[asyncio.Task[None]] = field(default_factory=set)   # живі посилання на фонові задачі AI-індексації
     map_file: Path | None = None   # власний PMTiles карти, якщо файл є на диску
     map_online: bool = False       # дозвіл на онлайн-тайли (лише коли власного файлу немає)
+    audit_status: VerifyResult | None = None   # результат перевірки ланцюжка журналу дій при старті (None: не перевірялось)
 
 
 def get_runtime(conn: HTTPConnection) -> Runtime:
@@ -187,6 +188,21 @@ def build_runtime(cfg: config.Config) -> Runtime:
                    map_file=map_file if map_file.is_file() else None, map_online=cfg.map.online_tiles)
 
 
+def check_audit_chain(rt: Runtime) -> VerifyResult | None:
+    """Одноразова перевірка ланцюжка при старті (до ingest, тож замок рушія нікого не стопорить). Пошкоджений журнал не
+    зупиняє сервіс: захист від дронів важливіший, але ERROR у лозі й audit.ok=false у health це видно."""
+    try:
+        res = rt.engine.audit.verify()
+    except Exception:   # будь-який збій читання журналу не має валити старт
+        log.exception("журнал дій: не вдалося перевірити ланцюжок")
+        return None
+    if res.ok:
+        log.info("журнал дій: %d записів, head=%s", res.rows, res.head)
+    else:
+        log.error("журнал дій ПОШКОДЖЕНО з запису id=%d", res.broken_at)
+    return res
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # Без цього Python показує лише WARNING і вище, а журнал входів оператора (INFO) не було б видно.
@@ -194,6 +210,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     cfg = config.load(os.environ.get("CONFIG", BASE / "config.yaml"))
     runtime = build_runtime(cfg)
+    runtime.audit_status = check_audit_chain(runtime)
     if runtime.mqtt:
         runtime.mqtt.start()
     app.state.runtime = runtime
@@ -471,7 +488,9 @@ def health(user: Annotated[str | None, Depends(current_user)], rt: RuntimeDep) -
             "mode": "demo" if rt.demo else "live", "scans": rt.engine.stats["scans"],
             "scan": {"errors": sh.errors, "consecutive_errors": sh.consecutive, "last_error": sh.last_error,
                      "last_ok_age_s": round(now - sh.last_ok, 1) if sh.last_ok is not None else None},
-            "mqtt": rt.mqtt.status() if rt.mqtt else None}
+            "mqtt": rt.mqtt.status() if rt.mqtt else None,
+            "audit": ({"ok": rt.audit_status.ok, "rows": rt.audit_status.rows, "broken_at": rt.audit_status.broken_at}
+                      if rt.audit_status else None)}   # результат старту, не перевірка зараз: verify() тримає замок рушія
     return body if scanning else JSONResponse(body, status_code=503)
 
 

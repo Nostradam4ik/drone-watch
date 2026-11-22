@@ -97,3 +97,53 @@ def test_append_wraps_non_sqlite_errors_into_audit_error():
     log._clock = Mock(side_effect=RuntimeError("boom"))
     with pytest.raises(AuditError):
         log.append(E)
+
+
+# ---------- dronewatch-audit --verify ----------
+def _db_file(tmp_path, n=2):
+    path = tmp_path / "i.db"
+    db = sqlite3.connect(path)
+    log = AuditLog(db, threading.Lock())
+    for _ in range(n):
+        log.append(AuditEntry("alice", "admin", "login", "", "ok", "1.2.3.4"))
+    db.close()
+    return path
+
+
+def test_cli_verify_ok_and_broken(tmp_path, capsys):
+    from dronewatch.service import audit_cli
+    path = _db_file(tmp_path)
+    assert audit_cli.main(["--verify", "--db", str(path)]) == 0 and "OK: 2" in capsys.readouterr().out
+    db = sqlite3.connect(path)
+    db.execute("DROP TRIGGER audit_no_update")
+    db.execute("UPDATE audit_log SET ip='x' WHERE id=1")
+    db.commit()
+    db.close()
+    assert audit_cli.main(["--verify", "--db", str(path)]) == 1 and "id=1" in capsys.readouterr().out
+
+
+def test_cli_missing_db(tmp_path):
+    from dronewatch.service import audit_cli
+    assert audit_cli.main(["--verify", "--db", str(tmp_path / "none.db")]) == 2
+
+
+def test_cli_db_without_audit_table_is_exit_2(tmp_path, capsys):
+    from dronewatch.service import audit_cli
+    path = tmp_path / "empty.db"
+    sqlite3.connect(path).close()
+    assert audit_cli.main(["--verify", "--db", str(path)]) == 2
+    assert path.stat().st_size == 0, "CLI не створює таблиць"
+
+
+def test_cli_does_not_modify_db(tmp_path):
+    from dronewatch.service import audit_cli
+    path = _db_file(tmp_path)
+    before = path.read_bytes()
+    audit_cli.main(["--verify", "--db", str(path)])
+    assert path.read_bytes() == before
+
+
+def test_create_false_makes_no_tables():
+    db = sqlite3.connect(":memory:")
+    AuditLog(db, threading.Lock(), create=False)
+    assert db.execute("SELECT count(*) FROM sqlite_master").fetchone()[0] == 0

@@ -54,10 +54,14 @@ def _digest(prev_hash: str, ts: float, user: str, role: str, action: str, target
 
 
 class AuditLog:
-    def __init__(self, db: sqlite3.Connection, lock: threading.Lock, clock: Callable[[], float] = time.time) -> None:
+    def __init__(self, db: sqlite3.Connection, lock: threading.Lock, clock: Callable[[], float] = time.time,
+                 create: bool = True) -> None:
+        """create=False: лише читання готової БД (CLI перевірки), нічого не створює й не пише."""
         self._db, self._lock, self._clock = db, lock, clock
         self._blocked: dict[str, float] = {}
         self._blocked_lock = threading.Lock()
+        if not create:
+            return
         db.execute("""CREATE TABLE IF NOT EXISTS audit_log (
             id INTEGER PRIMARY KEY AUTOINCREMENT, ts REAL, user TEXT, role TEXT, action TEXT, target TEXT,
             result TEXT, ip TEXT, prev_hash TEXT, hash TEXT)""")
