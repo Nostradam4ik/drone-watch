@@ -77,7 +77,7 @@ def test_stats_add_up_and_cell_count_stays_bounded_for_a_huge_zone():
 @pytest.fixture
 def client(tmp_path, monkeypatch):
     monkeypatch.setenv("DB_PATH", str(tmp_path / "t.db"))
-    app.state.runtime = build_runtime(config.Config(mode="demo", map=config.MapCfg(buildings=str(tmp_path / "none.npz"))))   # без будинків: тест не залежить від локального data/map/buildings.npz
+    app.state.runtime = build_runtime(config.Config(mode="demo", map=config.MapCfg(buildings=str(tmp_path / "none.npz"), dem=str(tmp_path / "none2.npz"))))   # без будинків і рельєфу: тест не залежить від локальних файлів у data/map
     app.state.access = DashboardAccess()   # вхід вимкнено: анонім лише viewer, тож редагувати розкладку входимо як admin
     client = TestClient(app)
     login_as(client, "admin")
@@ -122,7 +122,7 @@ def test_live_sensors_from_a_config_get_coverage_over_the_configured_zones():
 
 def test_coverage_endpoint_says_it_ignores_buildings_without_a_buildings_file(client):
     r = client.post("/api/coverage", json={"sensors": [{"id": "r1", "type": "radar-short", "x": 0, "y": 0}]}).json()
-    assert r["los"] is False and r["target_alt_m"] == 30.0
+    assert r["los"] is False and r["buildings"] is False and r["terrain"] is False and r["target_alt_m"] == 30.0
 
 
 def test_coverage_endpoint_uses_buildings_and_sensor_height_when_the_file_exists(tmp_path, monkeypatch):
@@ -133,7 +133,7 @@ def test_coverage_endpoint_uses_buildings_and_sensor_height_when_the_file_exists
                      [lon0 + 120 * dlon, lat0 + 200 * dlat], [lon0 + 100 * dlon, lat0 + 200 * dlat]])
     np.savez(tmp_path / "b.npz", lonlat=wall, starts=np.array([0, 4]), height=np.array([40], np.float32), min_height=np.zeros(1, np.float32))
     monkeypatch.setenv("DB_PATH", str(tmp_path / "t.db"))
-    app.state.runtime = build_runtime(config.Config(mode="demo", map=config.MapCfg(buildings=str(tmp_path / "b.npz"))))
+    app.state.runtime = build_runtime(config.Config(mode="demo", map=config.MapCfg(buildings=str(tmp_path / "b.npz"), dem=str(tmp_path / "none.npz"))))
     app.state.access = DashboardAccess()
     c = TestClient(app)
     login_as(c, "admin")

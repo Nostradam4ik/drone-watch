@@ -7,7 +7,8 @@ import pytest
 from dronewatch.fusion.sim import make_sensor
 from dronewatch.service.buildings_build import polygon_rings, tile_buildings
 from dronewatch.service.coverage import BLIND, GOOD, coverage
-from dronewatch.service.occlusion import Buildings
+from dronewatch.service.occlusion import Buildings, LineOfSight
+from dronewatch.service.terrain import TILE, Terrain
 
 
 def box_buildings(*boxes: tuple[float, float, float, float, float], min_height: float = 0.0) -> Buildings:
@@ -25,7 +26,7 @@ WALL = (100, -50, 120, 50, 40)   # 20 м завширшки, 100 м у довж�
 
 
 def vis(b: Buildings, sensor, x, y, alt=30.0) -> bool:
-    return bool(b.visible(np.array(sensor, float), np.array([float(x)]), np.array([float(y)]), alt)[0])
+    return bool(LineOfSight(b).visible(np.array(sensor, float), np.array([float(x)]), np.array([float(y)]), alt)[0])
 
 
 def test_a_tall_building_between_sensor_and_target_blocks_the_view():
@@ -72,7 +73,7 @@ def test_too_large_a_window_fails_closed():
 def test_coverage_marks_cells_behind_a_wall_as_blind_and_reports_los():
     radar = make_sensor("radar-mid", "r1", 0, 0)
     free = coverage([radar])
-    walled = coverage([radar], None, box_buildings((100, -200, 120, 200, 200)))   # стіна 200 м завтовшки по висоті, довга
+    walled = coverage([radar], None, LineOfSight(box_buildings((100, -200, 120, 200, 200))))   # стіна 200 м завтовшки по висоті, довга
     assert free["los"] is False and walled["los"] is True
     assert free["stats"]["good"] == 100.0 and walled["stats"]["blind"] > 10
     s = walled["cell"]
@@ -83,7 +84,7 @@ def test_coverage_marks_cells_behind_a_wall_as_blind_and_reports_los():
 
 
 def test_a_radar_on_a_mast_covers_what_a_ground_radar_loses():
-    wall = box_buildings((100, -200, 120, 200, 40))
+    wall = LineOfSight(box_buildings((100, -200, 120, 200, 40)))
     low = coverage([make_sensor("radar-mid", "r1", 0, 0)], None, wall)
     high = coverage([make_sensor("radar-mid", "r1", 0, 0, 0.0, 120.0)], None, wall)
     assert high["stats"]["good"] > low["stats"]["good"]
@@ -91,7 +92,7 @@ def test_a_radar_on_a_mast_covers_what_a_ground_radar_loses():
 
 def test_acoustic_sensor_is_not_occluded_by_buildings():
     """Звук огинає будинки, тож пеленговий акустичний датчик за стіною лишається зі слабким покриттям."""
-    wall = box_buildings((100, -400, 120, 400, 200))
+    wall = LineOfSight(box_buildings((100, -400, 120, 400, 200)))
     r = coverage([make_sensor("acoustic", "a1", 0, 0), make_sensor("acoustic", "a2", 0, 50)], None, wall)
     assert r["stats"]["weak"] > 0 and r["stats"]["blind"] == 0 and r["los"] is True
 
@@ -169,3 +170,89 @@ def test_polygon_rings_splits_on_moveto_and_closepath():
     cmds = [9, 0, 0, 18, 20, 0, 0, 20, 15, 9, 10, 10, 18, 4, 0, 0, 4, 15]   # два трикутники: MoveTo, 2 x LineTo, ClosePath
     rings = polygon_rings(cmds)
     assert [len(r) for r in rings] == [3, 3]
+
+
+# ---------- рельєф ----------
+ORIGIN = (48.8584, 2.2945)
+
+
+def make_terrain(height_at, zoom: int = 14, tiles: int = 2) -> Terrain:
+    """Рельєф із функції висоти height_at(схід, північ) у метрах: заповнюємо мозаїку з центром на ORIGIN."""
+    import math as m
+    n = 2 ** zoom
+    tx0 = int((ORIGIN[1] + 180) / 360 * n) - tiles // 2
+    ty0 = int((1 - m.asinh(m.tan(m.radians(ORIGIN[0]))) / m.pi) / 2 * n) - tiles // 2
+    side = tiles * TILE
+    t = Terrain(np.zeros((side, side), np.float32), zoom, (tx0, ty0), ORIGIN)
+    cols, rows = np.meshgrid(np.arange(side) + 0.5, np.arange(side) + 0.5)
+    lon = (cols + tx0 * TILE) / (n * TILE) * 360 - 180
+    lat = np.degrees(np.arctan(np.sinh(m.pi * (1 - 2 * (rows + ty0 * TILE) / (n * TILE)))))
+    x = (lon - ORIGIN[1]) * 111320 * m.cos(m.radians(ORIGIN[0]))
+    y = (lat - ORIGIN[0]) * 111320
+    t.elev = height_at(x, y).astype(np.float32)
+    return t
+
+
+def test_terrain_elevation_matches_the_surface_and_is_nan_outside_the_file():
+    t = make_terrain(lambda x, y: 100 + 0.05 * x)      # схил 5%
+    e = t.elevation(np.array([0.0, 200.0, -150.0]), np.array([0.0, 50.0, -80.0]))
+    assert e == pytest.approx([100, 110, 92.5], abs=0.5)
+    assert np.isnan(t.elevation(np.array([20_000.0]), np.array([0.0]))[0])
+
+
+def hill(x, y):
+    return 100 + 60 * np.exp(-(((x - 150) / 40) ** 2 + (y / 200) ** 2))   # пагорб 60 м на сході, за 150 м
+
+
+def test_a_hill_between_sensor_and_target_blocks_the_view_and_a_mast_clears_it():
+    los = LineOfSight(terrain=make_terrain(hill))
+    ray = lambda sz, x, y, alt=10.0: bool(los.visible(np.array([0.0, 0.0, sz]), np.array([x]), np.array([y]), alt)[0])  # noqa: E731
+    assert not ray(0, 300, 0)          # за пагорбом, датчик на землі
+    assert ray(0, -300, 0)             # у протилежний бік рівнина
+    assert ray(0, 300, 900)            # промінь проходить далеко збоку від пагорба
+    assert ray(120, 300, 0, 40.0)      # щогла 120 м і ціль 40 м над землею: промінь над вершиною
+    assert not ray(10, 300, 0, 10.0)
+
+
+def test_sensor_on_the_hilltop_sees_down_the_slopes():
+    los = LineOfSight(terrain=make_terrain(hill))
+    assert bool(los.visible(np.array([150.0, 0.0, 3.0]), np.array([-200.0, 400.0]), np.array([0.0, 0.0]), 10.0).all())
+
+
+def test_outside_the_terrain_file_nothing_is_promised():
+    los = LineOfSight(terrain=make_terrain(lambda x, y: 100 + 0 * x))
+    assert not los.visible(np.array([0.0, 0.0, 5.0]), np.array([20_000.0]), np.array([0.0]), 30.0)[0]      # ціль поза файлом
+    assert not los.visible(np.array([30_000.0, 0.0, 5.0]), np.array([0.0]), np.array([0.0]), 30.0).any()   # датчик поза файлом
+
+
+def test_buildings_stand_on_the_terrain_not_at_sea_level():
+    """Та сама стіна 40 м і те саме висотне положення датчика й цілі над землею, але земля піднімається до стіни й за нею:
+    дах і ціль піднялися разом із землею, а датчик лишився внизу, тож промінь, що на рівнині йшов над дахом, тепер упирається в нього."""
+    wall = box_buildings(WALL)
+
+    def ray(los):
+        return bool(los.visible(np.array([0.0, 0.0, 60.0]), np.array([200.0]), np.array([0.0]), 30.0)[0])
+    assert ray(LineOfSight(wall, make_terrain(lambda x, y: 100 + 0 * x)))                        # рівнина: промінь над дахом
+    assert not ray(LineOfSight(wall, make_terrain(lambda x, y: 100 + 0.2 * np.clip(x, 0, 150))))   # схил: уперся в дах
+    assert ray(LineOfSight(None, make_terrain(lambda x, y: 100 + 0.2 * np.clip(x, 0, 150))))      # той самий схил без будинків: видно
+
+
+def test_terrain_file_validation(tmp_path):
+    t = make_terrain(lambda x, y: 100 + 0 * x)
+    good = tmp_path / "d.npz"
+    np.savez(good, elev=t.elev, zoom=np.array([t.zoom]), tile0=np.array(t.tile0))
+    assert Terrain.load(good, ORIGIN).elev.shape == t.elev.shape
+    bad = tmp_path / "bad.npz"
+    np.savez(bad, elev=np.full((300, 300), 100.0, np.float32), zoom=np.array([14]), tile0=np.array([0, 0]))   # не кратно 256
+    with pytest.raises(ValueError, match="пошкоджений"):
+        Terrain.load(bad, ORIGIN)
+    wild = tmp_path / "wild.npz"
+    np.savez(wild, elev=np.full(t.elev.shape, 99999.0, np.float32), zoom=np.array([14]), tile0=np.array(t.tile0))
+    with pytest.raises(ValueError, match="діапазон"):
+        Terrain.load(wild, ORIGIN)
+
+
+def test_terrarium_decoding():
+    from dronewatch.service.dem_build import decode_terrarium
+    px = np.array([[[128, 0, 0], [128, 100, 128], [127, 255, 0]]], np.uint8)   # 0 м, 100,5 м, -1 м
+    assert decode_terrarium(px)[0] == pytest.approx([0.0, 100.5, -1.0])

@@ -1,7 +1,9 @@
-"""Лінія видимості між датчиком і ціллю з урахуванням будівель (для покриття буферної зони).
+"""Лінія видимості між датчиком і ціллю з урахуванням рельєфу й будівель (для покриття буферної зони).
 
 Модель свідомо проста й чесна щодо меж:
-- земля пласка, висоти (датчика, цілі, будинків) відлічуються від землі; рельєфу тут ще немає;
+- висоти датчика, цілі й будинків відлічуються від землі; без файлу рельєфу земля пласка, з ним (terrain.py) кожна точка має свою
+  висоту над рівнем моря, і промінь, що опинився нижче землі, закритий. Поза файлом рельєфу висота невідома: видимість закрита;
+- кривизна Землі й рефракція не враховані (на 2 км це ~0,3 м, на 5 км ~2 м: менше за похибку висот);
 - будинок суцільний від землі (або від min_height) до висоти height; двори ігноруються;
 - датчик, що стоїть усередині контуру будинку, вважається встановленим на цьому даху: власний будинок його не затуляє;
 - дроти, дерева й техніка не враховуються, тож це верхня межа видимості, а не гарантія.
@@ -16,6 +18,8 @@ from typing import Any
 
 import numpy as np
 from numpy.typing import NDArray
+
+from dronewatch.service.terrain import Terrain
 
 M_PER_DEG = 111320.0   # як у дашборді (map.js): ті самі метри на градус, щоб будинки й датчики лягали в одну сітку
 RES = 5.0              # розмір пікселя растра, м: вужчі за нього проходи між будинками вважаються закритими (це консервативно)
@@ -124,32 +128,6 @@ class Buildings:
         return [int(i) + 1 for i in near
                 if _inside(self.xy[self.starts[i]:self.starts[i + 1]], np.array([[x]]), np.array([[y]]))[0, 0]]
 
-    def visible(self, sensor: NDArray[np.float64], cx: NDArray[np.float64], cy: NDArray[np.float64],
-                target_alt: float) -> NDArray[np.bool_]:
-        """Для кожної точки (cx, cy) на висоті target_alt: чи бачить її датчик у sensor = (x, y, висота) повз будинки."""
-        n = len(cx)
-        out = np.ones(n, bool)
-        if n == 0:
-            return out
-        sx, sy, sz = float(sensor[0]), float(sensor[1]), float(sensor[2]) if len(sensor) > 2 else 0.0
-        pad = 2 * RES
-        try:
-            h, m, ids, gx0, gy0 = self.window((min(sx, float(cx.min())) - pad, min(sy, float(cy.min())) - pad,
-                                               max(sx, float(cx.max())) + pad, max(sy, float(cy.max())) + pad))
-        except ValueError:
-            return np.zeros(n, bool)   # ділянка завелика для растра: краще не обіцяти покриття, ніж пообіцяти зайве
-        own = np.array(self.containing(sx, sy) or [-1], np.int32)
-        steps = int(min(MAX_RAY_STEPS, math.ceil(float(np.hypot(cx - sx, cy - sy).max()) / RES) + 1))
-        t = (np.arange(1, steps) / steps)[None, :]
-        alt = sz + (target_alt - sz) * t
-        for a in range(0, n, CHUNK):
-            sl = slice(a, a + CHUNK)
-            gi = np.floor((sx + (cx[sl, None] - sx) * t - gx0) / RES).astype(int)
-            gj = np.floor((sy + (cy[sl, None] - sy) * t - gy0) / RES).astype(int)
-            hit = (h[gi, gj] > alt) & (m[gi, gj] <= alt) & ~np.isin(ids[gi, gj], own)
-            out[sl] = ~hit.any(axis=1)
-        return out
-
 
 def _inside(ring: F32, px: NDArray[np.floating[Any]], py: NDArray[np.floating[Any]]) -> NDArray[np.bool_]:
     """Парне-непарне правило: чи лежать точки сітки (px по рядках, py по стовпцях) усередині кільця."""
@@ -163,3 +141,58 @@ def _inside(ring: F32, px: NDArray[np.floating[Any]], py: NDArray[np.floating[An
         inside ^= cond & (px < xcross)
         j = i
     return inside
+
+
+class LineOfSight:
+    """Чи бачить датчик ціль: промінь не має зайти під землю (рельєф) і в будинок (будинки). Потрібне хоч одне з двох."""
+
+    def __init__(self, buildings: Buildings | None = None, terrain: Terrain | None = None) -> None:
+        if buildings is None and terrain is None:
+            raise ValueError("потрібні будинки чи рельєф")
+        self.buildings = buildings
+        self.terrain = terrain
+
+    def visible(self, sensor: NDArray[np.float64], cx: NDArray[np.float64], cy: NDArray[np.float64],
+                target_alt: float) -> NDArray[np.bool_]:
+        """Для кожної точки (cx, cy) на висоті target_alt над землею: чи бачить її датчик sensor = (x, y, висота над землею)."""
+        n = len(cx)
+        out = np.ones(n, bool)
+        if n == 0:
+            return out
+        sx, sy, sz = float(sensor[0]), float(sensor[1]), float(sensor[2]) if len(sensor) > 2 else 0.0
+        terrain, bld = self.terrain, self.buildings
+        gs, gt = 0.0, np.zeros(n)
+        if terrain is not None:
+            gs = float(terrain.elevation(np.array([sx]), np.array([sy]))[0])
+            gt = terrain.elevation(cx, cy)
+            if math.isnan(gs):
+                return np.zeros(n, bool)   # датчик поза файлом рельєфу: висоту землі не знаємо, покриття не обіцяємо
+            out &= ~np.isnan(gt)
+        h = m = ids = None
+        gx0 = gy0 = 0.0
+        own = np.array([-1], np.int32)
+        if bld is not None:
+            pad = 2 * RES
+            try:
+                h, m, ids, gx0, gy0 = bld.window((min(sx, float(cx.min())) - pad, min(sy, float(cy.min())) - pad,
+                                                  max(sx, float(cx.max())) + pad, max(sy, float(cy.max())) + pad))
+            except ValueError:
+                return np.zeros(n, bool)   # ділянка завелика для растра: краще не обіцяти покриття, ніж пообіцяти зайве
+            own = np.array(bld.containing(sx, sy) or [-1], np.int32)
+        steps = int(min(MAX_RAY_STEPS, math.ceil(float(np.hypot(cx - sx, cy - sy).max()) / RES) + 1))
+        t = (np.arange(1, steps) / steps)[None, :]
+        for a in range(0, n, CHUNK):
+            sl = slice(a, a + CHUNK)
+            px, py = sx + (cx[sl, None] - sx) * t, sy + (cy[sl, None] - sy) * t
+            alt = (gs + sz) + (gt[sl, None] + target_alt - gs - sz) * t   # висота променя над рівнем моря
+            ground = terrain.elevation(px, py) if terrain is not None else 0.0
+            hit = np.zeros(px.shape, bool)
+            if terrain is not None:
+                hit |= np.isnan(ground) | (ground > alt)
+            if bld is not None and h is not None and m is not None and ids is not None:
+                gi = np.floor((px - gx0) / RES).astype(int)
+                gj = np.floor((py - gy0) / RES).astype(int)
+                hh = h[gi, gj]
+                hit |= (hh > 0) & (ground + hh > alt) & (ground + m[gi, gj] <= alt) & ~np.isin(ids[gi, gj], own)
+            out[sl] &= ~hit.any(axis=1)
+        return out

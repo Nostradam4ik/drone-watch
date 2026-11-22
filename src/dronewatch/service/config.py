@@ -132,8 +132,10 @@ class MapCfg(BaseModel):
     йому, яку ділянку розглядає оператор, тому онлайн-тайли вмикаються свідомо (online_tiles: true) і лише без файлу."""
     pmtiles: str = "data/map/paris.pmtiles"   # шлях відносно робочої теки сервісу
     online_tiles: bool = False
-    # Контури будинків для лінії видимості в покритті (dronewatch-buildings). Немає файлу: покриття без будинків, і дашборд це каже.
+    # Для лінії видимості в покритті: контури будинків (dronewatch-buildings) і висоти рельєфу (dronewatch-dem). Немає файлу:
+    # покриття без нього, і дашборд це каже.
     buildings: str = "data/map/buildings.npz"
+    dem: str = "data/map/dem.npz"
     target_alt_m: float = Field(default=30.0, ge=0, le=500)   # висота цілі над землею, для якої рахується видимість
 
 
