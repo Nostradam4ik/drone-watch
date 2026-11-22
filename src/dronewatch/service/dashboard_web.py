@@ -11,6 +11,8 @@
 Проти підроблених запитів з інших сайтів: cookie `SameSite=Strict`, вхід лише `application/json` (форма з чужого сайту так не
 відправляє), заголовок `Origin`, якщо він є, має збігатися з хостом. Те саме для WebSocket (перевірка Origin при рукостисканні).
 """
+import contextlib
+import json
 import logging
 import math
 import os
@@ -26,7 +28,7 @@ from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, Resp
 from pydantic import BaseModel, ConfigDict, Field
 
 from dronewatch.service.audit import AuditEntry, AuditError
-from dronewatch.service.dashboard_auth import MAX_PASSWORD_LEN, LoginLimiter, Role, SessionStore, Users, has_role, limiter_key
+from dronewatch.service.dashboard_auth import MAX_PASSWORD_LEN, LimiterLike, Role, Session, SessionStoreLike, Users, has_role, limiter_key
 
 log = logging.getLogger("dronewatch.dashboard")
 STATIC = Path(__file__).resolve().parent / "static"
@@ -53,8 +55,8 @@ class Identity:
 class DashboardAccess:
     """Без аргументів автентифікація вимкнена (демо, розробка); з ними вхід обов'язковий."""
     users: Users | None = None
-    sessions: SessionStore | None = None
-    limiter: LoginLimiter | None = None
+    sessions: SessionStoreLike | None = None
+    limiter: LimiterLike | None = None
 
     @property
     def enabled(self) -> bool:
@@ -67,8 +69,16 @@ class DashboardAccess:
         """Користувач і роль із чинної сесії; None, якщо входу не було чи сесія скінчилась. Без входу: анонімний viewer."""
         if self.sessions is None:
             return Identity(ANONYMOUS, ANONYMOUS_ROLE)
-        session = self.sessions.get(self.token(conn))
-        return Identity(session.user, session.role) if session else None
+        return self._current(self.sessions.get(self.token(conn)))
+
+    def _current(self, session: Session | None) -> Identity | None:
+        """Сесія чинна, лише якщо користувач ще є в конфігу й роль та сама: у Redis сесії переживають перезапуск, і видалений
+        чи пониженій користувач інакше діяв би до кінця TTL."""
+        if session is None:
+            return None
+        if self.users is not None and self.users.role_of(session.user) != session.role:
+            return None
+        return Identity(session.user, session.role)
 
     def user(self, conn: HTTPConnection) -> str | None:
         """Ім'я користувача з чинної сесії; None, якщо входу не було чи сесія скінчилась."""
@@ -76,7 +86,7 @@ class DashboardAccess:
         return ident.user if ident else None
 
     def session_valid(self, token: str | None) -> bool:
-        return self.sessions is None or self.sessions.get(token) is not None
+        return self.sessions is None or self._current(self.sessions.get(token)) is not None
 
 
 def get_access(conn: HTTPConnection) -> DashboardAccess:
@@ -170,6 +180,79 @@ def json_post_guard(request: Request) -> None:
         raise HTTPException(415, "Очікується Content-Type: application/json")
     if not origin_ok(request):
         raise HTTPException(403, "Запит з чужого джерела (Origin)")
+
+
+def same_origin_guard(request: Request) -> None:
+    """Для зміни стану без тіла (DELETE): лише свій Origin (Content-Type тут нема чого перевіряти)."""
+    if not origin_ok(request):
+        raise HTTPException(403, "Запит з чужого джерела (Origin)")
+
+
+same_origin_guard.dw_state_guard = True  # type: ignore[attr-defined]
+json_post_guard.dw_state_guard = True  # type: ignore[attr-defined]   # позначка для guard-тесту: зміна стану має один із двох
+
+
+MAX_BODY_BYTES = 1_048_576   # 1 МіБ: пачка з 1000 подій займає ~0,2 МіБ, розстановка ще менше
+
+
+class BodyLimitMiddleware:
+    """Тіло запиту більше за `max_bytes` відхиляється (413) ще до розбору JSON: за Content-Length одразу, а без нього
+    (chunked) під час читання. Чистий ASGI, без буферизації всього тіла."""
+
+    def __init__(self, app: Any, max_bytes: int = MAX_BODY_BYTES) -> None:
+        self.app, self.max_bytes = app, max_bytes
+
+    async def __call__(self, scope: Any, receive: Any, send: Any) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+        declared = dict(scope["headers"]).get(b"content-length")
+        if declared is not None:
+            try:
+                too_big = int(declared) > self.max_bytes
+            except ValueError:
+                await self._reject(send, 400, "Хибний Content-Length")
+                return
+            if too_big:
+                await self._reject(send, 413, "Тіло запиту завелике")
+                return
+        seen, started, exceeded = 0, False, False
+
+        async def counting_receive() -> Any:
+            nonlocal seen, exceeded
+            message = await receive()
+            if message["type"] == "http.request":
+                seen += len(message.get("body", b""))
+                if seen > self.max_bytes:
+                    exceeded = True
+                    raise _BodyTooLarge
+            return message
+
+        async def tracking_send(message: Any) -> None:
+            nonlocal started
+            if exceeded and not started:
+                return   # застосунок міг обернути збій читання у власну 400: відповідь дамо ми, 413
+            started = started or message["type"] == "http.response.start"
+            await send(message)
+
+        with contextlib.suppress(_BodyTooLarge):
+            await self.app(scope, counting_receive, tracking_send)
+        if exceeded:
+            if started:
+                raise _BodyTooLarge   # відповідь уже пішла: лишається обірвати з'єднання
+            await self._reject(send, 413, "Тіло запиту завелике")
+
+    @staticmethod
+    async def _reject(send: Any, status: int, detail: str) -> None:
+        body = json.dumps({"detail": detail}, ensure_ascii=False).encode()
+        await send({"type": "http.response.start", "status": status,
+                    "headers": [(b"content-type", b"application/json"), (b"content-length", str(len(body)).encode()),
+                                (b"connection", b"close"), *((k.lower().encode(), v.encode()) for k, v in SECURITY_HEADERS.items())]})
+        await send({"type": "http.response.body", "body": body})
+
+
+class _BodyTooLarge(Exception):
+    pass
 
 
 class LoginIn(BaseModel):

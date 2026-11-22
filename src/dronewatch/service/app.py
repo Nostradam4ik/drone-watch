@@ -25,14 +25,22 @@ from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, Resp
 from pydantic import BaseModel, ConfigDict, Field
 
 from dronewatch.fusion.models import Sensor
-from dronewatch.service import config, coverage, dashboard_web, layout
+from dronewatch.service import config, coverage, dashboard_redis, dashboard_web, layout
 from dronewatch.service.ai import agent
 from dronewatch.service.ai.errors import AiUnavailable
 from dronewatch.service.ai.llm import MistralClient
 from dronewatch.service.ai.rag import IncidentIndex
 from dronewatch.service.audit import AuditEntry, AuditError, VerifyResult
 from dronewatch.service.auth import SensorAuth
-from dronewatch.service.dashboard_auth import LoginLimiter, SessionStore, UserEntry, Users, has_role
+from dronewatch.service.dashboard_auth import (
+    LoginLimiter,
+    SessionStore,
+    SessionStoreError,
+    UserEntry,
+    Users,
+    check_redis_url,
+    has_role,
+)
 from dronewatch.service.dashboard_web import (
     AUDIT_UNAVAILABLE,
     DashboardAccess,
@@ -44,10 +52,13 @@ from dronewatch.service.dashboard_web import (
     json_post_guard,
     page_identity,
     require_role,
+    same_origin_guard,
 )
 from dronewatch.service.demo import DemoSource, make_sensors
 from dronewatch.service.engine import Alert, Engine, SensorStatus, Zone
 from dronewatch.service.mqtt_in import MqttIngest
+from dronewatch.service.occlusion import Buildings, LineOfSight
+from dronewatch.service.terrain import Terrain
 
 log = logging.getLogger("dronewatch")
 BASE = Path(__file__).resolve().parent
@@ -111,6 +122,8 @@ class Runtime:
     ai_tasks: set[asyncio.Task[None]] = field(default_factory=set)   # живі посилання на фонові задачі AI-індексації
     map_file: Path | None = None   # власний PMTiles карти, якщо файл є на диску
     map_online: bool = False       # дозвіл на онлайн-тайли (лише коли власного файлу немає)
+    los: LineOfSight | None = None   # рельєф і будинки для лінії видимості в покритті (None: файлів немає чи вони зіпсовані)
+    target_alt: float = coverage.TARGET_ALT_M
     audit_status: VerifyResult | None = None   # результат перевірки ланцюжка журналу дій при старті (None: не перевірялось)
 
 
@@ -172,6 +185,24 @@ def build_ai(cfg: config.Config) -> AiRuntime | None:
                      limiter=LoginLimiter(max_failures=10, window_s=60.0))
 
 
+def load_line_of_sight(cfg: config.Config) -> LineOfSight | None:
+    """Рельєф і будинки для лінії видимості. Немає файлу: так і працюємо, покриття каже, чого не враховано. Зіпсований файл: те саме,
+    але ERROR у лозі, бо оператор вважатиме, що це враховано."""
+    origin = (cfg.origin.lat, cfg.origin.lon)
+    parts: dict[str, Any] = {}
+    for key, loader, path in (("buildings", Buildings.load, Path(cfg.map.buildings)), ("terrain", Terrain.load, Path(cfg.map.dem))):
+        if not path.is_file():
+            continue
+        try:
+            parts[key] = loader(path, origin)
+        except Exception:   # будь-яка помилка читання: сервіс не падає, але й не вдає, що це враховано
+            log.exception("лінія видимості (%s): не вдалося прочитати %s, покриття буде без цього", key, path)
+    if not parts:
+        return None
+    log.info("лінія видимості: %s", ", ".join(parts))
+    return LineOfSight(**parts)
+
+
 def build_runtime(cfg: config.Config) -> Runtime:
     """Збирає робочий стан із конфігу. Нічого не запускає: це робить lifespan."""
     demo = cfg.mode == "demo"
@@ -185,7 +216,8 @@ def build_runtime(cfg: config.Config) -> Runtime:
         engine.calibration = config.calibration_note(cfg)
     return Runtime(engine=engine, demo=demo, db_path=db_path, demo_src=DemoSource(sensors) if demo else None,
                    mqtt=build_mqtt(cfg, engine), ai=build_ai(cfg),
-                   map_file=map_file if map_file.is_file() else None, map_online=cfg.map.online_tiles)
+                   map_file=map_file if map_file.is_file() else None, map_online=cfg.map.online_tiles,
+                   los=load_line_of_sight(cfg), target_alt=cfg.map.target_alt_m)
 
 
 def check_audit_chain(rt: Runtime) -> VerifyResult | None:
@@ -234,13 +266,29 @@ def build_dashboard_access(cfg: config.Config) -> DashboardAccess:
         log.warning("демо без користувачів дашборда: лише перегляд (viewer). Щоб редагувати розкладку, додайте в dashboard.users "
                     "користувача з role: admin (dronewatch-keygen --dashboard-user ІМ'Я --role admin)")
         return DashboardAccess()
-    return DashboardAccess(Users({u.name: UserEntry(u.password_hash, u.role) for u in cfg.dashboard.users}),
-                           SessionStore(cfg.dashboard.session_ttl_s), LoginLimiter())
+    users = Users({u.name: UserEntry(u.password_hash, u.role) for u in cfg.dashboard.users})
+    if cfg.dashboard.session_store == "redis":
+        url = os.environ.get("DRONEWATCH_REDIS_URL") or cfg.dashboard.redis_url   # пароль краще в середовищі, не в конфігу
+        if not url:
+            raise ValueError("dashboard.session_store: redis потребує dashboard.redis_url або DRONEWATCH_REDIS_URL")
+        check_redis_url(url)
+        client = dashboard_redis.connect(url)   # недоступний Redis: сервіс не стартує (SessionStoreError)
+        log.info("сесії та ліміт входів спільні через Redis")
+        return DashboardAccess(users, dashboard_redis.RedisSessionStore(client, cfg.dashboard.session_ttl_s),
+                               dashboard_redis.RedisLoginLimiter(client))
+    return DashboardAccess(users, SessionStore(cfg.dashboard.session_ttl_s), LoginLimiter())
 
 
 app = FastAPI(title="Drone Watch", lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)   # схема API не публічна
 app.include_router(dashboard_web.router)
 app.middleware("http")(dashboard_web.add_security_headers)
+app.add_middleware(dashboard_web.BodyLimitMiddleware)   # зовнішній шар: завелике тіло відсікається до будь-якого розбору
+
+
+@app.exception_handler(SessionStoreError)
+async def session_store_error(request: Request, exc: SessionStoreError) -> JSONResponse:
+    """Спільне сховище сесій недоступне: 503 (fail-closed), без подробиць."""
+    return JSONResponse({"detail": "Сховище сесій недоступне"}, status_code=503, headers={"Retry-After": "5"})
 
 
 @app.exception_handler(RequestValidationError)
@@ -289,8 +337,14 @@ async def broadcast(rt: Runtime, access: DashboardAccess, payload: dict[str, Any
     """Шле стан усім WebSocket-клієнтам паралельно й з таймаутом: повільний клієнт не гальмує інших і скани.
     Сесії, що скінчилися (або вийшли), закриває замість розсилки."""
     sends = []
-    for ws, token in list(rt.clients.items()):
-        if not access.session_valid(token):   # сесія скінчилась або користувач вийшов: клієнту більше нічого не шлемо
+    clients = list(rt.clients.items())
+    try:   # у потоці: спільне сховище сесій (Redis) блокує, а цикл подій не має чекати
+        valid = await asyncio.to_thread(lambda: [access.session_valid(token) for _, token in clients])
+    except SessionStoreError:
+        log.error("сховище сесій недоступне: розсилку пропущено (fail-closed)")
+        return
+    for (ws, _token), ok in zip(clients, valid, strict=True):
+        if not ok:   # сесія скінчилась або користувач вийшов: клієнту більше нічого не шлемо
             rt.clients.pop(ws, None)
             with contextlib.suppress(Exception):
                 await ws.close(code=1008)
@@ -448,7 +502,7 @@ def audited_change[T](conn: HTTPConnection, ident: Identity, action: str, target
     return done
 
 
-@app.put("/api/layout")
+@app.put("/api/layout", dependencies=[Depends(json_post_guard)])
 async def put_layout(ident: AdminDep, request: Request, body: layout.Layout, rt: RuntimeDep) -> dict[str, Any]:
     """Нова розстановка (повний список датчиків): додати, пересунути чи прибрати датчик це одна атомарна заміна."""
     return audited_change(request, ident, "layout_save", f"sensors={len(body.sensors)}", lambda: apply_layout(rt, layout.build(body)))
@@ -457,18 +511,18 @@ async def put_layout(ident: AdminDep, request: Request, body: layout.Layout, rt:
 @app.get("/api/coverage", dependencies=[Depends(require_role("viewer"))])
 def get_coverage(rt: RuntimeDep) -> dict[str, Any]:
     """Покриття буферної зони поточними датчиками рушія (будь-який режим): те, що дашборд підсвічує за замовчуванням."""
-    return coverage.coverage(list(rt.engine.sensors.values()), rt.engine.zones)
+    return coverage.coverage(list(rt.engine.sensors.values()), rt.engine.zones, rt.los, rt.target_alt)
 
 
-@app.post("/api/coverage")
-async def post_coverage(_: AdminDep, body: layout.Layout) -> dict[str, Any]:
+@app.post("/api/coverage", dependencies=[Depends(json_post_guard)])
+async def post_coverage(_: AdminDep, body: layout.Layout, rt: RuntimeDep) -> dict[str, Any]:
     """Що покриває ця розстановка в буферній зоні (клітинки з класом). Нічого не змінює: лише рахує для підсвітки в редакторі.
     Лише для admin (інструмент редактора), але в журнал не пишеться: стану не змінює, а редактор кличе його щокілька сотень мс
     під час перетягування, і журнал (та SQLite-коміти в циклі подій) потонули б у попередніх переглядах."""
-    return coverage.coverage(layout.build(body))
+    return coverage.coverage(layout.build(body), None, rt.los, rt.target_alt)
 
 
-@app.delete("/api/layout")
+@app.delete("/api/layout", dependencies=[Depends(same_origin_guard)])
 async def reset_layout(ident: AdminDep, request: Request, rt: RuntimeDep) -> dict[str, Any]:
     """Повернути вбудовані датчики демо."""
     return audited_change(request, ident, "layout_reset", "reset", lambda: apply_layout(rt, make_sensors()))
@@ -564,7 +618,7 @@ class AskResponse(BaseModel):
     tool_calls: list[dict[str, Any]]
 
 
-@app.post("/api/ai/ask", response_model=None)
+@app.post("/api/ai/ask", response_model=None, dependencies=[Depends(json_post_guard)])
 def ask_ai(ident: OperatorDep, body: AskRequest, rt: RuntimeDep) -> AskResponse | JSONResponse:
     """Чат-агент оператора: читає живий стан і минулі інциденти через тули, нічого не пише в систему (і в журнал дій теж:
     лише читання, і запитів багато). 503, якщо AI вимкнено чи недоступний — трекінг дронів від цього не залежить.
@@ -597,7 +651,11 @@ def get_audit(ident: AdminDep, request: Request, rt: RuntimeDep, limit: int = 10
 async def ws(websocket: WebSocket) -> None:
     rt: Runtime | None = getattr(websocket.app.state, "runtime", None)
     access: DashboardAccess = getattr(websocket.app.state, "access", None) or DashboardAccess()
-    ident = access.identity(websocket)
+    try:
+        ident = await asyncio.to_thread(access.identity, websocket)
+    except SessionStoreError:
+        await websocket.close(code=1013)   # спробуйте пізніше: сховище сесій недоступне
+        return
     # до accept: відмова тут стає HTTP 403 на рукостисканні, WebSocket навіть не відкривається. Origin захищає від чужих сайтів.
     # Роль перевіряється тут явно (WebSocket не проходить через require_role): невідома роль = відмова, як і в HTTP
     if rt is None or ident is None or not has_role(ident.role, "viewer") or not dashboard_web.origin_ok(websocket):
