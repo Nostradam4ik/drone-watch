@@ -13,6 +13,7 @@ import base64
 import hashlib
 import hmac
 import ipaddress
+import logging
 import secrets
 import threading
 import time
@@ -21,6 +22,8 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import Literal, Protocol
 from urllib.parse import urlsplit
+
+log = logging.getLogger("dronewatch")
 
 MIN_PASSWORD_LEN = 12        # keygen не видасть хеш для коротшого пароля
 MAX_PASSWORD_LEN = 256       # довший відкидаємо ще до хешування: інакше великі «паролі» стали б дешевою атакою на CPU
@@ -95,6 +98,9 @@ class Users:
     def __init__(self, entries: Mapping[str, UserEntry]) -> None:
         self._entries = dict(entries)
         self._dummy = hash_password(secrets.token_urlsafe(16))   # для вирівнювання часу, коли імені немає
+
+    def knows(self, name: str) -> bool:
+        return name in self._entries
 
     def role_of(self, name: str) -> Role | None:
         """Роль користувача за поточним конфігом; None, якщо його там уже немає."""
@@ -207,6 +213,7 @@ class LoginLimiter:
                  max_keys: int = 10_000) -> None:
         self.max_failures, self.window_s, self._clock, self._max_keys = max_failures, window_s, clock, max_keys
         self._attempts: dict[str, deque[float]] = {}
+        self._overflow_logged = -float("inf")   # коли востаннє писали про повну таблицю (раз на вікно, щоб не засмічувати лог)
         self._lock = threading.Lock()
 
     def _recent(self, key: str, now: float) -> deque[float]:
@@ -224,6 +231,12 @@ class LoginLimiter:
                 return max(0.0, q[0] + self.window_s - now)
             if key not in self._attempts and len(self._attempts) >= self._max_keys:   # стеля памʼяті: прибираємо ключі без свіжих спроб
                 self._attempts = {k: r for k in list(self._attempts) if (r := self._recent(k, now))}
+                if len(self._attempts) >= self._max_keys:   # усі ключі свіжі: не росте далі, нову адресу не приймаємо (fail-closed)
+                    if now - self._overflow_logged >= self.window_s:
+                        self._overflow_logged = now
+                        log.error("таблиця лімітера входу повна свіжими адресами (%d): нові адреси відхиляються до кінця вікна "
+                                  "(схоже на розподілений перебір)", self._max_keys)
+                    return max(1.0, min(r[0] for r in self._attempts.values()) + self.window_s - now)
             self._attempts.setdefault(key, deque()).append(now)
             return 0.0
 

@@ -17,6 +17,7 @@ from typing import Any
 GENESIS = "0" * 64
 MAX_LEN = {"user": 64, "role": 16, "action": 32, "target": 200, "result": 16, "ip": 64}
 MAX_BLOCKED_KEYS = 10_000
+OVERFLOW_KEY = "*overflow*"   # спільний ключ для всіх, кому не вистачило місця в таблиці
 _COLS = "id, ts, user, role, action, target, result, ip, prev_hash, hash"
 
 
@@ -148,6 +149,11 @@ class AuditLog:
             if key not in self._blocked and len(self._blocked) >= MAX_BLOCKED_KEYS:   # стеля памʼяті: прибираємо ключі з минулими вікнами
                 self._blocked = {k: t for k, t in self._blocked.items() if now - t < window_s}
                 if len(self._blocked) >= MAX_BLOCKED_KEYS:
-                    return False
+                    # Таблиця повна свіжими ключами: не росте далі, але й не мовчить. Усі нові ключі ділять один спільний запис на вікно.
+                    last = self._blocked.get(OVERFLOW_KEY)
+                    if last is not None and now - last < window_s:
+                        return False
+                    self._blocked[OVERFLOW_KEY] = now
+                    return True
             self._blocked[key] = now
             return True

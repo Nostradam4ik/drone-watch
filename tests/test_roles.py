@@ -254,6 +254,18 @@ def test_login_success_failure_logout_are_audited(login_client):
     assert all(PASSWORD not in str(r) and "wrong-password-123" not in str(r) for r in rows), "паролів у журналі немає"
 
 
+def test_unknown_username_is_not_written_anywhere(login_client, caplog):
+    """Пароль, набраний у полі імені, не потрапляє ні в журнал дій, ні в лог: невідоме ім'я не зберігаємо."""
+    secret = "Tr0ub4dor&3-typed-in-the-name-field"
+    with caplog.at_level("WARNING"):
+        assert login_client.post("/api/login", json={"username": secret, "password": "x" * 12}).status_code == 401
+    assert secret not in str(_audit(login_client).read()) and secret not in caplog.text
+    row = next(r for r in _audit(login_client).read() if r["action"] == "login_failed")
+    assert row["user"] == "?"
+    login_client.post("/api/login", json={"username": "alice", "password": "wrong-password-123"})
+    assert _audit(login_client).read()[0]["user"] == "alice", "відоме ім'я лишається для розслідування"
+
+
 def test_blocked_logins_are_aggregated(login_client):
     for _ in range(20):
         login_client.post("/api/login", json={"username": "alice", "password": "wrong-password-123"})

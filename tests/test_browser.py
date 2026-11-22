@@ -440,12 +440,16 @@ def test_admin_sees_audit_tab_with_integrity_ok(dash_as):
 
 
 def test_audit_rows_are_rendered_as_text(dash_as, server):
-    evil = '<img src=x onerror="window.__pwned=1">'
+    # Невідоме ім'я журнал не зберігає (там може бути пароль), а відомі імена конфіг обмежує безпечними символами. Тож
+    # зловмисний рядок потрапляє в журнал через шлях відмовленого запиту (запис `denied`): клієнт керує ним повністю.
+    evil = '<img src=x onerror=window.__pwned=1>'
     d0 = dash_as("viewer")
-    assert sign_in(d0.page, server["base"], "viewer", username=evil, password="wrong-password-xx") == 401
+    status = d0.page.evaluate("""async (p) => (await fetch(p, {method: "POST", credentials: "same-origin",
+        headers: {"Content-Type": "application/json"}, body: "{}"})).status""", f"/api/incidents/{evil}/review")
+    assert status == 403
     d = dash_as("admin")
     d.page.locator("#audit-box summary").click()
-    row = d.page.locator("#audit-body tr", has_text="login_failed").first
+    row = d.page.locator("#audit-body tr", has_text="denied").first
     expect(row).to_contain_text(evil)
     assert d.page.locator("#audit-body img").count() == 0
     assert d.page.evaluate("window.__pwned") is None

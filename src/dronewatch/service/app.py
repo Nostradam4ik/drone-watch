@@ -491,25 +491,26 @@ def apply_layout(rt: Runtime, sensors: list[Sensor]) -> dict[str, Any]:
     return {**rt.engine.config(), "demo": rt.demo}
 
 
-def audited_change[T](conn: HTTPConnection, ident: Identity, action: str, target: str, change: Callable[[], T]) -> T:
+async def audited_change[T](conn: HTTPConnection, ident: Identity, action: str, target: str, change: Callable[[], T]) -> T:
     """Зміна стану з журналом: спершу `started` (не записалось, дії немає: 503), потім дія, потім `ok` чи `error`.
-    Результат пишеться «як вийде»: дія вже відбулася, і відкотити її через збій журналу було б гірше (стан наполовину)."""
+    Результат пишеться «як вийде»: дія вже відбулася, і відкотити її через збій журналу було б гірше (стан наполовину).
+    Запис у SQLite іде в потоці, щоб не блокувати цикл подій; сама зміна `change()` лишається в циклі, бо рушій живе в ньому."""
     def entry(result: str) -> AuditEntry:
         return AuditEntry(ident.user, ident.role, action, target, result, client_ip(conn))
-    audit_or_503(conn, entry("started"))
+    await asyncio.to_thread(audit_or_503, conn, entry("started"))
     try:
         done = change()
     except Exception:   # зокрема HTTPException 409: спроба була, і журнал це показує
-        audit_best_effort(conn, entry("error"))
+        await asyncio.to_thread(audit_best_effort, conn, entry("error"))
         raise
-    audit_best_effort(conn, entry("ok"))
+    await asyncio.to_thread(audit_best_effort, conn, entry("ok"))
     return done
 
 
 @app.put("/api/layout", dependencies=[Depends(json_post_guard)])
 async def put_layout(ident: AdminDep, request: Request, body: layout.Layout, rt: RuntimeDep) -> dict[str, Any]:
     """Нова розстановка (повний список датчиків): додати, пересунути чи прибрати датчик це одна атомарна заміна."""
-    return audited_change(request, ident, "layout_save", f"sensors={len(body.sensors)}", lambda: apply_layout(rt, layout.build(body)))
+    return await audited_change(request, ident, "layout_save", f"sensors={len(body.sensors)}", lambda: apply_layout(rt, layout.build(body)))
 
 
 @app.get("/api/coverage", dependencies=[Depends(require_role("viewer"))])
@@ -529,7 +530,7 @@ async def post_coverage(_: AdminDep, body: layout.Layout, rt: RuntimeDep) -> dic
 @app.delete("/api/layout", dependencies=[Depends(same_origin_guard)])
 async def reset_layout(ident: AdminDep, request: Request, rt: RuntimeDep) -> dict[str, Any]:
     """Повернути вбудовані датчики демо."""
-    return audited_change(request, ident, "layout_reset", "reset", lambda: apply_layout(rt, make_sensors()))
+    return await audited_change(request, ident, "layout_reset", "reset", lambda: apply_layout(rt, make_sensors()))
 
 
 @app.get("/api/health", response_model=None)   # повертає то dict, то JSONResponse(503): моделі відповіді тут нема

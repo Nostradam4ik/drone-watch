@@ -278,21 +278,23 @@ def login(body: LoginIn, request: Request) -> Response:
     if access.users is None or access.sessions is None or access.limiter is None:
         raise HTTPException(404, "Автентифікацію дашборда вимкнено")
     client = client_ip(request)
+    # У журнал і лог іде лише відоме ім'я: у полі імені люди іноді набирають пароль, а його зберігати не можна
+    shown = body.username if access.users.knows(body.username) else "?"
     # Спроба резервується атомарно ДО перевірки пароля: інакше паралельний залп обходить ліміт (див. LoginLimiter)
     lkey = limiter_key(client)
     if wait := access.limiter.attempt(lkey):
         log.warning("вхід заблоковано (забагато невдалих спроб) з %s", client)
         audit = _audit_log(request)
         if audit is not None and audit.allow_blocked_record(lkey, access.limiter.window_s):   # один запис на адресу за вікно
-            audit_best_effort(request, AuditEntry(body.username, "", "login_blocked", "", "denied", client))
+            audit_best_effort(request, AuditEntry(shown, "", "login_blocked", "", "denied", client))
         raise HTTPException(429, "Забагато невдалих спроб, спробуйте пізніше", headers={"Retry-After": str(math.ceil(wait))})
     role = access.users.authenticate(body.username, body.password)
     if role is None:
-        log.warning("невдалий вхід: ім'я %r з %s", body.username, client)   # %r екранує переноси рядків; пароля в лозі немає
+        log.warning("невдалий вхід: ім'я %r з %s", shown, client)
         # Не частіше, ніж пропускає LoginLimiter (спроба вже зарахована вище); керівні символи з імені вилучає сам журнал
         audit = _audit_log(request)
         if audit is None or audit.take("login_failed", LOGIN_FAILED_ROWS_PER_MIN, 60.0):
-            audit_best_effort(request, AuditEntry(body.username, "", "login_failed", "", "failed", client))
+            audit_best_effort(request, AuditEntry(shown, "", "login_failed", "", "failed", client))
         elif audit.take("login_failed_flood", 1, 60.0):
             # окремий лічильник: таблицю ключів за адресами (стеля 10k) він не витісняє
             audit_best_effort(request, AuditEntry("", "", "login_failed_flood", "", "denied", client))
