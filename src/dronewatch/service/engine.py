@@ -180,7 +180,8 @@ class Engine:
             self._reset_locked()
 
     def _reset_locked(self) -> None:
-        self.tracker = Tracker(list(self.sensors.values()), max_tracks=self.max_tracks)
+        # номери треків тягнемо далі: тривоги в списку й журналі не мають злитися з новою ціллю під тим самим номером
+        self.tracker = Tracker(list(self.sensors.values()), max_tracks=self.max_tracks, first_id=self.tracker.next_id)
         self.buffer.clear()
         self.buf_count.clear()
         self.ident_buffer.clear()
