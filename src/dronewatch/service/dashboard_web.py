@@ -37,6 +37,7 @@ ANONYMOUS_ROLE: Role = "viewer"   # без входу лише перегляд:
 # запити (без входу це будь-який клієнт), роздуває incidents.db до повного диска, і тоді 503 отримують уже оператори.
 # У лог (log.warning) іде КОЖНА відмова.
 DENIED_WINDOW_S = 300.0
+DENIED_ROWS_PER_MIN = 30   # стеля рядків denied на всі адреси разом; понад неї один зведений рядок denied_flood за хвилину
 LOGIN_FAILED_ROWS_PER_MIN = 30   # стеля рядків login_failed на всіх адрес разом; понад неї один зведений рядок за хвилину
 AUDIT_UNAVAILABLE = "Журнал дій недоступний"
 
@@ -141,9 +142,12 @@ def require_role(min_role: Role) -> Callable[..., Identity]:
             ip = client_ip(conn)
             log.warning("відмова: %r (роль %r) %s %s, потрібна %s, з %s", ident.user, ident.role, method, conn.url.path, min_role, ip)
             audit = _audit_log(conn)
-            if audit is not None and audit.allow_blocked_record(f"denied:{ip}:{ident.user}", DENIED_WINDOW_S):
-                audit_best_effort(conn, AuditEntry(ident.user, ident.role, "denied", f"{method} {conn.url.path} needs {min_role}",
-                                                   "denied", ip))
+            if audit is not None and audit.allow_blocked_record(f"denied:{limiter_key(ip)}:{ident.user}", DENIED_WINDOW_S):
+                if audit.take("denied", DENIED_ROWS_PER_MIN, 60.0):   # спільна стеля: зміна адрес (IPv6) не роздуває БД
+                    audit_best_effort(conn, AuditEntry(ident.user, ident.role, "denied", f"{method} {conn.url.path} needs {min_role}",
+                                                       "denied", ip))
+                elif audit.take("denied_flood", 1, 60.0):
+                    audit_best_effort(conn, AuditEntry(ident.user, ident.role, "denied_flood", "", "denied", ip))
             raise HTTPException(403, "Недостатньо прав")
         return ident
     dependency.dw_min_role = min_role  # type: ignore[attr-defined]
@@ -206,7 +210,8 @@ def login(body: LoginIn, request: Request) -> Response:
         audit = _audit_log(request)
         if audit is None or audit.take("login_failed", LOGIN_FAILED_ROWS_PER_MIN, 60.0):
             audit_best_effort(request, AuditEntry(body.username, "", "login_failed", "", "failed", client))
-        elif audit.allow_blocked_record("login_failed_flood", 60.0):   # один зведений рядок за хвилину
+        elif audit.take("login_failed_flood", 1, 60.0):
+            # окремий лічильник: таблицю ключів за адресами (стеля 10k) він не витісняє
             audit_best_effort(request, AuditEntry("", "", "login_failed_flood", "", "denied", client))
         raise HTTPException(401, "Хибний логін або пароль")
     # Успішний вхід пишемо щоразу (без агрегації): для нього потрібен справжній пароль, а scrypt і LoginLimiter обмежують темп

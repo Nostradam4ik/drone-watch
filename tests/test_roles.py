@@ -492,3 +492,14 @@ def test_ipv6_is_limited_per_64_network():
     assert limiter_key("2001:db8::1") == limiter_key("2001:db8::ffff") == "2001:db8::/64"
     assert limiter_key("2001:db8:0:1::1") != limiter_key("2001:db8::1")
     assert limiter_key("10.0.0.5") == "10.0.0.5" and limiter_key("?") == "?"
+    assert limiter_key("::ffff:10.0.0.5") == "10.0.0.5" != limiter_key("::ffff:10.0.0.6"), "IPv4-mapped не склеюється в одну /64"
+
+
+def test_denied_rows_have_a_global_cap_with_one_summary_row(demo_client, monkeypatch):
+    from dronewatch.service import dashboard_web
+    monkeypatch.setattr(dashboard_web, "DENIED_ROWS_PER_MIN", 2)
+    for i in range(6):   # різні користувачі = різні ключі агрегації, тож без спільної стелі кожен дав би свій рядок
+        login_as(demo_client, "viewer", user=f"u{i}")
+        assert demo_client.post("/api/incidents/1/review", json={"status": "confirmed"}).status_code == 403
+    actions = _actions(demo_client)
+    assert actions.count("denied") == 2 and actions.count("denied_flood") == 1

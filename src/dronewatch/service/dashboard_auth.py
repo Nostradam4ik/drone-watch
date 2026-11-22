@@ -153,6 +153,9 @@ def limiter_key(ip: str) -> str:
         addr = ipaddress.ip_address(ip)
     except ValueError:
         return ip
+    # ::ffff:1.2.3.4 це IPv4-клієнт на двостековому сокеті: окремий ключ, а не спільна /64
+    if addr.version == 6 and addr.ipv4_mapped is not None:
+        return str(addr.ipv4_mapped)
     return str(ipaddress.ip_network((addr, 64), strict=False)) if addr.version == 6 else ip
 
 
