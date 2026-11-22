@@ -1,8 +1,9 @@
 // ---------- кадр стану з сервера: шапка, таблиця треків, тривоги, список датчиків ----------
-import { KIND_UA, LEVEL_UA, S, SENSOR_UA, SIDE, altText, can, esc, trails } from "./core.js";
+import { KIND_UA, LEVEL_UA, PANEL, S, SENSOR_UA, SIDE, altText, can, esc, trails } from "./core.js";
 import { select, toast, updateDossier } from "./dossier.js";
 import { realInfoHtml, reloadConfig, sensorSpec, typeInfo } from "./editor.js";
 import { isSector, pushData, shortName, toLL } from "./map.js";
+import { sendToMain } from "./layout.js";
 import { soundCheck } from "./sound.js";
 import { startReplay } from "./replay.js";
 import { stopViewer } from "./viewer3d.js";
@@ -70,10 +71,10 @@ export function render(msg) {
     });
     seenAlerts = current;   // памʼятаємо лише тривоги, що ще в списку: множина не росте безмежно
   } else if (lastAlerts !== "") { lastAlerts = ""; seenAlerts = new Set(); box.innerHTML = '<div class="empty">Тривог немає</div>'; }
-  soundCheck(msg, firstMsg);
+  if (!PANEL) soundCheck(msg, firstMsg);   // звук лише в головному вікні, інакше сигнал лунав би двічі
   firstMsg = false;
   document.getElementById("truth-row").hidden = !(S.cfg && S.cfg.demo && msg.truth);
-  if (S.replay) return;
+  if (S.replay || PANEL) return;
   pushData();
   updateDossier();
 }
@@ -185,6 +186,7 @@ document.getElementById("tbody").addEventListener("click", e => {
   const tr = e.target.closest("tr"); if (!tr) return;
   const id = +tr.dataset.id;
   S.selected = S.selected === id ? null : id;   // повторний клік знімає виділення
+  if (PANEL) { sendToMain({ select: S.selected }); invalidateTable(); return; }   // карти тут немає: наводить головне вікно
   const t = S.state && S.state.tracks.find(tt => tt.id === S.selected);
   if (t && S.map) S.map.easeTo({ center: toLL(t.x, t.y), duration: 600 });
   select();
@@ -194,7 +196,9 @@ document.getElementById("truth").addEventListener("change", pushData);
 // Клік по тривозі наводить карту на ціль і відкриває її досьє
 document.getElementById("alerts").addEventListener("click", e => {
   if (e.target.closest(".rv")) return;   // кнопки й коментар рішення не наводять карту на ціль
-  const rp = e.target.closest("button[data-replay]"); if (rp) { startReplay(+rp.dataset.replay); return; }
+  const rp = e.target.closest("button[data-replay]");
+  if (rp) { if (PANEL) sendToMain({ replay: +rp.dataset.replay }); else startReplay(+rp.dataset.replay); return; }
+  if (PANEL) { const c = e.target.closest(".alert[data-track]"); if (c) sendToMain({ select: +c.dataset.track }); return; }
   const card = e.target.closest(".alert[data-track]"); if (!card || !S.map) return;
   const id = +card.dataset.track;
   if (!S.state || !S.state.tracks.some(t => t.id === id)) { toast({ level: "WARNING", track_id: id, zone: "ціль вже не відстежується" }); return; }

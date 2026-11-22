@@ -529,3 +529,97 @@ def test_missing_replay_gives_a_toast_not_a_player(dash):
     dash.page.locator('button[data-replay="7"]').click()
     expect(dash.page.locator("#toast .toast.WARNING")).to_contain_text("Запису відтворення")
     expect(dash.page.locator("#replay")).to_be_hidden()
+
+
+# ---------- розкладка: роздільник і відкріплені панелі ----------
+def aside_width(page: Page) -> float:
+    return float(page.evaluate("document.querySelector('aside').getBoundingClientRect().width"))
+
+
+def test_splitter_resizes_the_side_panel_and_remembers_it(dash):
+    page = dash.page
+    assert abs(aside_width(page) - 348) < 2
+    box = page.locator("#splitter").bounding_box()
+    assert box is not None
+    y = box["y"] + box["height"] / 2
+    page.mouse.move(box["x"] + 3, y)
+    page.mouse.down()
+    page.mouse.move(box["x"] - 150, y, steps=5)
+    page.mouse.up()
+    assert 480 < aside_width(page) < 520
+    page.reload()
+    expect(page.locator("#conn")).to_have_text("на звʼязку", timeout=20_000)
+    assert 480 < aside_width(page) < 520   # ширина пережила перезавантаження
+    page.locator("#splitter").dblclick()
+    assert abs(aside_width(page) - 348) < 2
+    page.locator("#splitter").focus()
+    page.keyboard.press("ArrowLeft")
+    assert abs(aside_width(page) - 368) < 2   # з клавіатури: 20 px за натискання
+    page.keyboard.press("ArrowRight")
+    page.keyboard.press("ArrowRight")
+    assert abs(aside_width(page) - 328) < 2
+    for _ in range(10):
+        page.keyboard.press("Shift+ArrowRight")
+    assert abs(aside_width(page) - 280) < 2   # менше мінімуму не стискається
+
+
+def open_panel(dash: Dashboard, name: str) -> Dashboard:
+    """Відкріплена панель у тому ж контексті (та сама сесія й BroadcastChannel), WebSocket підмінено так само."""
+    page = dash.page.context.new_page()
+    panel = Dashboard(page, dash.cfg)
+    panel.errors = watch_errors(page)
+
+    def on_ws(ws: WebSocketRoute) -> None:
+        panel.ws = ws
+    page.route_web_socket("**/ws", on_ws)
+    page.goto(dash.page.url.split("/")[0] + "//" + dash.page.url.split("/")[2] + "/panel/" + name)
+    expect(page.locator("#conn")).to_have_text("на звʼязку")
+    return panel
+
+
+def test_detach_button_opens_the_panel_in_its_own_window(dash):
+    with dash.page.expect_popup() as popup:
+        dash.page.locator('button[data-detach="alerts"]').click()
+    assert popup.value.url.endswith("/panel/alerts")
+    popup.value.close()
+
+
+def test_detached_alerts_panel_shows_only_alerts_and_reviews_them(dash):
+    panel = open_panel(dash, "alerts")
+    errors = panel.errors
+    panel.push(panel.state(tracks=[track(7, "CRITICAL", "enemy")], alerts=[alert(1, 7)]))
+    expect(panel.page.locator("#alerts .alert")).to_have_count(1)
+    expect(panel.page.locator("#mapwrap")).to_be_hidden()
+    expect(panel.page.locator("#tracks")).to_be_hidden()
+    expect(panel.page.locator("#sensors-box")).to_be_hidden()
+    posted: list[Any] = []
+
+    def review(route: Any) -> None:
+        posted.append(route.request.post_data_json)
+        route.fulfill(status=200, content_type="application/json", body="{}")
+    panel.page.route("**/api/incidents/1/review", review)
+    panel.page.locator('#alerts button[data-review="confirmed"]').click()
+    deadline = time.time() + 5
+    while not posted and time.time() < deadline:
+        panel.page.wait_for_timeout(50)
+    assert posted == [{"status": "confirmed", "note": None}]
+    assert not errors, "\n".join(errors)
+
+
+def test_clicks_in_detached_panels_drive_the_main_window(dash):
+    tracks = [track(1), track(2, "CRITICAL", "enemy")]
+    dash.push(dash.state(tracks=tracks, alerts=[alert(1, 2)]))
+    tracks_panel = open_panel(dash, "tracks")
+    alerts_panel = open_panel(dash, "alerts")
+    for p in (tracks_panel, alerts_panel):
+        p.push(p.state(tracks=tracks, alerts=[alert(1, 2)]))
+    expect(alerts_panel.page.locator("#alerts .alert")).to_have_count(1)
+    expect(tracks_panel.page.locator('#tbody tr[data-id="1"]')).to_be_visible()
+    expect(tracks_panel.page.locator("#alerts")).to_be_hidden()
+    tracks_panel.page.locator('#tbody tr[data-id="1"]').click()
+    expect(dash.page.locator('#tbody tr[data-id="1"]')).to_have_class("sel")   # головне вікно виділило ціль
+    alerts_panel.page.locator("#alerts .alert .id").click()
+    dash.push(dash.state(tracks=tracks, alerts=[alert(1, 2)]))
+    expect(dash.page.locator('#tbody tr[data-id="2"]')).to_have_class("sel")
+    for p in (tracks_panel, alerts_panel):
+        assert not p.errors, "\n".join(p.errors)

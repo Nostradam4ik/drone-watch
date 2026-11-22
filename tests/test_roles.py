@@ -23,7 +23,7 @@ STATIC_ROUTES = {("GET", "/static/vendor/{name}"), ("GET", "/static/app/{name}")
                  ("GET", "/static/webfonts/{name}")}
 
 
-PAGE_ONLY_ROUTES = {("GET", "/")}   # лише тут дозволена page_identity (dw_page_only): вона сама нічого не забороняє
+PAGE_ONLY_ROUTES = {("GET", "/"), ("GET", "/panel/{name}")}   # лише тут дозволена page_identity (dw_page_only): вона сама нічого не забороняє
 
 
 def has_marker(dependant, marker) -> bool:

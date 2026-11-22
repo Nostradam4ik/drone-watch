@@ -1,9 +1,11 @@
 // ---------- старт сторінки, вихід, AI-асистент, WebSocket. Підключається останнім: start() кличе все інше ----------
 import { initAudit } from "./audit.js";
-import { LoginRequired, ROLE_UA, S, api, apiPost, can, esc } from "./core.js";
-import { revealAnswer } from "./dossier.js";
-import { initMap } from "./map.js";
+import { LoginRequired, PANEL, ROLE_UA, S, api, apiPost, can, esc } from "./core.js";
+import { revealAnswer, select } from "./dossier.js";
+import { initLayout, listenPanels } from "./layout.js";
+import { initMap, toLL } from "./map.js";
 import { render, renderCatalog } from "./panels.js";
+import { startReplay } from "./replay.js";
 
 async function start() {
   S.cfg = await api("/api/config");
@@ -14,6 +16,8 @@ async function start() {
     document.getElementById("who-name").textContent = S.me.user + " (" + (ROLE_UA[S.me.role] || S.me.role) + ")";
     document.getElementById("who").hidden = document.getElementById("logout").hidden = false;
   }
+  initLayout();
+  if (PANEL) { connect(); return; }   // відкріплена панель: ні карти, ні каталогу, ні редактора, лише кадри стану
   S.cfg.editable = S.cfg.editable && can("admin");   // розстановку датчиків робить лише admin (і лише в демо)
   renderCatalog();
   document.getElementById("edit-sensors").hidden = !S.cfg.editable;
@@ -22,6 +26,17 @@ async function start() {
   initMap();
   connect();
 }
+
+// Запити від відкріплених вікон: виділити ціль (або зняти виділення) і відтворити інцидент. Лише цілі числа, нічого іншого не береться
+listenPanels(d => {
+  if (PANEL) return;
+  if ("select" in d && (d.select === null || Number.isInteger(d.select))) {
+    S.selected = d.select;
+    const t = S.state && S.state.tracks.find(tt => tt.id === S.selected);
+    if (t && S.map) S.map.easeTo({ center: toLL(t.x, t.y), duration: 600 });
+    select();
+  } else if (Number.isInteger(d.replay) && d.replay > 0) startReplay(d.replay);
+});
 
 document.getElementById("logout").addEventListener("click", async () => {
   await fetch("/api/logout", { method: "POST", credentials: "same-origin", headers: { "Content-Type": "application/json" }, body: "{}" });
