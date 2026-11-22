@@ -21,7 +21,7 @@ dashboard:
   auth: required
   session_ttl_s: 28800        # скільки діє сесія після входу (8 годин)
   users:
-    - {name: operator, password_hash: "ЗАМІНІТЬ: dronewatch-keygen --dashboard-user operator"}
+    - {name: operator, role: operator, password_hash: "ЗАМІНІТЬ: dronewatch-keygen --dashboard-user operator"}
 scan_dt: 0.5        # як часто трекер обробляє накопичені події, с
 sensor_timeout_s: 5 # тиша датчика довше за це (с) = відмова. Датчики мають слати heartbeat, інакше порожнє небо теж «тиша»
 

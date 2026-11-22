@@ -14,7 +14,7 @@ import pytest
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parent
 from dronewatch.service import dashboard_auth as da
-from dronewatch.service.dashboard_auth import LoginLimiter, SessionStore, Users
+from dronewatch.service.dashboard_auth import LoginLimiter, SessionStore, UserEntry, Users, has_role
 
 PASSWORD = "Correct-Horse-Battery-42"
 # scrypt із меншим N лише для швидкості тестів: формат і перевірка ті самі, що з продакшн-параметрами
@@ -79,12 +79,12 @@ def test_overlong_password_is_rejected_before_hashing(monkeypatch):
 
 def test_unknown_user_costs_the_same_as_known_one(monkeypatch):
     """Інакше за часом відповіді видно, які імена існують: хешуємо і для неіснуючого імені."""
-    users = Users({"alice": FAST})
+    users = Users({"alice": UserEntry(FAST, "admin")})
     calls = _count_scrypt_calls(monkeypatch)
-    assert users.authenticate("alice", PASSWORD) is True
+    assert users.authenticate("alice", PASSWORD) == "admin"
     known = len(calls)
-    assert users.authenticate("alice", "wrong-password-123") is False
-    assert users.authenticate("nobody", PASSWORD) is False, "навіть правильний пароль іншого користувача не годиться"
+    assert users.authenticate("alice", "wrong-password-123") is None
+    assert users.authenticate("nobody", PASSWORD) is None, "навіть правильний пароль іншого користувача не годиться"
     assert len(calls) == known * 3, "кожна спроба, відома чи ні, має робити однакову дорогу перевірку"
 
 
@@ -92,18 +92,18 @@ def test_unknown_user_costs_the_same_as_known_one(monkeypatch):
 def test_session_lifecycle():
     clock = Clock()
     store = SessionStore(60, clock=clock)
-    token = store.create("alice")
+    token = store.create("alice", "admin")
     assert store.get(token).user == "alice"
     assert all(token not in key for key in store._items), "сирий токен не має лежати на сервері, лише його хеш"
     clock.now += 59
     assert store.get(token) is not None
     clock.now += 2
     assert store.get(token) is None, "сесія має скінчитися через ttl"
-    token2 = store.create("bob")
+    token2 = store.create("bob", "admin")
     assert store.revoke(token2) is True and store.get(token2) is None and store.revoke(token2) is False
     for junk in (None, "", "x" * 1000, "не-токен"):
         assert store.get(junk) is None and store.revoke(junk) is False
-    assert store.create("a") != store.create("a"), "токени унікальні"
+    assert store.create("a", "admin") != store.create("a", "admin"), "токени унікальні"
 
 
 def test_session_store_is_bounded():
@@ -112,7 +112,7 @@ def test_session_store_is_bounded():
     tokens = []
     for i in range(12):
         clock.now += 1
-        tokens.append(store.create(f"u{i}"))
+        tokens.append(store.create(f"u{i}", "admin"))
     assert len(store._items) <= 5
     assert store.get(tokens[-1]) is not None and store.get(tokens[0]) is None, "витісняється найстаріша"
 
@@ -171,7 +171,7 @@ def _client(base_url="http://testserver", *, auth=True, ttl=60, max_failures=8):
     rt.db_path = _temp_incidents_db()   # інакше /api/incidents створить порожній incidents.db у робочій теці
     clock = Clock()
     from dronewatch.service.dashboard_web import DashboardAccess
-    app.app.state.access = (DashboardAccess(Users({"alice": FAST}), SessionStore(ttl, clock=clock),
+    app.app.state.access = (DashboardAccess(Users({"alice": UserEntry(FAST, "admin")}), SessionStore(ttl, clock=clock),
                                           LoginLimiter(max_failures=max_failures, window_s=300, clock=clock))
                           if auth else DashboardAccess())
     return TestClient(app.app, base_url=base_url, follow_redirects=False), rt, clock
@@ -278,7 +278,7 @@ def test_expired_session_closes_its_websocket():
         async def close(self, code=1000):
             self.closed = code
 
-    token = app.app.state.access.sessions.create("alice")
+    token = app.app.state.access.sessions.create("alice", "admin")
     live, ghost = FakeWs(), FakeWs()
     rt.clients.update({live: token, ghost: "виданий-колись-токен"})
     asyncio.run(app.scan_step(app.app, rt))
@@ -436,14 +436,15 @@ def test_dashboard_config_is_fail_closed():
 
     rejects("", "немає жодного користувача дашборда")                                    # за замовчуванням required
     rejects("dashboard: {auth: required}", "немає жодного користувача дашборда")
-    rejects('dashboard: {users: [{name: a, password_hash: "scrypt$1$2"}]}', "scrypt")
-    rejects('dashboard: {users: [{name: a, password_hash: "ЗАМІНІТЬ: python -m dronewatch.service.keygen"}]}', "keygen --dashboard-user")
-    rejects(f'dashboard: {{users: [{{name: "a b", password_hash: "{FAST}"}}]}}', "pattern")
-    rejects(f'dashboard: {{users: [{{name: a, password_hash: "{FAST}"}}, {{name: a, password_hash: "{FAST}"}}]}}', "унікальними")
+    rejects('dashboard: {users: [{name: a, password_hash: "scrypt$1$2", role: admin}]}', "scrypt")
+    rejects('dashboard: {users: [{name: a, password_hash: "ЗАМІНІТЬ: python -m dronewatch.service.keygen", role: admin}]}', "keygen --dashboard-user")
+    rejects(f'dashboard: {{users: [{{name: "a b", password_hash: "{FAST}", role: admin}}]}}', "pattern")
+    rejects(f'dashboard: {{users: [{{name: a, password_hash: "{FAST}", role: admin}}, {{name: a, password_hash: "{FAST}", role: admin}}]}}', "унікальними")
+    rejects(f'dashboard: {{users: [{{name: a, password_hash: "{FAST}"}}]}}', "role")
     rejects("dashboard: {auth: maybe}", "auth")
     rejects("dashboard: {auth: disabled, session_ttl_s: -5}", "session_ttl_s")
 
-    cfg = _load(LIVE.format(dashboard=f'dashboard: {{users: [{{name: alice, password_hash: "{FAST}"}}], session_ttl_s: 600}}'))
+    cfg = _load(LIVE.format(dashboard=f'dashboard: {{users: [{{name: alice, password_hash: "{FAST}", role: admin}}], session_ttl_s: 600}}'))
     assert cfg.dashboard.users[0].name == "alice" and cfg.dashboard.session_ttl_s == 600
     assert _load(LIVE.format(dashboard="dashboard: {auth: disabled}")).dashboard.auth == "disabled"
     assert _load("mode: demo\n").mode == "demo", "демо без входу стартує як і раніше"
@@ -459,8 +460,8 @@ def test_build_access_follows_mode_and_config():
         pytest.skip(f"залежності відсутні: {e}")
     assert not app.build_dashboard_access(_load("mode: demo\n")).enabled
     assert not app.build_dashboard_access(_load(LIVE.format(dashboard="dashboard: {auth: disabled}"))).enabled
-    on = app.build_dashboard_access(_load(LIVE.format(dashboard=f'dashboard: {{users: [{{name: alice, password_hash: "{FAST}"}}]}}')))
-    assert on.enabled and on.users.authenticate("alice", PASSWORD) and on.sessions.ttl_s == 8 * 3600
+    on = app.build_dashboard_access(_load(LIVE.format(dashboard=f'dashboard: {{users: [{{name: alice, password_hash: "{FAST}", role: admin}}]}}')))
+    assert on.enabled and on.users.authenticate("alice", PASSWORD) == "admin" and on.sessions.ttl_s == 8 * 3600
 
 
 def test_demo_stack_has_a_working_dashboard_user():
@@ -485,19 +486,77 @@ def _keygen(*args, env=None):
 
 
 def test_keygen_dashboard_user():
-    out = _keygen("--dashboard-user", "operator", "--generate")
+    out = _keygen("--dashboard-user", "operator", "--role", "operator", "--generate")
     assert out.returncode == 0
     password = next(line.rsplit(": ", 1)[1] for line in out.stdout.splitlines() if "сервер його не зберігає" in line)
     encoded = next(line.split('password_hash: "')[1].rstrip('"}') for line in out.stdout.splitlines() if "password_hash" in line)
     assert len(password) >= da.MIN_PASSWORD_LEN and da.verify_password(password, encoded) and password not in encoded
 
-    via_env = _keygen("--dashboard-user", "ops", "--password-env", "DASH_PW", env={"DASH_PW": "a-sufficiently-long-pass"})
+    via_env = _keygen("--dashboard-user", "ops", "--role", "viewer", "--password-env", "DASH_PW", env={"DASH_PW": "a-sufficiently-long-pass"})
     assert via_env.returncode == 0 and "a-sufficiently-long-pass" not in via_env.stdout, "пароль зі змінної не друкується"
 
-    short = _keygen("--dashboard-user", "ops", "--password-env", "DASH_PW", env={"DASH_PW": "short-pw"})
+    short = _keygen("--dashboard-user", "ops", "--role", "viewer", "--password-env", "DASH_PW", env={"DASH_PW": "short-pw"})
     assert short.returncode == 2 and "short-pw" not in short.stdout + short.stderr and "12" in short.stderr
-    assert _keygen("--dashboard-user", "a b", "--generate").returncode == 2
-    assert _keygen("--dashboard-user", "ops", "--password-env", "NO_SUCH_VAR_123").returncode == 2
+    assert _keygen("--dashboard-user", "a b", "--role", "viewer", "--generate").returncode == 2
+    assert _keygen("--dashboard-user", "ops", "--role", "viewer", "--password-env", "NO_SUCH_VAR_123").returncode == 2
+
+
+# ---------- ролі ----------
+def test_has_role_orders_roles_and_rejects_unknown():
+    assert has_role("admin", "operator") and has_role("operator", "operator")
+    assert not has_role("viewer", "operator")
+    assert not has_role("root", "viewer") and not has_role(None, "viewer") and not has_role("", "viewer")
+
+
+def test_authenticate_returns_role_or_none():
+    users = Users({"alice": UserEntry(FAST, "operator")})
+    assert users.authenticate("alice", PASSWORD) == "operator"
+    assert users.authenticate("alice", "wrong-password!") is None
+    assert users.authenticate("bob", PASSWORD) is None
+
+
+def test_session_carries_role():
+    store = SessionStore(60)
+    assert store.get(store.create("alice", "viewer")).role == "viewer"
+
+
+def test_config_user_without_role_is_rejected():
+    from pydantic import ValidationError
+
+    from dronewatch.service.config import DashboardUser
+    with pytest.raises(ValidationError, match="role"):
+        DashboardUser(name="a", password_hash=FAST)
+
+
+def test_config_user_with_unknown_role_is_rejected():
+    from pydantic import ValidationError
+
+    from dronewatch.service.config import DashboardUser
+    with pytest.raises(ValidationError):
+        DashboardUser(name="a", password_hash=FAST, role="root")
+
+
+def test_keygen_requires_role_and_prints_it(capsys, monkeypatch):
+    from dronewatch.service import keygen
+    monkeypatch.setenv("PW", "x" * 12)
+    with pytest.raises(SystemExit) as no_role:   # без --role argparse відмовляє (код 2)
+        keygen.main(["--dashboard-user", "a", "--password-env", "PW"])
+    assert no_role.value.code != 0
+    with pytest.raises(SystemExit):
+        keygen.main(["--dashboard-user", "a", "--password-env", "PW", "--role", "root"])
+    capsys.readouterr()
+    assert keygen.main(["--dashboard-user", "a", "--password-env", "PW", "--role", "operator"]) == 0
+    assert "role: operator" in capsys.readouterr().out
+
+
+def test_shipped_configs_have_roles():
+    import yaml
+
+    from dronewatch.service import config
+    config.load(str(ROOT / "deploy" / "config.yaml"))   # хеш справжній: конфіг має валідуватися повністю
+    for rel in ("deploy/config.yaml", "src/dronewatch/service/config.example.yaml"):   # у прикладі хеш плейсхолдер
+        users = yaml.safe_load((ROOT / rel).read_text(encoding="utf-8"))["dashboard"]["users"]
+        assert users and all(u.get("role") in ("viewer", "operator", "admin") for u in users), rel
 
 
 # ---------- справжній HTTPS + емулятор ----------
@@ -519,7 +578,7 @@ def test_real_https_login_cookie_and_emulator():
     with tempfile.TemporaryDirectory() as d:
         ca, crt, key = make_pki(d, names=("localhost", "127.0.0.1", "service"))
         srv = HttpsServer(crt, key)
-        srv.api.state.access = DashboardAccess(Users({"alice": FAST}), SessionStore(300), LoginLimiter())
+        srv.api.state.access = DashboardAccess(Users({"alice": UserEntry(FAST, "admin")}), SessionStore(300), LoginLimiter())
         try:
             base = f"https://127.0.0.1:{srv.port}"   # 127.0.0.1 (IP-SAN), не localhost: на Windows ::1 дає зайві ~2 с
             ctx = emulate.tls_context(str(ca))

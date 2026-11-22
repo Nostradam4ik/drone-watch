@@ -8,7 +8,7 @@ import yaml
 from pydantic import BaseModel, Field, ValidationError, field_validator, model_validator
 
 from dronewatch.fusion.models import Sensor
-from dronewatch.service.dashboard_auth import parse_hash
+from dronewatch.service.dashboard_auth import Role, parse_hash
 from dronewatch.service.engine import Zone
 
 
@@ -35,6 +35,7 @@ class AuthCfg(BaseModel):
 class DashboardUser(BaseModel):
     name: str = Field(pattern=r"^[A-Za-z0-9_.@-]{1,64}$")
     password_hash: str = Field(description="scrypt-хеш пароля; видає dronewatch-keygen --dashboard-user ІМ'Я")
+    role: Role = Field(description="viewer читає, operator ще вирішує тривоги й питає AI, admin ще керує розкладкою, покриттям і журналом")
 
     @field_validator("password_hash")
     @classmethod

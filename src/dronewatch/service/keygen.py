@@ -4,9 +4,11 @@
     dronewatch-keygen radar1 rf1 ac1        # новий випадковий ключ для кожного датчика
     dronewatch-keygen --hash <ключ>         # SHA-256 уже наявного ключа (наприклад, після ротації вручну)
     dronewatch-keygen --mosquitto ІМ'Я ПАРОЛЬ   # рядок для mosquitto.passwd з наявного пароля (сервісний користувач тощо)
-    dronewatch-keygen --dashboard-user ІМ'Я     # користувач дашборда: пароль питає двічі (getpass), друкує рядок для config.yaml
-    dronewatch-keygen --dashboard-user ІМ'Я --generate          # то саме з випадковим паролем (показується один раз)
-    DASH_PW=... dronewatch-keygen --dashboard-user ІМ'Я --password-env DASH_PW   # для автоматизації: пароль зі змінної, не з аргументів
+    dronewatch-keygen --dashboard-user ІМ'Я --role operator     # користувач дашборда: пароль питає двічі (getpass)
+    dronewatch-keygen --dashboard-user ІМ'Я --role viewer --generate          # то саме з випадковим паролем (показується один раз)
+    DASH_PW=... dronewatch-keygen --dashboard-user ІМ'Я --role admin --password-env DASH_PW   # автоматизація: пароль зі змінної
+
+Роль обов'язкова: viewer (лише читає), operator (ще вирішує тривоги й питає AI), admin (ще розкладка, покриття, журнал дій).
 
 Для кожного датчика друкує ТРИ речі:
   1. ключ: покажіть його лише цьому датчику (HTTP: заголовок X-API-Key; MQTT: пароль користувача в брокері
@@ -53,7 +55,7 @@ def new_secret(nbytes: int) -> str:
     return secret
 
 
-def dashboard_user(name: str, *, generate: bool, password_env: str | None) -> int:
+def dashboard_user(name: str, role: str, *, generate: bool, password_env: str | None) -> int:
     """Рядок для dashboard.users у config.yaml. Пароль не друкується, крім режиму --generate (там інакше його ніхто не дізнається)."""
     if not re.fullmatch(r"[A-Za-z0-9_.@-]{1,64}", name):
         print("Ім'я: 1-64 символи з літер, цифр і _ . @ -", file=sys.stderr)
@@ -75,22 +77,27 @@ def dashboard_user(name: str, *, generate: bool, password_env: str | None) -> in
     if generate:
         print(f"пароль (покажіть лише користувачу, сервер його не зберігає): {password}")
     print("у config.yaml, dashboard.users:")
-    print(f'  - {{name: {name}, password_hash: "{hash_password(password)}"}}')
+    print(f'  - {{name: {name}, role: {role}, password_hash: "{hash_password(password)}"}}')
     return 0
 
 
-def main() -> int:
+def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description="Генератор ключів датчиків", epilog=__doc__.split("\n\n", 1)[1],
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("sensors", nargs="*", help="id датчиків з config.yaml")
     ap.add_argument("--hash", metavar="KEY", help="лише порахувати key_sha256 для наявного ключа (якщо він починається з «-»: --hash=КЛЮЧ)")
     ap.add_argument("--mosquitto", nargs=2, metavar=("ІМ'Я", "ПАРОЛЬ"), help="лише порахувати рядок для mosquitto.passwd")
     ap.add_argument("--dashboard-user", metavar="ІМ'Я", help="згенерувати рядок для користувача дашборда")
+    ap.add_argument("--role", choices=("viewer", "operator", "admin"), help="з --dashboard-user (обов'язково): роль користувача")
     ap.add_argument("--generate", action="store_true", help="з --dashboard-user: випадковий пароль")
     ap.add_argument("--password-env", metavar="ЗМІННА", help="з --dashboard-user: взяти пароль зі змінної оточення")
-    a = ap.parse_args()
+    a = ap.parse_args(argv)
+    if a.role and not a.dashboard_user:
+        ap.error("--role має сенс лише разом із --dashboard-user")
     if a.dashboard_user:
-        return dashboard_user(a.dashboard_user, generate=a.generate, password_env=a.password_env)
+        if not a.role:
+            ap.error("--dashboard-user потребує --role (viewer, operator або admin)")
+        return dashboard_user(a.dashboard_user, a.role, generate=a.generate, password_env=a.password_env)
     if a.mosquitto:
         print(f"{a.mosquitto[0]}:{mosquitto_hash(a.mosquitto[1])}")
         return 0

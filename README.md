@@ -286,8 +286,8 @@ TLS можна поставити перед сервісом reverse proxy (ngi
 
 **Користувачі.** У конфігу лише scrypt-хеш пароля, самого пароля немає:
 
-    dronewatch-keygen --dashboard-user operator            # пароль питає двічі (getpass), друкує рядок для конфігу
-    dronewatch-keygen --dashboard-user operator --generate # випадковий пароль, показується один раз
+    dronewatch-keygen --dashboard-user operator --role operator            # пароль питає двічі (getpass), друкує рядок для конфігу
+    dronewatch-keygen --dashboard-user operator --role operator --generate # випадковий пароль, показується один раз
 
     dashboard:
       auth: required          # за замовчуванням у live; disabled лише свідомо (у лозі попередження)

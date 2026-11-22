@@ -26,7 +26,7 @@ def _make(tmp_path, *, login: bool):
 @pytest.fixture
 def client(tmp_path):
     c, sessions = _make(tmp_path, login=True)
-    c.cookies.set("dw_session", sessions.create("operator"))
+    c.cookies.set("dw_session", sessions.create("operator", "operator"))
     return c
 
 

@@ -31,7 +31,7 @@ from dronewatch.service.ai.errors import AiUnavailable
 from dronewatch.service.ai.llm import MistralClient
 from dronewatch.service.ai.rag import IncidentIndex
 from dronewatch.service.auth import SensorAuth
-from dronewatch.service.dashboard_auth import LoginLimiter, SessionStore, Users
+from dronewatch.service.dashboard_auth import LoginLimiter, SessionStore, UserEntry, Users
 from dronewatch.service.dashboard_web import DashboardAccess, current_user, json_post_guard, require_user
 from dronewatch.service.demo import DemoSource, make_sensors
 from dronewatch.service.engine import Alert, Engine, SensorStatus, Zone
@@ -198,7 +198,7 @@ def build_dashboard_access(cfg: config.Config) -> DashboardAccess:
     if cfg.dashboard.auth == "disabled":
         log.warning("вхід у дашборд вимкнено (dashboard.auth: disabled): стан, тривоги й WebSocket відкриті всім, хто дістанеться порту")
         return DashboardAccess()
-    return DashboardAccess(Users({u.name: u.password_hash for u in cfg.dashboard.users}),
+    return DashboardAccess(Users({u.name: UserEntry(u.password_hash, u.role) for u in cfg.dashboard.users}),
                            SessionStore(cfg.dashboard.session_ttl_s), LoginLimiter())
 
 

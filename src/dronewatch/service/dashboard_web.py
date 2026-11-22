@@ -107,11 +107,12 @@ def login(body: LoginIn, request: Request) -> Response:
     if wait := access.limiter.attempt(client):
         log.warning("вхід заблоковано (забагато невдалих спроб) з %s", client)
         raise HTTPException(429, "Забагато невдалих спроб, спробуйте пізніше", headers={"Retry-After": str(math.ceil(wait))})
-    if not access.users.authenticate(body.username, body.password):
+    role = access.users.authenticate(body.username, body.password)
+    if role is None:
         log.warning("невдалий вхід: ім'я %r з %s", body.username, client)   # %r екранує переноси рядків; пароля в лозі немає
         raise HTTPException(401, "Хибний логін або пароль")
     access.limiter.reset(client)
-    token = access.sessions.create(body.username)
+    token = access.sessions.create(body.username, role)
     log.info("вхід: %s з %s", body.username, client)
     response = JSONResponse({"user": body.username})
     response.set_cookie(COOKIE, token, max_age=int(access.sessions.ttl_s), httponly=True, samesite="strict", path="/",

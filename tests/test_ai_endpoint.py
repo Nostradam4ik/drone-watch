@@ -31,7 +31,7 @@ def _client(*, ai, logged_in):
     app.app.state.access = DashboardAccess(sessions=sessions)
     client = TestClient(app.app, raise_server_exceptions=False)
     if logged_in:
-        token = sessions.create("operator")
+        token = sessions.create("operator", "operator")
         client.cookies.set("dw_session", token)
     return client
 
