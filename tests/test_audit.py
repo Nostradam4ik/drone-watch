@@ -1,10 +1,11 @@
 """Журнал дій: append-only, ланцюжок хешів, очищення вводу, збої запису."""
 import sqlite3
 import threading
+from unittest.mock import Mock
 
 import pytest
 
-from dronewatch.service.audit import GENESIS, AuditEntry, AuditError, AuditLog, VerifyResult
+from dronewatch.service.audit import GENESIS, AuditEntry, AuditError, AuditLog, VerifyResult, clean
 
 
 def make_log():
@@ -82,3 +83,17 @@ def test_blocked_record_once_per_window():
     assert log.allow_blocked_record("1.2.3.4", 300) is True
     assert log.allow_blocked_record("1.2.3.4", 300) is False
     assert log.allow_blocked_record("1.2.3.4", 300) is True
+
+
+def test_surrogates_are_stripped_and_chain_stays_valid():
+    assert clean("a\ud800b", 10) == "ab"
+    _db, log = make_log()
+    log.append(AuditEntry("a\ud800", "admin", "login_failed", "t\udfff", "failed", "1.2.3.4"))
+    assert log.read()[0]["user"] == "a" and log.verify().ok is True
+
+
+def test_append_wraps_non_sqlite_errors_into_audit_error():
+    _db, log = make_log()
+    log._clock = Mock(side_effect=RuntimeError("boom"))
+    with pytest.raises(AuditError):
+        log.append(E)

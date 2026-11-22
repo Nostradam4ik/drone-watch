@@ -455,7 +455,7 @@ class Engine:
                 if audit is not None:
                     self.audit.append_locked(audit)
                 self.db.commit()
-            except (sqlite3.Error, AuditError) as e:
+            except Exception as e:   # не лише sqlite: будь-який збій запису журналу не має лишити напівтранзакцію на спільному зʼєднанні
                 if audit is None:
                     raise
                 with contextlib.suppress(sqlite3.Error):

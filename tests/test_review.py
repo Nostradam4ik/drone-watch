@@ -135,3 +135,13 @@ def test_review_rolls_back_when_audit_fails(eng, monkeypatch):
         eng.review_incident(iid, "confirmed", "alice", audit=AuditEntry("alice", "operator", "review", "x", "ok", "?"))
     assert _read_status(eng, iid) in (None, "new")   # рішення не записалось
     assert eng.db.execute("SELECT count(*) FROM incident_reviews").fetchone() == (0,)
+
+
+def test_review_rolls_back_on_non_sqlite_audit_failure(eng, monkeypatch):
+    iid = _insert(eng)
+    monkeypatch.setattr(eng.audit, "append_locked", Mock(side_effect=RuntimeError("boom")))
+    with pytest.raises(AuditError):
+        eng.review_incident(iid, "confirmed", "alice", audit=AuditEntry("alice", "operator", "review", "x", "ok", "?"))
+    eng.db.commit()   # чужий commit не має зберегти половину транзакції
+    assert _read_status(eng, iid) in (None, "new")
+    assert eng.db.execute("SELECT count(*) FROM incident_reviews").fetchone() == (0,)

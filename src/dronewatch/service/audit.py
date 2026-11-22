@@ -1,8 +1,8 @@
 """Журнал дій оператора й адміністратора: лише дописування, кожен рядок звʼязаний хешем із попереднім.
 
 Захист двошаровий: тригери SQLite не дають змінити чи видалити рядок звичайним запитом, а ланцюжок хешів (`verify`)
-виявляє зміну, навіть якщо тригери зняли напряму в файлі БД. Керівні символи (категорії Unicode Cc і Cf) вилучаються ще
-до запису, щоб імʼя чи коментар не підробили рядок журналу в терміналі чи інтерфейсі."""
+виявляє зміну, навіть якщо тригери зняли напряму в файлі БД. Керівні символи (категорії Unicode Cc, Cf і Cs; Cs це одинокі сурогати, що не
+кодуються в UTF-8) вилучаються ще до запису, щоб імʼя чи коментар не підробили рядок журналу в терміналі чи інтерфейсі."""
 import contextlib
 import hashlib
 import json
@@ -44,7 +44,7 @@ class VerifyResult:
 
 def clean(text: object, limit: int) -> str:
     """str(), без керівних символів (Cc, Cf), обрізано до `limit`."""
-    s = "".join(ch for ch in str(text) if unicodedata.category(ch) not in ("Cc", "Cf"))
+    s = "".join(ch for ch in str(text) if unicodedata.category(ch) not in ("Cc", "Cf", "Cs"))
     return s[:limit]
 
 
@@ -87,7 +87,7 @@ class AuditLog:
                 rid = self.append_locked(entry)
                 self._db.commit()
                 return rid
-            except sqlite3.Error as e:
+            except Exception as e:   # будь-який збій (не лише sqlite) = відкіт і AuditError, щоб виклик не лишив напівтранзакцію
                 with contextlib.suppress(sqlite3.Error):
                     self._db.rollback()
                 raise AuditError(f"не вдалося записати в журнал дій: {e}") from e
