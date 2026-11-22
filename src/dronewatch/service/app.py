@@ -44,6 +44,7 @@ from dronewatch.service.dashboard_web import (
     json_post_guard,
     page_identity,
     require_role,
+    same_origin_guard,
 )
 from dronewatch.service.demo import DemoSource, make_sensors
 from dronewatch.service.engine import Alert, Engine, SensorStatus, Zone
@@ -264,6 +265,7 @@ def build_dashboard_access(cfg: config.Config) -> DashboardAccess:
 app = FastAPI(title="Drone Watch", lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)   # схема API не публічна
 app.include_router(dashboard_web.router)
 app.middleware("http")(dashboard_web.add_security_headers)
+app.add_middleware(dashboard_web.BodyLimitMiddleware)   # зовнішній шар: завелике тіло відсікається до будь-якого розбору
 
 
 @app.exception_handler(RequestValidationError)
@@ -470,7 +472,7 @@ def audited_change[T](conn: HTTPConnection, ident: Identity, action: str, target
     return done
 
 
-@app.put("/api/layout")
+@app.put("/api/layout", dependencies=[Depends(json_post_guard)])
 async def put_layout(ident: AdminDep, request: Request, body: layout.Layout, rt: RuntimeDep) -> dict[str, Any]:
     """Нова розстановка (повний список датчиків): додати, пересунути чи прибрати датчик це одна атомарна заміна."""
     return audited_change(request, ident, "layout_save", f"sensors={len(body.sensors)}", lambda: apply_layout(rt, layout.build(body)))
@@ -482,7 +484,7 @@ def get_coverage(rt: RuntimeDep) -> dict[str, Any]:
     return coverage.coverage(list(rt.engine.sensors.values()), rt.engine.zones, rt.los, rt.target_alt)
 
 
-@app.post("/api/coverage")
+@app.post("/api/coverage", dependencies=[Depends(json_post_guard)])
 async def post_coverage(_: AdminDep, body: layout.Layout, rt: RuntimeDep) -> dict[str, Any]:
     """Що покриває ця розстановка в буферній зоні (клітинки з класом). Нічого не змінює: лише рахує для підсвітки в редакторі.
     Лише для admin (інструмент редактора), але в журнал не пишеться: стану не змінює, а редактор кличе його щокілька сотень мс
@@ -490,7 +492,7 @@ async def post_coverage(_: AdminDep, body: layout.Layout, rt: RuntimeDep) -> dic
     return coverage.coverage(layout.build(body), None, rt.los, rt.target_alt)
 
 
-@app.delete("/api/layout")
+@app.delete("/api/layout", dependencies=[Depends(same_origin_guard)])
 async def reset_layout(ident: AdminDep, request: Request, rt: RuntimeDep) -> dict[str, Any]:
     """Повернути вбудовані датчики демо."""
     return audited_change(request, ident, "layout_reset", "reset", lambda: apply_layout(rt, make_sensors()))
@@ -586,7 +588,7 @@ class AskResponse(BaseModel):
     tool_calls: list[dict[str, Any]]
 
 
-@app.post("/api/ai/ask", response_model=None)
+@app.post("/api/ai/ask", response_model=None, dependencies=[Depends(json_post_guard)])
 def ask_ai(ident: OperatorDep, body: AskRequest, rt: RuntimeDep) -> AskResponse | JSONResponse:
     """Чат-агент оператора: читає живий стан і минулі інциденти через тули, нічого не пише в систему (і в журнал дій теж:
     лише читання, і запитів багато). 503, якщо AI вимкнено чи недоступний — трекінг дронів від цього не залежить.
