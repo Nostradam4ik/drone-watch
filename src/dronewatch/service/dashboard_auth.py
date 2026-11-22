@@ -96,6 +96,11 @@ class Users:
         self._entries = dict(entries)
         self._dummy = hash_password(secrets.token_urlsafe(16))   # для вирівнювання часу, коли імені немає
 
+    def role_of(self, name: str) -> Role | None:
+        """Роль користувача за поточним конфігом; None, якщо його там уже немає."""
+        entry = self._entries.get(name)
+        return entry.role if entry else None
+
     def authenticate(self, name: str, password: str) -> Role | None:
         """Роль користувача, якщо пароль вірний; інакше None."""
         entry = self._entries.get(name)

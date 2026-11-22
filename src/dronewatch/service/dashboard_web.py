@@ -28,7 +28,7 @@ from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, Resp
 from pydantic import BaseModel, ConfigDict, Field
 
 from dronewatch.service.audit import AuditEntry, AuditError
-from dronewatch.service.dashboard_auth import MAX_PASSWORD_LEN, LimiterLike, Role, SessionStoreLike, Users, has_role, limiter_key
+from dronewatch.service.dashboard_auth import MAX_PASSWORD_LEN, LimiterLike, Role, Session, SessionStoreLike, Users, has_role, limiter_key
 
 log = logging.getLogger("dronewatch.dashboard")
 STATIC = Path(__file__).resolve().parent / "static"
@@ -69,8 +69,16 @@ class DashboardAccess:
         """Користувач і роль із чинної сесії; None, якщо входу не було чи сесія скінчилась. Без входу: анонімний viewer."""
         if self.sessions is None:
             return Identity(ANONYMOUS, ANONYMOUS_ROLE)
-        session = self.sessions.get(self.token(conn))
-        return Identity(session.user, session.role) if session else None
+        return self._current(self.sessions.get(self.token(conn)))
+
+    def _current(self, session: Session | None) -> Identity | None:
+        """Сесія чинна, лише якщо користувач ще є в конфігу й роль та сама: у Redis сесії переживають перезапуск, і видалений
+        чи пониженій користувач інакше діяв би до кінця TTL."""
+        if session is None:
+            return None
+        if self.users is not None and self.users.role_of(session.user) != session.role:
+            return None
+        return Identity(session.user, session.role)
 
     def user(self, conn: HTTPConnection) -> str | None:
         """Ім'я користувача з чинної сесії; None, якщо входу не було чи сесія скінчилась."""
@@ -78,7 +86,7 @@ class DashboardAccess:
         return ident.user if ident else None
 
     def session_valid(self, token: str | None) -> bool:
-        return self.sessions is None or self.sessions.get(token) is not None
+        return self.sessions is None or self._current(self.sessions.get(token)) is not None
 
 
 def get_access(conn: HTTPConnection) -> DashboardAccess:

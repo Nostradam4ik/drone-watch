@@ -213,3 +213,15 @@ def test_broadcast_sends_nothing_when_redis_dies(redis_client):
     asyncio.run(app.broadcast(rt, access, {"x": 1}))
     ws.send_json.assert_not_awaited()   # fail-closed: данні не йдуть, клієнт лишається в списку
     assert ws in rt.clients
+
+
+def test_session_dies_when_user_is_removed_or_role_changed():
+    from dronewatch.service.dashboard_auth import UserEntry, Users
+    fake = FakeRedis()
+    store = RedisSessionStore(fake, 3600)
+    token = store.create("alice", "admin")
+    same = DashboardAccess(Users({"alice": UserEntry(FAST, "admin")}), store, RedisLoginLimiter(fake))
+    assert same.session_valid(token)
+    for users in ({"bob": UserEntry(FAST, "admin")}, {"alice": UserEntry(FAST, "viewer")}):   # видалений / понижений
+        access = DashboardAccess(Users(users), store, RedisLoginLimiter(fake))
+        assert not access.session_valid(token)
