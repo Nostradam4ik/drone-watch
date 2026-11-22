@@ -9,6 +9,7 @@ from dronewatch.fusion.sim import SENSOR_TYPES, make_sensor
 from dronewatch.service import config
 from dronewatch.service.app import app, build_runtime
 from dronewatch.service.dashboard_web import DashboardAccess
+from helpers_auth import login_as
 
 ROOT = Path(__file__).resolve().parent.parent
 REAL = {k: v for k, v in SENSOR_TYPES.items() if "real" in v}
@@ -78,8 +79,10 @@ def test_generic_models_are_not_labelled_as_real():
 def client(tmp_path, monkeypatch):
     monkeypatch.setenv("DB_PATH", str(tmp_path / "t.db"))
     app.state.runtime = build_runtime(config.Config(mode="demo"))
-    app.state.access = DashboardAccess()
-    return TestClient(app)
+    app.state.access = DashboardAccess()   # вхід вимкнено: анонім лише viewer, тож редагувати розкладку входимо як admin
+    client = TestClient(app)
+    login_as(client, "admin")
+    return client
 
 
 def test_api_tells_dashboard_which_models_are_real_and_what_is_assumed(client):

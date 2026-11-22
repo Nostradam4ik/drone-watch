@@ -74,6 +74,10 @@
       <h2 class="hd-tracks">Активні треки</h2>
       <div id="tracks"><table><thead><tr><th>ID</th><th class="l">Тип</th><th>Рівень</th><th>V, м/с</th><th>H, м</th></tr></thead><tbody id="tbody"></tbody></table></div>
     </div>
+    <details id="audit-box" hidden>
+      <summary>Журнал дій <span id="audit-integrity" class="chip"></span></summary>
+      <div id="audit-wrap"><table><thead><tr><th>Час</th><th class="l">Користувач</th><th class="l">Роль</th><th class="l">Дія</th><th class="l">Ціль</th><th class="l">Результат</th><th class="l">IP</th></tr></thead><tbody id="audit-body"></tbody></table></div>
+    </details>
     <div id="ai-box">
       <h2 class="hd-ai">AI-асистент</h2>
       <div id="ai-log"><div class="empty">Запитайте про стан чи минулі інциденти</div></div>
@@ -91,6 +95,7 @@
 <script src="/static/app/panels.js"></script>
 <script src="/static/app/sound.js"></script>
 <script src="/static/app/editor.js"></script>
+<script src="/static/app/audit.js"></script>
 <script src="/static/app/main.js"></script>
 </body>
 </html>

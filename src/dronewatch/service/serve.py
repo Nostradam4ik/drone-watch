@@ -50,7 +50,9 @@ def settings(env: Mapping[str, str] = os.environ) -> ServerSettings:
 
 def main() -> None:
     cfg = settings()
-    uvicorn.run("dronewatch.service.app:app", host=cfg.host, port=cfg.port, ssl_certfile=cfg.ssl_certfile, ssl_keyfile=cfg.ssl_keyfile)
+    # X-Forwarded-For довіряємо лише коли оператор свідомо задав FORWARDED_ALLOW_IPS (довірені проксі); інакше client.host це сам сокет
+    uvicorn.run("dronewatch.service.app:app", host=cfg.host, port=cfg.port, ssl_certfile=cfg.ssl_certfile, ssl_keyfile=cfg.ssl_keyfile,
+                proxy_headers=bool(os.environ.get("FORWARDED_ALLOW_IPS")))
 
 
 if __name__ == "__main__":

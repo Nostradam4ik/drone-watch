@@ -11,18 +11,30 @@
 import base64
 import hashlib
 import hmac
+import ipaddress
 import secrets
 import threading
 import time
 from collections import deque
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
+from typing import Literal
 
 MIN_PASSWORD_LEN = 12        # keygen не видасть хеш для коротшого пароля
 MAX_PASSWORD_LEN = 256       # довший відкидаємо ще до хешування: інакше великі «паролі» стали б дешевою атакою на CPU
 SCRYPT_N, SCRYPT_R, SCRYPT_P = 2**14, 8, 1   # ~16 МБ памʼяті й десятки мс на перевірку
 _LIMITS = {"n": 2**20, "r": 16, "p": 4}      # стеля для параметрів із хеша: зіпсований конфіг не має вимагати гігабайтів
 MAX_SESSIONS = 1000
+
+Role = Literal["viewer", "operator", "admin"]
+ROLE_RANK: dict[str, int] = {"viewer": 0, "operator": 1, "admin": 2}   # viewer < operator < admin
+
+
+def has_role(actual: str | None, required: Role) -> bool:
+    """Чи роль `actual` не нижча за `required`. Невідома роль або None = відмова, ніколи не дозвіл."""
+    if actual is None or actual not in ROLE_RANK:
+        return False
+    return ROLE_RANK[actual] >= ROLE_RANK[required]
 
 
 @dataclass(frozen=True, slots=True)
@@ -69,22 +81,30 @@ def verify_password(password: str, encoded: str) -> bool:
     return hmac.compare_digest(_scrypt(password, n=h.n, r=h.r, p=h.p, salt=h.salt, length=len(h.digest)), h.digest)
 
 
-class Users:
-    """Імена й хеші паролів. `authenticate` працює однаково довго для існуючого й неіснуючого імені."""
+@dataclass(frozen=True)
+class UserEntry:
+    password_hash: str
+    role: Role
 
-    def __init__(self, hashes: Mapping[str, str]) -> None:
-        self._hashes = dict(hashes)
+
+class Users:
+    """Імена, хеші паролів і ролі. `authenticate` працює однаково довго для існуючого й неіснуючого імені."""
+
+    def __init__(self, entries: Mapping[str, UserEntry]) -> None:
+        self._entries = dict(entries)
         self._dummy = hash_password(secrets.token_urlsafe(16))   # для вирівнювання часу, коли імені немає
 
-    def authenticate(self, name: str, password: str) -> bool:
-        encoded = self._hashes.get(name)
-        verified = verify_password(password, encoded or self._dummy)
-        return encoded is not None and verified
+    def authenticate(self, name: str, password: str) -> Role | None:
+        """Роль користувача, якщо пароль вірний; інакше None."""
+        entry = self._entries.get(name)
+        verified = verify_password(password, entry.password_hash if entry else self._dummy)
+        return entry.role if entry is not None and verified else None
 
 
 @dataclass(slots=True)
 class Session:
     user: str
+    role: str
     expires: float
 
 
@@ -100,14 +120,14 @@ class SessionStore:
     def _key(token: str) -> str:
         return hashlib.sha256(token.encode()).hexdigest()
 
-    def create(self, user: str) -> str:
+    def create(self, user: str, role: Role) -> str:
         token = secrets.token_urlsafe(32)
         with self._lock:
             now = self._clock()
             self._items = {k: s for k, s in self._items.items() if s.expires > now}
             while len(self._items) >= self._max:   # стеля памʼяті: витісняємо найстарішу
                 self._items.pop(min(self._items, key=lambda k: self._items[k].expires))
-            self._items[self._key(token)] = Session(user, now + self.ttl_s)
+            self._items[self._key(token)] = Session(user, role, now + self.ttl_s)
         return token
 
     def get(self, token: str | None) -> Session | None:
@@ -125,6 +145,18 @@ class SessionStore:
             return False
         with self._lock:
             return self._items.pop(self._key(token), None) is not None
+
+
+def limiter_key(ip: str) -> str:
+    """Ключ ліміту входів: IPv4 як є, IPv6 за мережею /64 (одному клієнтові дають цілу /64, інакше кожна адреса мала б свій ліміт)."""
+    try:
+        addr = ipaddress.ip_address(ip)
+    except ValueError:
+        return ip
+    # ::ffff:1.2.3.4 це IPv4-клієнт на двостековому сокеті: окремий ключ, а не спільна /64
+    if addr.version == 6 and addr.ipv4_mapped is not None:
+        return str(addr.ipv4_mapped)
+    return str(ipaddress.ip_network((addr, 64), strict=False)) if addr.version == 6 else ip
 
 
 class LoginLimiter:

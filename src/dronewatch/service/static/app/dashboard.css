@@ -214,3 +214,12 @@ td.NONE, dd.NONE { color: var(--ok); } td.WARNING, dd.WARNING { color: var(--war
 .toast.WARNING { border-color: var(--warn); border-left-color: var(--warn); }
 
 @media (max-width: 800px) { main { grid-template-columns: 1fr; grid-template-rows: 55vh 1fr; } aside { border-left: 0; border-top: 1px solid var(--line); } }
+
+/* журнал дій (admin) */
+#audit-box[hidden] { display: none; }
+#audit-box { border-top: 1px solid var(--line); }
+#audit-box summary { cursor: pointer; padding: 8px 12px; }
+#audit-wrap { max-height: 28vh; overflow: auto; font-size: 11px; }
+#audit-wrap table { width: 100%; border-collapse: collapse; }
+#audit-wrap td, #audit-wrap th { padding: 2px 6px; white-space: nowrap; }
+#ai-box[hidden] { display: none; }

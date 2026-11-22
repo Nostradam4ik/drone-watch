@@ -1,6 +1,7 @@
 """Дашборд у справжньому браузері (Playwright, Chromium). Запуск: pytest -m browser
 
-Сервіс піднімається окремим процесом у demo-режимі (без входу, відкритий HTTP лише на 127.0.0.1). Сторінку, статику
+Сервіс піднімається окремим процесом у demo-режимі з трьома користувачами (viewer, operator, admin): вхід обовʼязковий,
+відкритий HTTP лише на 127.0.0.1. Сторінку, статику
 й HTTP API віддає він сам. WebSocket у більшості тестів підмінено: тест сам шле знімок стану, тож тривоги й треки
 видно одразу і щоразу ті самі (симуляція демо йде в реальному часі, перші тривоги лише за ~40-60 с). Один тест іде
 на живому WebSocket, щоб підміна не приховала розбіжність із сервером.
@@ -23,6 +24,8 @@ from typing import Any
 import pytest
 
 ROOT = Path(__file__).resolve().parent.parent
+PASSWORD = "browser-test-password-1"
+ROLES = ("viewer", "operator", "admin")
 pytestmark = pytest.mark.browser
 
 if os.environ.get("DW_REQUIRE_BROWSER") == "1":
@@ -43,12 +46,27 @@ def get_json(url: str) -> Any:
         return json.load(r)
 
 
+def login_json(base: str, role: str, path: str) -> Any:
+    """Входить через /api/login і віддає JSON за `path` (конфіг потрібен тестам до відкриття сторінки)."""
+    req = urllib.request.Request(base + "/api/login", data=json.dumps({"username": role, "password": PASSWORD}).encode(),
+                                 headers={"Content-Type": "application/json", "Origin": base})
+    with urllib.request.urlopen(req, timeout=5) as r:
+        cookie = r.headers["Set-Cookie"].split(";")[0]
+    with urllib.request.urlopen(urllib.request.Request(base + path, headers={"Cookie": cookie}), timeout=5) as r:
+        return json.load(r)
+
+
 @pytest.fixture(scope="module")
 def server(tmp_path_factory: pytest.TempPathFactory) -> Iterator[dict[str, Any]]:
     """Сервіс у demo-режимі. Робоча тека тимчасова: власної карти там немає (map: none), журнал інцидентів свій."""
     work = tmp_path_factory.mktemp("browser")
     port = free_port()
-    env = {**os.environ, "CONFIG": str(ROOT / "deploy" / "config.demo.yaml"), "DB_PATH": str(work / "incidents.db")}
+    from dronewatch.service.dashboard_auth import hash_password
+    h = hash_password(PASSWORD)
+    conf = work / "config.yaml"
+    conf.write_text((ROOT / "deploy" / "config.demo.yaml").read_text(encoding="utf-8") + "dashboard:\n  users:\n" +
+                    "".join(f'    - {{name: {r}, password_hash: "{h}", role: {r}}}\n' for r in ROLES), encoding="utf-8")
+    env = {**os.environ, "CONFIG": str(conf), "DB_PATH": str(work / "incidents.db")}
     env.pop("MISTRAL_API_KEY", None)
     log = (work / "server.log").open("w", encoding="utf-8")
     proc = subprocess.Popen([sys.executable, "-m", "uvicorn", "dronewatch.service.app:app", "--host", "127.0.0.1", "--port", str(port),
@@ -58,14 +76,14 @@ def server(tmp_path_factory: pytest.TempPathFactory) -> Iterator[dict[str, Any]]
         deadline = time.time() + 30
         while True:
             try:
-                cfg = get_json(base + "/api/config")
+                get_json(base + "/api/health")   # публічний: без входу віддає лише {"ok": ...}
                 break
             except OSError:
                 if proc.poll() is not None or time.time() > deadline:
                     log.close()
                     raise RuntimeError("сервіс не стартував:\n" + (work / "server.log").read_text(encoding="utf-8")) from None
                 time.sleep(0.2)
-        yield {"base": base, "cfg": cfg}
+        yield {"base": base, "cfg": login_json(base, "admin", "/api/config")}
     finally:
         proc.terminate()
         try:
@@ -94,6 +112,7 @@ class Dashboard:
     def __init__(self, page: Page, cfg: dict[str, Any]) -> None:
         self.page, self.cfg = page, cfg
         self.ws: WebSocketRoute | None = None
+        self.errors: list[str] = []
 
     def push(self, msg: dict[str, Any]) -> None:
         assert self.ws is not None, "сторінка ще не відкрила WebSocket"
@@ -138,21 +157,45 @@ def watch_errors(page: Page) -> list[str]:
     return errors
 
 
-@pytest.fixture
-def dash(server: dict[str, Any], browser: Any) -> Iterator[Dashboard]:
-    ctx = browser.new_context(reduced_motion="reduce", viewport={"width": 1400, "height": 900})
-    page = ctx.new_page()
-    errors = watch_errors(page)
-    d = Dashboard(page, server["cfg"])
+def sign_in(page: Page, base: str, role: str, username: str = "", password: str = PASSWORD) -> int:
+    """Вхід у контексті браузера (кука лишається в ньому). Повертає HTTP-статус."""
+    page.goto(base + "/login")
+    return int(page.evaluate("""async ([u, p]) => (await fetch("/api/login", {method: "POST", credentials: "same-origin",
+        headers: {"Content-Type": "application/json"}, body: JSON.stringify({username: u, password: p})})).status""",
+                             [username or role, password]))
 
-    def on_ws(ws: WebSocketRoute) -> None:   # до сервера не підключаємось: кадри шле тест
-        d.ws = ws
-    page.route_web_socket("**/ws", on_ws)
-    page.goto(server["base"] + "/")
-    expect(page.locator("#conn")).to_have_text("на звʼязку")
+
+@pytest.fixture
+def dash_as(server: dict[str, Any], browser: Any) -> Iterator[Any]:
+    """dash_as(role) відкриває дашборд користувачем із цією роллю, WebSocket підмінено (кадри шле тест)."""
+    ctxs: list[Any] = []
+
+    def make(role: str) -> Dashboard:
+        ctx = browser.new_context(reduced_motion="reduce", viewport={"width": 1400, "height": 900})
+        ctxs.append(ctx)
+        page = ctx.new_page()
+        errors = watch_errors(page)
+        assert sign_in(page, server["base"], role) == 200
+        d = Dashboard(page, server["cfg"])
+        d.errors = errors
+
+        def on_ws(ws: WebSocketRoute) -> None:   # до сервера не підключаємось: кадри шле тест
+            d.ws = ws
+        page.route_web_socket("**/ws", on_ws)
+        page.goto(server["base"] + "/")
+        expect(page.locator("#conn")).to_have_text("на звʼязку")
+        return d
+    yield make
+    for c in ctxs:
+        c.close()
+
+
+@pytest.fixture
+def dash(dash_as: Any) -> Iterator[Dashboard]:
+    """Оператор: вирішує тривоги й питає AI (наявні тести працюють саме так)."""
+    d = dash_as("operator")
     yield d
-    ctx.close()
-    assert not errors, "\n".join(errors)
+    assert not d.errors, "\n".join(d.errors)
 
 
 # ---------- живий сервер ----------
@@ -160,6 +203,7 @@ def test_page_loads_and_shows_live_tracks_from_the_real_websocket(server, browse
     ctx = browser.new_context()
     page = ctx.new_page()
     errors = watch_errors(page)
+    assert sign_in(page, server["base"], "admin") == 200
     page.goto(server["base"] + "/")
     expect(page.locator("#conn")).to_have_text("на звʼязку")
     expect(page.locator("#mode")).to_have_text("ДЕМО (симуляція)")
@@ -174,6 +218,7 @@ def test_static_app_files_load_without_404(server, browser):
     ctx = browser.new_context()
     page = ctx.new_page()
     failed: list[str] = []
+    assert sign_in(page, server["base"], "admin") == 200
     page.on("response", lambda r: failed.append(f"{r.status} {r.url}") if r.status >= 400 else None)
     page.goto(server["base"] + "/", wait_until="networkidle")
     ctx.close()
@@ -348,3 +393,60 @@ def test_ai_unavailable_is_reported(dash):
     dash.page.locator("#ai-q-input").fill("стан?")
     dash.page.locator("#ai-form button").click()
     expect(dash.page.locator("#ai-log .ai-a")).to_have_text("AI недоступний")
+
+
+# ---------- ролі ----------
+def test_viewer_sees_no_review_buttons_editor_or_ai(dash_as):
+    d = dash_as("viewer")
+    d.push(d.state(alerts=[alert(1, 1), alert(2, 1, status="confirmed", reviewed_by="oper", reviewed_at=1795352400.0)]))
+    expect(d.page.locator("#alerts .alert")).to_have_count(2)
+    expect(d.page.locator("button[data-review]")).to_have_count(0)
+    expect(d.page.locator("input[data-note]")).to_have_count(0)
+    expect(d.page.locator('.rv[data-id="2"] .st')).to_have_text("✓ підтверджено")   # підсумок рішення видно
+    expect(d.page.locator("#edit-sensors")).to_be_hidden()
+    expect(d.page.locator("#ai-box")).to_be_hidden()
+    expect(d.page.locator("#audit-box")).to_be_hidden()
+    expect(d.page.locator("#who-name")).to_have_text("viewer (перегляд)")
+    assert not d.errors, d.errors
+
+
+def test_operator_reviews_but_cannot_edit_layout(dash_as):
+    d = dash_as("operator")
+    d.push(d.state(alerts=[alert(1, 1)]))
+    expect(d.page.locator("button[data-review]")).to_have_count(2)
+    expect(d.page.locator("#ai-form")).to_be_visible()
+    expect(d.page.locator("#edit-sensors")).to_be_hidden()
+    expect(d.page.locator("#audit-box")).to_be_hidden()
+    expect(d.page.locator("#catalog-body [draggable]")).to_have_count(0)
+    assert not d.errors, d.errors
+
+
+def test_forbidden_review_shows_insufficient_rights_toast(dash):
+    dash.page.route("**/api/incidents/*/review", lambda r: r.fulfill(status=403, body="{}"))
+    dash.push(dash.state(alerts=[alert(60, 1)]))
+    dash.page.locator('.rv[data-id="60"] button[data-review="confirmed"]').click()
+    expect(dash.page.locator("#toast .toast.WARNING")).to_contain_text("Недостатньо прав")
+
+
+def test_admin_sees_audit_tab_with_integrity_ok(dash_as):
+    d = dash_as("admin")
+    expect(d.page.locator("#edit-sensors")).to_be_visible()
+    expect(d.page.locator("#ai-form")).to_be_visible()
+    expect(d.page.locator("#audit-box")).to_be_visible()
+    d.page.locator("#audit-box summary").click()
+    expect(d.page.locator("#audit-body tr", has_text="login").first).to_be_visible()
+    expect(d.page.locator("#audit-integrity")).to_have_text("цілий на момент старту")
+    assert not d.errors, d.errors
+
+
+def test_audit_rows_are_rendered_as_text(dash_as, server):
+    evil = '<img src=x onerror="window.__pwned=1">'
+    d0 = dash_as("viewer")
+    assert sign_in(d0.page, server["base"], "viewer", username=evil, password="wrong-password-xx") == 401
+    d = dash_as("admin")
+    d.page.locator("#audit-box summary").click()
+    row = d.page.locator("#audit-body tr", has_text="login_failed").first
+    expect(row).to_contain_text(evil)
+    assert d.page.locator("#audit-body img").count() == 0
+    assert d.page.evaluate("window.__pwned") is None
+    assert not d.errors, d.errors

@@ -3,13 +3,16 @@ async function start() {
   cfg = await api("/api/config");
   const mode = document.getElementById("mode");
   mode.textContent = cfg.demo ? "ДЕМО (симуляція)" : "бойовий режим"; mode.className = "chip " + (cfg.demo ? "" : "live");
-  const me = await api("/api/me");
+  me = await api("/api/me");
   if (me.auth) {   // без автентифікації (демо) ні імені, ні кнопки виходу
-    document.getElementById("who-name").textContent = me.user;
+    document.getElementById("who-name").textContent = me.user + " (" + (ROLE_UA[me.role] || me.role) + ")";
     document.getElementById("who").hidden = document.getElementById("logout").hidden = false;
   }
+  cfg.editable = cfg.editable && can("admin");   // розстановку датчиків робить лише admin (і лише в демо)
   renderCatalog();
-  document.getElementById("edit-sensors").hidden = !cfg.editable;   // лише демо: у бойовому режимі датчики задає конфіг
+  document.getElementById("edit-sensors").hidden = !cfg.editable;
+  document.getElementById("ai-box").hidden = !can("operator");
+  initAudit();
   initMap();
   connect();
 }

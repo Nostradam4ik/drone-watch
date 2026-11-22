@@ -33,6 +33,7 @@ viz = ["matplotlib>=3.8"]   # лише для dronewatch.fusion.viz (малює 
 [project.scripts]
 dronewatch-serve = "dronewatch.service.serve:main"
 dronewatch-keygen = "dronewatch.service.keygen:main"
+dronewatch-audit = "dronewatch.service.audit_cli:main"
 dronewatch-mapbuild = "dronewatch.service.mapbuild:main"
 dronewatch-bench = "dronewatch.service.flood_bench:main"
 dronewatch-emulate = "dronewatch.emulator.emulate:main"

@@ -26,7 +26,7 @@ def _make(tmp_path, *, login: bool):
 @pytest.fixture
 def client(tmp_path):
     c, sessions = _make(tmp_path, login=True)
-    c.cookies.set("dw_session", sessions.create("operator"))
+    c.cookies.set("dw_session", sessions.create("operator", "operator"))
     return c
 
 
@@ -46,9 +46,29 @@ def test_review_ok_records_author_from_session(client):
     assert row["status"] == "confirmed"
 
 
-def test_review_without_login_feature_uses_anonymous_name(tmp_path):
+def test_review_without_login_feature_is_denied_to_anonymous_viewer(tmp_path):
+    """Без входу анонім лише viewer: рішення по тривозі (operator) йому недоступне, і відмова потрапляє в журнал."""
     c, _ = _make(tmp_path, login=False)
-    assert _post(c, status="dismissed").json()["reviewed_by"] == ANONYMOUS
+    r = _post(c, status="dismissed")
+    assert r.status_code == 403
+    eng = app.app.state.runtime.engine
+    assert eng.db.execute("SELECT status FROM incidents WHERE id=1").fetchone()[0] is None
+    row = eng.audit.read()[0]
+    assert (row["user"], row["role"], row["action"]) == (ANONYMOUS, "viewer", "denied")
+
+
+def test_review_by_viewer_is_denied(tmp_path):
+    c, sessions = _make(tmp_path, login=True)
+    c.cookies.set("dw_session", sessions.create("vera", "viewer"))
+    assert _post(c, status="confirmed").status_code == 403
+    assert c.get("/api/incidents").status_code == 200, "читати viewer може"
+
+
+def test_review_writes_audit_row(client):
+    assert _post(client, status="confirmed").status_code == 200
+    row = app.app.state.runtime.engine.audit.read()[0]
+    assert (row["user"], row["role"], row["action"], row["target"], row["result"]) == (
+        "operator", "operator", "review", "incident=1 status=confirmed", "ok")
 
 
 def test_review_404_unknown_id(client):

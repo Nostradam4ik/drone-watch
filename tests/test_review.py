@@ -1,10 +1,12 @@
 """Рішення оператора по тривогах: підтвердити/відхилити, автор, час, коментар, історія, статистика."""
 import random
 import sqlite3
+from unittest.mock import Mock
 
 import pytest
 
 from dronewatch.fusion.sim import default_sensors
+from dronewatch.service.audit import AuditEntry, AuditError
 from dronewatch.service.engine import Engine, Zone
 from test_identification import Clock, events_for, make_engine
 
@@ -112,3 +114,34 @@ def test_review_does_not_touch_max_level(tmp_path):
     before = dict(eng.max_level)
     eng.review_incident(eng.alerts[0]["id"], "dismissed", "op")
     assert eng.max_level == before and before
+
+
+def _read_status(eng, iid):
+    return eng.db.execute("SELECT status FROM incidents WHERE id=?", (iid,)).fetchone()[0]
+
+
+def test_review_writes_audit_in_the_same_transaction(eng):
+    iid = _insert(eng)
+    eng.review_incident(iid, "confirmed", "alice", "ok",
+                        audit=AuditEntry("alice", "operator", "review", f"incident={iid} status=confirmed", "ok", "?"))
+    assert eng.audit.read()[0]["action"] == "review"
+    assert _read_status(eng, iid) == "confirmed"
+
+
+def test_review_rolls_back_when_audit_fails(eng, monkeypatch):
+    iid = _insert(eng)
+    monkeypatch.setattr(eng.audit, "append_locked", Mock(side_effect=sqlite3.OperationalError("disk full")))
+    with pytest.raises(AuditError):
+        eng.review_incident(iid, "confirmed", "alice", audit=AuditEntry("alice", "operator", "review", "x", "ok", "?"))
+    assert _read_status(eng, iid) in (None, "new")   # рішення не записалось
+    assert eng.db.execute("SELECT count(*) FROM incident_reviews").fetchone() == (0,)
+
+
+def test_review_rolls_back_on_non_sqlite_audit_failure(eng, monkeypatch):
+    iid = _insert(eng)
+    monkeypatch.setattr(eng.audit, "append_locked", Mock(side_effect=RuntimeError("boom")))
+    with pytest.raises(AuditError):
+        eng.review_incident(iid, "confirmed", "alice", audit=AuditEntry("alice", "operator", "review", "x", "ok", "?"))
+    eng.db.commit()   # чужий commit не має зберегти половину транзакції
+    assert _read_status(eng, iid) in (None, "new")
+    assert eng.db.execute("SELECT count(*) FROM incident_reviews").fetchone() == (0,)
