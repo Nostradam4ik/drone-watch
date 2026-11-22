@@ -134,6 +134,15 @@ class MapCfg(BaseModel):
     online_tiles: bool = False
 
 
+class ReplayCfg(BaseModel):
+    """Запис для відтворення інцидентів: кадри цілей за before_s до тривоги й after_s після неї, раз на step_s секунд."""
+    enabled: bool = True
+    before_s: float = Field(default=60.0, ge=0, le=600)
+    after_s: float = Field(default=60.0, ge=0, le=600)
+    step_s: float = Field(default=1.0, ge=0.25, le=10)
+    retention_days: float = Field(default=30.0, gt=0, le=3650)   # старші записи прибираються
+
+
 class Config(BaseModel):
     mode: Literal["demo", "live"] = "demo"
     scan_dt: float = Field(default=0.5, gt=0)
@@ -151,6 +160,7 @@ class Config(BaseModel):
     auth: AuthCfg = AuthCfg()
     dashboard: DashboardCfg = DashboardCfg()
     ai: AiCfg = AiCfg()
+    replay: ReplayCfg = ReplayCfg()
 
     @model_validator(mode="after")
     def _check(self) -> Self:

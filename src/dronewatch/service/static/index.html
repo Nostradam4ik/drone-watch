@@ -37,6 +37,14 @@
     <div id="map"></div>
     <span class="corner tl"></span><span class="corner tr"></span><span class="corner bl"></span><span class="corner br"></span>
     <div id="toast"></div>
+    <div id="replay" hidden>
+      <span class="rp-tag">ВІДТВОРЕННЯ</span>
+      <button id="rp-play" type="button" aria-label="Пауза">⏸</button>
+      <input id="rp-seek" type="range" min="0" max="0" value="0" aria-label="Час відтворення">
+      <span id="rp-time"></span>
+      <select id="rp-speed" aria-label="Швидкість відтворення"><option value="1">×1</option><option value="4">×4</option></select>
+      <button id="rp-close" type="button">✕ Закрити</button>
+    </div>
     <div id="legend" class="collapsed">
       <button id="legend-toggle" type="button" aria-expanded="false">Легенда і покриття</button>
       <div id="legend-body">

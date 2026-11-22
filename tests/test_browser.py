@@ -450,3 +450,50 @@ def test_audit_rows_are_rendered_as_text(dash_as, server):
     assert d.page.locator("#audit-body img").count() == 0
     assert d.page.evaluate("window.__pwned") is None
     assert not d.errors, d.errors
+
+
+# ---------- відтворення інциденту ----------
+def replay_payload(cfg: dict[str, Any], complete: bool = True) -> dict[str, Any]:
+    row = lambda x, lvl: [1, x, 20.0, 50.0, 1.0, 0.0, lvl, "e", 0, 1, 0]  # noqa: E731
+    return {"incident_id": 7, "ts": 1795352316.0, "complete": complete, "v": 1, "step": 0.2,
+            "target": {"track_id": 1, "pos": [10.0, 20.0, 50.0], "level": "WARNING", "zone": "A"},
+            "setup": {"sensors": [{k: s[k] for k in ("id", "label", "pos", "max_range", "heading_deg", "fov_deg")} for s in cfg["sensors"]],
+                      "zones": cfg["zones"], "origin": cfg["origin"]},
+            "frames": [[-3.0, [row(8.0, 0)]], [-2.0, [row(9.0, 0)]], [0.0, [row(10.0, 1)]], [2.0, [row(11.0, 1)]]]}
+
+
+def test_replay_plays_pauses_seeks_and_restores_live_view(dash):
+    dash.page.route("**/api/incidents/7/replay", lambda r: r.fulfill(json=replay_payload(dash.cfg)))
+    dash.push(dash.state(tracks=[track(1)], alerts=[alert(7, 1)]))
+    dash.page.locator('button[data-replay="7"]').click()
+    expect(dash.page.locator("#replay")).to_be_visible()
+    expect(dash.page.locator("#rp-time")).to_contain_text("T")
+    dash.page.locator("#rp-play").click()   # пауза
+    expect(dash.page.locator("#rp-play")).to_have_text("▶")
+    dash.page.locator("#rp-seek").fill("0")
+    expect(dash.page.locator("#rp-time")).to_have_text("T−3 с")
+    dash.page.locator("#rp-seek").fill("3")
+    expect(dash.page.locator("#rp-time")).to_have_text("T+2 с")
+    dash.page.locator("#rp-close").click()
+    expect(dash.page.locator("#replay")).to_be_hidden()
+    dash.push(dash.state(tracks=[track(2), track(3)], alerts=[alert(7, 1)]))
+    expect(dash.page.locator("#tbody tr")).to_have_count(2)   # живий вигляд повернувся
+
+
+def test_live_alerts_still_arrive_during_replay(dash):
+    dash.page.route("**/api/incidents/7/replay", lambda r: r.fulfill(json=replay_payload(dash.cfg)))
+    dash.push(dash.state(tracks=[track(1)], alerts=[alert(7, 1)]))
+    dash.page.locator('button[data-replay="7"]').click()
+    expect(dash.page.locator("#replay")).to_be_visible()
+    dash.push(dash.state(tracks=[track(1)], alerts=[alert(8, 1, level="CRITICAL"), alert(7, 1)]))
+    expect(dash.page.locator("#alerts .alert")).to_have_count(2)   # жива тривога не губиться під час відтворення
+    dash.page.keyboard.press("Escape")
+    expect(dash.page.locator("#replay")).to_be_hidden()
+
+
+def test_missing_replay_gives_a_toast_not_a_player(dash):
+    dash.page.route("**/api/incidents/7/replay", lambda r: r.fulfill(status=404, json={"detail": "немає"}))
+    dash.push(dash.state(tracks=[track(1)], alerts=[alert(7, 1)]))
+    dash.page.locator('button[data-replay="7"]').click()
+    expect(dash.page.locator("#toast .toast.WARNING")).to_contain_text("Запису відтворення")
+    expect(dash.page.locator("#replay")).to_be_hidden()

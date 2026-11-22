@@ -223,3 +223,17 @@ td.NONE, dd.NONE { color: var(--ok); } td.WARNING, dd.WARNING { color: var(--war
 #audit-wrap table { width: 100%; border-collapse: collapse; }
 #audit-wrap td, #audit-wrap th { padding: 2px 6px; white-space: nowrap; }
 #ai-box[hidden] { display: none; }
+
+/* ---------- відтворення інциденту ---------- */
+.alert .rpbtn { margin-top: 6px; font: 600 11px var(--face-label); padding: 2px 8px; border: 1px solid var(--line); background: transparent;
+  color: var(--muted); border-radius: 3px; cursor: pointer; }
+.alert .rpbtn:hover { color: var(--text); border-color: var(--muted); }
+#replay { position: absolute; left: 50%; bottom: 18px; transform: translateX(-50%); z-index: 6; display: flex; align-items: center; gap: 10px;
+  padding: 8px 12px; background: #060a10ee; border: 1px solid var(--warn); border-left: 3px solid var(--warn); border-radius: 3px;
+  font: 11px var(--face-data); max-width: calc(100% - 28px); }
+#replay[hidden] { display: none; }
+#replay .rp-tag { color: var(--warn); font: 700 11px var(--face-label); letter-spacing: .08em; }
+#replay button, #replay select { font: 600 11px var(--face-label); background: transparent; color: var(--text); border: 1px solid var(--line);
+  border-radius: 3px; padding: 3px 8px; cursor: pointer; }
+#replay input[type=range] { width: min(320px, 30vw); accent-color: var(--warn); }
+#rp-time { min-width: 92px; color: var(--text); }
