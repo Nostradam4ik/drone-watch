@@ -34,7 +34,7 @@ class AuthCfg(BaseModel):
 
 class DashboardUser(BaseModel):
     name: str = Field(pattern=r"^[A-Za-z0-9_.@-]{1,64}$")
-    password_hash: str = Field(description="scrypt-хеш пароля; видає dronewatch-keygen --dashboard-user ІМ'Я")
+    password_hash: str = Field(description="scrypt-хеш пароля; видає dronewatch-keygen --dashboard-user ІМ'Я --role РОЛЬ")
     role: Role = Field(description="viewer читає, operator ще вирішує тривоги й питає AI, admin ще керує розкладкою, покриттям і журналом")
 
     @field_validator("password_hash")
@@ -43,7 +43,7 @@ class DashboardUser(BaseModel):
         try:
             parse_hash(v)
         except ValueError as e:
-            raise ValueError(f"{e}. Згенеруйте: dronewatch-keygen --dashboard-user ІМ'Я") from None
+            raise ValueError(f"{e}. Згенеруйте: dronewatch-keygen --dashboard-user ІМ'Я --role РОЛЬ") from None
         return v
 
 
@@ -168,7 +168,8 @@ class Config(BaseModel):
                 names = [u.name for u in self.dashboard.users]
                 if not names:
                     raise ValueError("немає жодного користувача дашборда: вхід обовʼязковий. Додайте dashboard.users "
-                                     "(dronewatch-keygen --dashboard-user ІМ'Я) або свідомо вимкніть: dashboard: {auth: disabled}")
+                                     "(dronewatch-keygen --dashboard-user ІМ'Я --role РОЛЬ) "
+                                     "або свідомо вимкніть: dashboard: {auth: disabled}")
                 if len(names) != len(set(names)):
                     raise ValueError("імена користувачів дашборда мають бути унікальними")
             if self.auth.mode == "required":

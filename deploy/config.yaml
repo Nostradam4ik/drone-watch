@@ -12,7 +12,7 @@ max_events_per_sensor_scan: 150  # стелі проти потопу подій
 max_tracks: 200
 
 # ДЕМО-КОРИСТУВАЧ ДАШБОРДА: логін demo, пароль лежить у docker-compose.yml (ДЕМО-секрет, публічний, як і весь репозиторій).
-# Для чогось, окрім локальної демонстрації: dronewatch-keygen --dashboard-user ІМ'Я і замініть рядок нижче.
+# Для чогось, окрім локальної демонстрації: dronewatch-keygen --dashboard-user ІМ'Я --role РОЛЬ і замініть рядок нижче.
 dashboard:
   auth: required
   session_ttl_s: 28800
