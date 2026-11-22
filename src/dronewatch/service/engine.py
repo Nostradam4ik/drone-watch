@@ -10,6 +10,7 @@ Heartbeat (рекомендовано): {"sensor_id": "radar1", "heartbeat": tru
 не бачить. Без нього «порожнє небо» і «датчик помер» не відрізнити, тож тиша довше за sensor_timeout_s
 вважається відмовою (безпечний бік: тривоги без цього датчика лишаються, а не зникають).
 """
+import contextlib
 import math
 import sqlite3
 import threading
@@ -23,6 +24,7 @@ import numpy as np
 
 from dronewatch.fusion.models import Floats, Sensor
 from dronewatch.fusion.tracker import Tracker
+from dronewatch.service.audit import AuditEntry, AuditError, AuditLog
 from dronewatch.service.auth import SensorAuth
 from dronewatch.service.catalog import DRONES, UNKNOWN_MODEL, describe
 
@@ -173,6 +175,7 @@ class Engine:
         self.db.execute("""CREATE TABLE IF NOT EXISTS incident_reviews (
             id INTEGER PRIMARY KEY AUTOINCREMENT, incident_id INTEGER, status TEXT, by TEXT, ts REAL, note TEXT)""")
         self.db.commit()
+        self.audit = AuditLog(self.db, self.lock)   # той самий файл БД; append бере self.lock, тож під замком лише append_locked
 
     # --- вхід
     def reset(self) -> None:
@@ -432,9 +435,11 @@ class Engine:
         return new_alerts
 
     # --- рішення оператора
-    def review_incident(self, incident_id: int, status: str, by: str, note: str | None = None) -> dict[str, Any] | None:
+    def review_incident(self, incident_id: int, status: str, by: str, note: str | None = None, *,
+                        audit: AuditEntry | None = None) -> dict[str, Any] | None:
         """Записує рішення оператора (і в історію, і в сам рядок журналу). None, якщо такого інциденту нема.
-        Нічого не пригнічує: max_level, трекер і зони не чіпаються."""
+        Нічого не пригнічує: max_level, трекер і зони не чіпаються. Якщо передано `audit`, рядок журналу дій іде в тій самій
+        транзакції: збій відкочує все, памʼять не змінюється, піднімається AuditError (рішення без сліду не буває)."""
         if status not in VALID_REVIEW_STATUSES:
             raise ValueError(f"недопустимий статус: {status}")
         clean = (note or "").strip()[:MAX_REVIEW_NOTE] or None
@@ -442,11 +447,20 @@ class Engine:
             if self.db.execute("SELECT 1 FROM incidents WHERE id=?", (incident_id,)).fetchone() is None:
                 return None
             ts = self.clock()
-            self.db.execute("INSERT INTO incident_reviews (incident_id, status, by, ts, note) VALUES (?,?,?,?,?)",
-                            (incident_id, status, by, ts, clean))
-            self.db.execute("UPDATE incidents SET status=?, reviewed_by=?, reviewed_at=?, review_note=? WHERE id=?",
-                            (status, by, ts, clean, incident_id))
-            self.db.commit()
+            try:
+                self.db.execute("INSERT INTO incident_reviews (incident_id, status, by, ts, note) VALUES (?,?,?,?,?)",
+                                (incident_id, status, by, ts, clean))
+                self.db.execute("UPDATE incidents SET status=?, reviewed_by=?, reviewed_at=?, review_note=? WHERE id=?",
+                                (status, by, ts, clean, incident_id))
+                if audit is not None:
+                    self.audit.append_locked(audit)
+                self.db.commit()
+            except (sqlite3.Error, AuditError) as e:
+                if audit is None:
+                    raise
+                with contextlib.suppress(sqlite3.Error):
+                    self.db.rollback()
+                raise AuditError(f"рішення не записано, журнал дій недоступний: {e}") from e
             for a in self.alerts:
                 if a["id"] == incident_id:
                     a["status"], a["reviewed_by"], a["reviewed_at"], a["review_note"] = status, by, ts, clean
