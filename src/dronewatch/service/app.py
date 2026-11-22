@@ -57,6 +57,8 @@ from dronewatch.service.dashboard_web import (
 from dronewatch.service.demo import DemoSource, make_sensors
 from dronewatch.service.engine import Alert, Engine, SensorStatus, Zone
 from dronewatch.service.mqtt_in import MqttIngest
+from dronewatch.service.occlusion import Buildings, LineOfSight
+from dronewatch.service.terrain import Terrain
 
 log = logging.getLogger("dronewatch")
 BASE = Path(__file__).resolve().parent
@@ -120,6 +122,8 @@ class Runtime:
     ai_tasks: set[asyncio.Task[None]] = field(default_factory=set)   # живі посилання на фонові задачі AI-індексації
     map_file: Path | None = None   # власний PMTiles карти, якщо файл є на диску
     map_online: bool = False       # дозвіл на онлайн-тайли (лише коли власного файлу немає)
+    los: LineOfSight | None = None   # рельєф і будинки для лінії видимості в покритті (None: файлів немає чи вони зіпсовані)
+    target_alt: float = coverage.TARGET_ALT_M
     audit_status: VerifyResult | None = None   # результат перевірки ланцюжка журналу дій при старті (None: не перевірялось)
 
 
@@ -181,6 +185,24 @@ def build_ai(cfg: config.Config) -> AiRuntime | None:
                      limiter=LoginLimiter(max_failures=10, window_s=60.0))
 
 
+def load_line_of_sight(cfg: config.Config) -> LineOfSight | None:
+    """Рельєф і будинки для лінії видимості. Немає файлу: так і працюємо, покриття каже, чого не враховано. Зіпсований файл: те саме,
+    але ERROR у лозі, бо оператор вважатиме, що це враховано."""
+    origin = (cfg.origin.lat, cfg.origin.lon)
+    parts: dict[str, Any] = {}
+    for key, loader, path in (("buildings", Buildings.load, Path(cfg.map.buildings)), ("terrain", Terrain.load, Path(cfg.map.dem))):
+        if not path.is_file():
+            continue
+        try:
+            parts[key] = loader(path, origin)
+        except Exception:   # будь-яка помилка читання: сервіс не падає, але й не вдає, що це враховано
+            log.exception("лінія видимості (%s): не вдалося прочитати %s, покриття буде без цього", key, path)
+    if not parts:
+        return None
+    log.info("лінія видимості: %s", ", ".join(parts))
+    return LineOfSight(**parts)
+
+
 def build_runtime(cfg: config.Config) -> Runtime:
     """Збирає робочий стан із конфігу. Нічого не запускає: це робить lifespan."""
     demo = cfg.mode == "demo"
@@ -194,7 +216,8 @@ def build_runtime(cfg: config.Config) -> Runtime:
         engine.calibration = config.calibration_note(cfg)
     return Runtime(engine=engine, demo=demo, db_path=db_path, demo_src=DemoSource(sensors) if demo else None,
                    mqtt=build_mqtt(cfg, engine), ai=build_ai(cfg),
-                   map_file=map_file if map_file.is_file() else None, map_online=cfg.map.online_tiles)
+                   map_file=map_file if map_file.is_file() else None, map_online=cfg.map.online_tiles,
+                   los=load_line_of_sight(cfg), target_alt=cfg.map.target_alt_m)
 
 
 def check_audit_chain(rt: Runtime) -> VerifyResult | None:
@@ -487,15 +510,15 @@ async def put_layout(ident: AdminDep, request: Request, body: layout.Layout, rt:
 @app.get("/api/coverage", dependencies=[Depends(require_role("viewer"))])
 def get_coverage(rt: RuntimeDep) -> dict[str, Any]:
     """Покриття буферної зони поточними датчиками рушія (будь-який режим): те, що дашборд підсвічує за замовчуванням."""
-    return coverage.coverage(list(rt.engine.sensors.values()), rt.engine.zones)
+    return coverage.coverage(list(rt.engine.sensors.values()), rt.engine.zones, rt.los, rt.target_alt)
 
 
 @app.post("/api/coverage", dependencies=[Depends(json_post_guard)])
-async def post_coverage(_: AdminDep, body: layout.Layout) -> dict[str, Any]:
+async def post_coverage(_: AdminDep, body: layout.Layout, rt: RuntimeDep) -> dict[str, Any]:
     """Що покриває ця розстановка в буферній зоні (клітинки з класом). Нічого не змінює: лише рахує для підсвітки в редакторі.
     Лише для admin (інструмент редактора), але в журнал не пишеться: стану не змінює, а редактор кличе його щокілька сотень мс
     під час перетягування, і журнал (та SQLite-коміти в циклі подій) потонули б у попередніх переглядах."""
-    return coverage.coverage(layout.build(body))
+    return coverage.coverage(layout.build(body), None, rt.los, rt.target_alt)
 
 
 @app.delete("/api/layout", dependencies=[Depends(same_origin_guard)])
