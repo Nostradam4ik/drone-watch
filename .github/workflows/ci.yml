@@ -20,7 +20,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        python: ["3.12", "3.13"]
+        python: ["3.12", "3.13", "3.15"]   # 3.12 = мінімум із pyproject, 3.15 = версія Docker-образів (docker/*.Dockerfile)
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v7

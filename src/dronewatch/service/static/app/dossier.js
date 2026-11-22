@@ -20,14 +20,14 @@ function dossierParts(t) {
     ? `<div class="hint">RF-датчики називають різні моделі для цієї цілі: приналежність не визначено, потрібна перевірка оператором.</div>`
     : t.identified_by
     ? `<div class="hint">Тип і приналежність: RF-ідентифікація протоколу${cfg.demo ? " (симуляція: модель задає емулятор)" : ""}. Радар сам «свій/ворог» не визначає.</div>`
-    : `<div class="hint">${esc(guessClass(t))}. Оцінка за швидкістю й висотою, не розпізнавання: RF-ідентифікації немає.</div>`;
+    : `<div class="hint">${esc(guessClass(t))}. Оцінка за швидкістю, не розпізнавання: RF-ідентифікації немає.</div>`;
   const dive = t.diving ? `<div class="dive">⬇ ПІКІРУЄ: до землі ~${t.ttg} с. Прогнозна точка падіння позначена на карті.</div>` : "";
   const head = `<div class="ttl"><span>ЦІЛЬ #${t.id}</span><b style="color:${side.color}">${side.label}</b></div>` + dive +
     `<div class="model">${esc(t.model_name || (t.identity_conflict ? "суперечливі дані RF" : "тип не визначено"))}</div>` +
     (t.drone_kind ? `<div class="sub">${esc(t.drone_kind)} · ${esc(t.country)}</div>` : "");
   const body = `<dl><dt>швидкість</dt><dd><b>${t.speed} м/с</b> · ${Math.round(t.speed * 3.6)} км/год</dd>` +
-    `<dt>висота</dt><dd>${Math.round(t.z)} м</dd>` +
-    `<dt>верт. швидкість</dt><dd class="${t.diving ? "CRITICAL" : ""}">${t.vz > 0 ? "+" : ""}${t.vz} м/с${t.ttg ? " · до землі " + t.ttg + " с" : ""}</dd>` +
+    `<dt>висота</dt><dd>${t.alt_known === false ? "невідома: без радара висоту не виміряно" : Math.round(t.z) + " м"}</dd>` +
+    (t.alt_known === false ? "" : `<dt>верт. швидкість</dt><dd class="${t.diving ? "CRITICAL" : ""}">${t.vz > 0 ? "+" : ""}${t.vz} м/с${t.ttg ? " · до землі " + t.ttg + " с" : ""}</dd>`) +
     `<dt>курс</dt><dd>${heading(t)}</dd>` +
     `<dt>рівень</dt><dd class="${t.level}">${LEVEL_UA[t.level]}</dd>` +
     `<dt>підтвердили</dt><dd>${esc(t.kinds.map(k => KIND_UA[k] || k).join(", ") || "—")}</dd></dl>` +

@@ -20,18 +20,18 @@ TRANS = np.array([[0.96, 0.04], [0.10, 0.90]])  # перехід між моде
 MERGE_DIST = 40.0            # м, для видалення дублікатів та ghost-ініціалізацій
 ASSUMED_ALT, ALT_SIGMA = 60.0, 100.0
 BIAS_RATE = 0.02            # швидкість навчання онлайн-оцінки bias
-RADAR_COVER = 0.9            # частка дальності радара, де він має «бачити» ціль
+# Частка дальності радара, де він ЗОБОВʼЯЗАНИЙ бачити ціль: лише там його мовчання робить трек підозрілим (RADAR_MISS_LIMIT,
+# engine.require_radar). Запас 10% навмисний: на краю дальності радар ловить ціль нестабільно, і суворе правило вбивало б
+# справжні треки. Це не межа, де радар узагалі дає позицію: її (100% дальності) показує service/coverage.py, і так і має бути.
+RADAR_COVER = 0.9
 RADAR_MISS_LIMIT = 6         # сканів без радара в його зоні, і трек (з пеленгів) видаляється
 MAX_TRACKS = 150             # стеля на кількість треків: інакше потік хибних детекцій роздуває стан без меж
 MAX_BEARING_CANDIDATES = 30  # скільки непривʼязаних пеленгів від одного датчика йде в тріангуляцію за скан (вона O(n^2))
 
 
 class Track:
-    _next_id = 1
-
-    def __init__(self, x: Floats, P: Floats, t: float) -> None:
-        self.id = Track._next_id
-        Track._next_id += 1
+    def __init__(self, x: Floats, P: Floats, t: float, track_id: int) -> None:
+        self.id = track_id   # номер видає Tracker._new_track: у кожного трекера свій лічильник
         self.models = [(x.copy(), P.copy()) for _ in Q_MODELS]
         self.mu = np.array(MU0)
         self.x, self.P = x, P
@@ -101,7 +101,10 @@ class Track:
 
 
 class Tracker:
-    def __init__(self, sensors: Iterable[Sensor], online_bias: bool = False, max_tracks: int = MAX_TRACKS) -> None:
+    def __init__(self, sensors: Iterable[Sensor], online_bias: bool = False, max_tracks: int = MAX_TRACKS, first_id: int = 1) -> None:
+        """first_id: з якого номера почати треки. Рушій після скидання передає сюди next_id старого трекера, щоб номери
+        не повторювались: тривоги й журнал посилаються на номер цілі."""
+        self.next_id = first_id
         self.online_bias = online_bias
         self.max_tracks = max_tracks
         self.dropped = {"tracks_capped": 0, "bearings_truncated": 0}  # що відкинуто через стелі в останньому скані
@@ -112,11 +115,16 @@ class Tracker:
         self.down: set[str] = set()    # імена датчиків, визнаних відмовленими (виставляє сервіс за станом здоровʼя)
         self.heard: set[str] | None = None    # імена датчиків, що озивалися в цьому скані; None = усі (поведінка прототипу)
 
+    def _new_track(self, x: Floats, P: Floats, t: float) -> Track:
+        tr = Track(x, P, t, self.next_id)
+        self.next_id += 1
+        return tr
+
     def _init_from_radar(self, s: Sensor, z: Floats, t: float) -> Track:
         r, az, el = z
         pos = s.pos + r * np.array([np.cos(el) * np.cos(az), np.cos(el) * np.sin(az), np.sin(el)])
         P = np.diag([15 ** 2] * 3 + [15 ** 2] * 3)
-        return Track(np.concatenate([pos, np.zeros(3)]), P, t)
+        return self._new_track(np.concatenate([pos, np.zeros(3)]), P, t)
 
     def _init_from_bearings(self, s1: Sensor, z1: Floats, s2: Sensor, z2: Floats, t: float) -> Track | None:
         """Перетин двох променів у горизонтальній площині (тріангуляція)."""
@@ -132,7 +140,7 @@ class Tracker:
             return None
         xy = s1.pos[:2] + k[0] * d1
         P = np.diag([60 ** 2, 60 ** 2, ALT_SIGMA ** 2] + [15 ** 2] * 3)
-        return Track(np.array([xy[0], xy[1], ASSUMED_ALT, 0, 0, 0], float), P, t)
+        return self._new_track(np.array([xy[0], xy[1], ASSUMED_ALT, 0, 0, 0], float), P, t)
 
     def _cover_radars(self, tr: Track) -> list[Sensor]:
         """Справні радари, у зоні покриття яких зараз трек. Відмовлений радар (self.down) цілі «не бачить» нормально,

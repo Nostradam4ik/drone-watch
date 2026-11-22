@@ -170,9 +170,9 @@ function pushData() {
     id: t.id, prio: t.id === selected ? 0 : t.diving ? 1 : t.level === "CRITICAL" ? 2 : t.level === "WARNING" ? 3 : 4,
     color: (SIDE[t.side] || SIDE.unknown).color, opacity: t.coasting ? 0.4 : 1, selected: t.id === selected,
     halo: t.diving ? COLORS.CRITICAL : COLORS[t.level], haloW: t.diving ? 4.5 : t.level === "CRITICAL" ? 3.5 : t.level === "WARNING" ? 2 : 0,
-    label: "#" + t.id + (t.coasting ? " ?" : "") + (t.model_name ? " · " + shortName(t) : "") + " · " + Math.round(t.z) + " м" + (t.diving ? " ↓" : "")   // "↓" (U+2193) є у збережених діапазонах шрифту; "⬇" ні, а помилка гліфа ламає весь шар підписів,
+    label: "#" + t.id + (t.coasting ? " ?" : "") + (t.model_name ? " · " + shortName(t) : "") + (t.alt_known === false ? "" : " · " + Math.round(t.z) + " м") + (t.diving ? " ↓" : "")   // "↓" (U+2193) є у збережених діапазонах шрифту; "⬇" ні, а помилка гліфа ламає весь шар підписів,
   })));
-  set("stalks", tracks.filter(t => !t.coasting && t.z > 1).flatMap(t => {
+  set("stalks", tracks.filter(t => !t.coasting && t.alt_known !== false && t.z > 1).flatMap(t => {
     const color = (SIDE[t.side] || SIDE.unknown).color, ring = half => [[-half, -half], [half, -half], [half, half], [-half, half], [-half, -half]]
       .map(([dx, dy]) => toLL(t.x + dx, t.y + dy));
     return [feat({ type: "Polygon", coordinates: [ring(1.2)] }, { part: "stalk", color, top: t.z, base: 0 }),

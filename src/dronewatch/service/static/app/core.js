@@ -19,6 +19,8 @@ function esc(s) { return String(s).replace(/[&<>"']/g, c => ({ "&": "&amp;", "<"
 // Відповідь AI — звичайний текст з markdown-розміткою (**жирний**, переноси рядків), а не HTML. Усе спершу
 // екранується через esc(), і лише тоді controlled-регексом додаються свої ж безпечні теги — вхід моделі
 // ніколи не потрапляє в розмітку як є.
+// Висоту міряє лише радар: трек із самих пеленгів має умовні 60 м трекера, а не виміряні (alt_known від сервера)
+const altText = t => t.alt_known === false ? "—" : String(Math.round(t.z));
 function mdLite(s) { return esc(s).replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>").replace(/\n/g, "<br>"); }
 
 

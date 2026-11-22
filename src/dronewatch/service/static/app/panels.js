@@ -40,7 +40,7 @@ function render(msg) {
   const tbodyHtml = rows.map(t =>
     `<tr data-id="${t.id}" class="${t.id === selected ? "sel" : ""}"><td>#${t.id}</td>` +
     `<td class="l"><i class="sd" style="background:${(SIDE[t.side] || SIDE.unknown).color}"></i>${esc(t.model_name ? shortName(t) : "—")}${t.diving ? ' <b style="color:var(--crit)">⬇</b>' : ""}</td>` +
-    `<td class="${t.level}"${t.side === "friend" ? ' style="opacity:.55" title="мітка «свій» з RF, не автентифікована"' : ""}>${LEVEL_UA[t.level]}</td><td>${t.speed}</td><td>${Math.round(t.z)}</td></tr>`).join("");
+    `<td class="${t.level}"${t.side === "friend" ? ' style="opacity:.55" title="мітка «свій» з RF, не автентифікована"' : ""}>${LEVEL_UA[t.level]}</td><td>${t.speed}</td><td${t.alt_known === false ? ' title="висоту не виміряно: ціль бачать лише пеленгові датчики"' : ""}>${altText(t)}</td></tr>`).join("");
   if (tbodyHtml !== lastTbody) { lastTbody = tbodyHtml; document.getElementById("tbody").innerHTML = tbodyHtml; }   // не чіпаємо DOM, коли нічого не змінилось
 
   const box = document.getElementById("alerts");
