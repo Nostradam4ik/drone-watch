@@ -13,6 +13,13 @@ from dronewatch.service.engine import Engine, Zone
 ALERT = {"ts": 1.0, "track_id": 7, "level": "WARNING", "zone": "z", "pos": [1.0, 2.0, 0.0], "speed": 5.0, "sensors": ["radar1"]}
 
 
+async def _scan_and_wait(rt):
+    """Один скан і очікування фонових задач індексації: asyncio.run скасував би їх, не запустивши."""
+    await app.scan_step(app.app, rt)
+    if rt.ai_tasks:
+        await asyncio.gather(*rt.ai_tasks)
+
+
 def _ai_runtime(index):
     return app.AiRuntime(llm=object(), index=index, max_iterations=4, limiter=LoginLimiter())
 
@@ -26,7 +33,7 @@ def test_scan_step_indexes_new_alerts_when_ai_enabled():
 
     rt = app.Runtime(engine=Engine(default_sensors(), [Zone("z", 50, "WARNING")]), ai=_ai_runtime(_RecordingIndex()))
     rt.engine.tick = lambda: [ALERT]
-    asyncio.run(app.scan_step(app.app, rt))
+    asyncio.run(_scan_and_wait(rt))
     assert indexed and indexed[0][1]["zone"] == "z" and indexed[0][1]["sensors"] == "radar1"
 
 
@@ -43,7 +50,7 @@ def test_scan_step_survives_qdrant_indexing_failure():
 
     rt = app.Runtime(engine=Engine(default_sensors(), [Zone("z", 50, "WARNING")]), ai=_ai_runtime(_BrokenIndex()))
     rt.engine.tick = lambda: [ALERT]
-    asyncio.run(app.scan_step(app.app, rt))  # не повинно впасти й не повинно зупинити цикл сканів
+    asyncio.run(_scan_and_wait(rt))  # не повинно впасти й не повинно зупинити цикл сканів
     assert rt.scan.errors == 0, "збій AI-індексації не повинен рахуватись як помилка скану"
 
 
