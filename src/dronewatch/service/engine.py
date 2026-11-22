@@ -587,6 +587,7 @@ class Engine:
     def config(self) -> dict[str, Any]:
         return {
             "sensors": [{"id": s.name, "kind": s.kind, "label": s.label, "type": s.type_id, "pos": s.pos[:2].tolist(),
+                         "height": round(float(s.pos[2]), 1) if len(s.pos) > 2 else 0.0,
                          "max_range": s.max_range, "heading_deg": round(math_to_compass(s.heading), 1),
                          "fov_deg": round(math.degrees(s.fov), 1), "pd": s.pd, "sigma": self._sigma_display(s)}
                         for s in list(self.sensors.values())],
