@@ -324,6 +324,18 @@ def vendor(name: str) -> Response:   # бібліотеки віддаємо с�
     return FileResponse(BASE / "static" / "vendor" / name, media_type=VENDOR_FILES[name])
 
 
+# Код і стилі самого дашборда. Порядок <script> в index.html важливий (звичайні скрипти зі спільними змінними, не модулі).
+APP_FILES = {"dashboard.css": "text/css", **{f"{n}.js": "text/javascript" for n in
+             ("core", "map", "viewer3d", "dossier", "panels", "sound", "editor", "main")}}
+
+
+@app.get("/static/app/{name}", include_in_schema=False)
+def app_file(name: str) -> Response:   # як і vendor: лише відомі імена, жодних шляхів із клієнта
+    if name not in APP_FILES:
+        return Response(status_code=404)
+    return FileResponse(BASE / "static" / "app" / name, media_type=APP_FILES[name])
+
+
 FONT_STACK = "Noto Sans Regular"   # єдиний шрифт, що лежить у static/vendor/fonts
 GLYPH_RANGE = re.compile(r"^\d{1,5}-\d{1,5}$")
 

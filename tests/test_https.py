@@ -168,7 +168,8 @@ def test_https_api_dashboard_and_clients():
 
             # 4. дашборд і WebSocket по TLS
             html = urllib.request.urlopen(base + "/", context=emulate.HTTPS_CONTEXT, timeout=5).read().decode("utf-8")
-            assert "Drone Watch" in html and 'location.protocol === "https:" ? "wss://"' in html, "фронтенд має сам обирати wss під https"
+            js = urllib.request.urlopen(base + "/static/app/main.js", context=emulate.HTTPS_CONTEXT, timeout=5).read().decode("utf-8")
+            assert "Drone Watch" in html and 'location.protocol === "https:" ? "wss://"' in js, "фронтенд має сам обирати wss під https"
             pytest.importorskip("websockets.asyncio.client")
 
             def hold():

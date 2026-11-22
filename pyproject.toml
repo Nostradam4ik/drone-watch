@@ -41,7 +41,7 @@ dronewatch-emulate = "dronewatch.emulator.emulate:main"
 where = ["src"]
 
 [tool.setuptools.package-data]
-"dronewatch.service" = ["static/*", "static/vendor/*", "static/vendor/fonts/*/*", "static/vendor/webfonts/*", "*.yaml"]   # дашборд і конфіги лежать поруч із кодом і мають їхати разом із пакетом
+"dronewatch.service" = ["static/*", "static/app/*", "static/vendor/*", "static/vendor/fonts/*/*", "static/vendor/webfonts/*", "*.yaml"]   # дашборд і конфіги лежать поруч із кодом і мають їхати разом із пакетом
 
 [tool.pytest.ini_options]
 pythonpath = ["tests"]   # тести імпортують одне одного (хелпери); сам пакет береться зі встановлення

@@ -26,6 +26,16 @@ Python 3.12+. Пакет встановлюється з кореня репоз
     ruff check .                 # лінтер
     mypy                         # перевірка типів (каталог src)
 
+Дашборд у справжньому браузері (Playwright + Chromium; без них ці тести просто пропускаються):
+
+    pip install -e ".[dev,browser]" && python -m playwright install chromium
+    pytest -m browser            # сторінка, тривоги, рішення оператора, тости, екранування, AI-панель
+
+Код дашборда: `service/static/index.html` (лише розмітка) і `service/static/app/` (стилі та JS за темами: core, map,
+viewer3d, dossier, panels, sound, editor, main). Це звичайні `<script>` зі спільними змінними, не модулі, тож порядок
+підключення в index.html важливий: `core.js` першим, `main.js` останнім. Новий файл треба також додати в `APP_FILES` (app.py),
+інакше сервер його не віддасть (тест `test_app_dir_has_no_unlisted_files` про це нагадає).
+
 Демо-режим по відкритому HTTP (лише для localhost: ключі й стан ідуть без шифрування):
 
     python -m uvicorn dronewatch.service.app:app --port 8000
