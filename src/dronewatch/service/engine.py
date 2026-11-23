@@ -92,6 +92,7 @@ class IngestResult:
     accepted: int
     rejected: int
     unauthorized: int
+    relay: list[dict[str, Any]] = field(default_factory=list)   # події, що пройшли автентифікацію, БЕЗ ключа (для релея в резерв)
 
 
 @dataclass(slots=True)
@@ -103,6 +104,7 @@ class _Screened:
     invalid: int = 0
     dropped: int = 0
     denied: int = 0
+    relay: list[dict[str, Any]] = field(default_factory=list)
 
 
 def compass_to_math(deg: float) -> float:
@@ -326,25 +328,29 @@ class Engine:
         r = self.ingest_detailed(events)
         return r.accepted, r.rejected
 
-    def ingest_detailed(self, events: Iterable[Mapping[str, Any]]) -> IngestResult:
+    def ingest_detailed(self, events: Iterable[Mapping[str, Any]], *, trusted: bool = False) -> IngestResult:
         """Автентифікує, валідує події й кладе у буфер до наступного скану.
         Автентифікація тут, в одному місці, для всіх джерел (HTTP, MQTT): подія без чинного ключа свого датчика
         відкидається ДО будь-чого іншого й не зараховується навіть як heartbeat. Ключ лежить у event["key"] і в буфер не потрапляє.
         Відхилені = невалідні + відкинуті стелею + без ключа (окремо вони в stats).
-        Перевірка йде поза замком (`_screen`), у буфер і лічильники пакет потрапляє одним захопленням замка (`_commit`)."""
+        Перевірка йде поза замком (`_screen`), у буфер і лічильники пакет потрапляє одним захопленням замка (`_commit`).
+        trusted=True лише для подій, які вже автентифікував лідер (релей у резерв): ключ не перевіряється, решта перевірок та сама."""
         now = self.clock()
-        return self._commit(self._screen(events, now), now)
+        return self._commit(self._screen(events, now, trusted), now)
 
-    def _screen(self, events: Iterable[Mapping[str, Any]], now: float) -> _Screened:
+    def _screen(self, events: Iterable[Mapping[str, Any]], now: float, trusted: bool = False) -> _Screened:
         out = _Screened()
         taken: Counter[str] = Counter()   # підказка без замка: не валідуємо більше за стелю від одного датчика в пакеті
         for e in events:
             sid = e.get("sensor_id")
             if not isinstance(sid, str):   # з MQTT може прийти що завгодно, зокрема нехешований список: це не повинно валити ingest
                 out.invalid += 1
-            elif self.auth is not None and not self.auth.verify(sid, e.get("key")):
+                continue
+            if not trusted and self.auth is not None and not self.auth.verify(sid, e.get("key")):
                 out.denied += 1
-            elif e.get("heartbeat"):
+                continue
+            out.relay.append({k: v for k, v in e.items() if k != "key"})   # пройшла автентифікацію: можна дзеркалити в резерв
+            if e.get("heartbeat"):
                 if sid in self.sensors:
                     out.beats.append(sid)
                 else:
@@ -384,7 +390,8 @@ class Engine:
             self.stats["events_rejected"] += screened.invalid
             self.stats["events_dropped"] += dropped
             self.stats["events_unauthorized"] += screened.denied
-        return IngestResult(accepted + len(screened.beats), screened.invalid + dropped + screened.denied, screened.denied)
+        return IngestResult(accepted + len(screened.beats), screened.invalid + dropped + screened.denied, screened.denied,
+                            screened.relay)
 
     def _mark(self, sensor_id: str, now: float) -> None:
         """Датчик озвався. Викликати лише під self.lock."""

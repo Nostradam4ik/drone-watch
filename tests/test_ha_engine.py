@@ -126,3 +126,40 @@ def test_non_ha_engine_unchanged(tmp_path):
     assert eng.active is True and eng.epoch is None and eng.fence() is None
     run_until_alert(eng)
     assert rows(tmp_path / "ha.db", "SELECT count(*) FROM incidents")[0][0] >= 1
+
+
+# ---------- довірений ingest і список для релея ----------
+from dronewatch.service.auth import SensorAuth, hash_key
+
+
+def keyed_engine(tmp_path):
+    clock = Clock()
+    base = make_engine(clock)
+    ids = list(base.sensors)
+    auth = SensorAuth({ids[0]: hash_key("k0"), ids[1]: hash_key("k1")})
+    eng = Engine(base.sensors.values(), [Zone("z", 600, "WARNING")], clock=clock, auth=auth, db_path=":memory:")
+    return eng, ids
+
+
+def beat(sid, **extra):
+    return {"sensor_id": sid, "heartbeat": True, **extra}
+
+
+def test_trusted_skips_key_check():
+    eng, ids = keyed_engine(None)
+    assert eng.ingest_detailed([beat(ids[0])]).accepted == 0   # без ключа відхилено
+    assert eng.ingest_detailed([beat(ids[0])], trusted=True).accepted == 1
+
+
+def test_relay_list_has_no_keys_and_only_authenticated():
+    eng, ids = keyed_engine(None)
+    r = eng.ingest_detailed([beat(ids[0], key="k0"), beat(ids[1], key="wrong")])
+    assert r.accepted == 1 and r.unauthorized == 1
+    assert r.relay == [{"sensor_id": ids[0], "heartbeat": True}]
+
+
+def test_trusted_still_rejects_invalid_values():
+    eng, ids = keyed_engine(None)
+    bad = {"sensor_id": ids[0], "ts": eng.clock(), "azimuth_deg": float("nan")}
+    r = eng.ingest_detailed([bad], trusted=True)
+    assert r.accepted == 0 and r.rejected == 1
