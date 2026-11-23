@@ -86,3 +86,97 @@ def test_degraded_deactivates_engine_but_keeps_showing_alerts(redis, monkeypatch
     t[0] += 7.0
     rt.ha.elector.step()
     assert rt.ha.elector.role is Role.DEGRADED and rt.engine.active is False
+
+
+# ---------- ворота для людей ----------
+from fastapi.testclient import TestClient
+from starlette.websockets import WebSocketDisconnect
+
+
+@pytest.fixture
+def client(redis):
+    app.app.state.runtime = app.build_runtime(ha_cfg())
+    app.app.state.access = app.build_dashboard_access(ha_cfg())
+    return TestClient(app.app, raise_server_exceptions=False, follow_redirects=False)
+
+
+def role(role: Role) -> None:
+    app.app.state.runtime.ha.elector.role = role
+
+
+def test_readyz_leader_200(client):
+    role(Role.LEADER)
+    r = client.get("/readyz")
+    assert r.status_code == 200 and r.json() == {"ready": True, "role": "leader"}
+
+
+def test_readyz_standby_503(client):
+    role(Role.STANDBY)
+    r = client.get("/readyz")
+    assert r.status_code == 503 and r.json() == {"ready": False, "role": "standby"}
+
+
+def test_readyz_degraded_200(client):
+    role(Role.DEGRADED)
+    assert client.get("/readyz").status_code == 200
+
+
+def test_standby_blocks_state_and_events(client):
+    role(Role.STANDBY)
+    assert client.get("/api/state").status_code == 503
+    assert client.post("/api/events", json=[]).status_code == 503
+
+
+def test_standby_health_still_answers(client):
+    role(Role.STANDBY)
+    assert client.get("/api/health").status_code in (200, 503)   # відповідає самий сервіс, не ворота
+    assert "резерв" not in client.get("/api/health").text
+
+
+def test_degraded_allows_get_state_but_blocks_changes(client):
+    role(Role.DEGRADED)
+    assert client.get("/api/state").status_code == 200
+    assert client.post("/api/events", json=[]).status_code == 200
+    assert client.post("/api/incidents/1/review", json={"status": "confirmed"}).status_code == 503
+    assert client.put("/api/layout", json={"sensors": []}).status_code == 503
+
+
+def test_ws_closed_for_standby(client):
+    role(Role.STANDBY)
+    with pytest.raises(WebSocketDisconnect) as e, client.websocket_connect("/ws"):
+        pass
+    assert e.value.code == 1013
+
+
+def test_audit_is_fenced_when_engine_inactive(client):
+    """Без чинної оренди запис у журнал дій відмовляє 503 і нічого не пише (інакше «started» втопився б у памʼяті, а дія пройшла)."""
+    from fastapi import HTTPException
+
+    from dronewatch.service.audit import AuditEntry
+    from dronewatch.service.dashboard_web import audit_or_503
+
+    role(Role.LEADER)   # ворота пропускають, але рушій неактивний: оренди в БД нема
+    conn = type("C", (), {"app": app.app})()
+    with pytest.raises(HTTPException) as e:
+        audit_or_503(conn, AuditEntry("u", "admin", "layout_save", "x", "started", "1.1.1.1"))
+    assert e.value.status_code == 503
+    assert app.app.state.runtime.engine.db.execute("SELECT count(*) FROM audit_log").fetchone() == (0,)
+
+
+def test_health_reports_ha_role_to_logged_in_user(client):
+    from dronewatch.service.dashboard_auth import LoginLimiter, SessionStore
+    from dronewatch.service.dashboard_web import COOKIE, DashboardAccess
+
+    role(Role.LEADER)
+    sessions = SessionStore(3600)
+    app.app.state.access = DashboardAccess(sessions=sessions, limiter=LoginLimiter())
+    client.cookies.set(COOKIE, sessions.create("alice", "admin"))
+    body = client.get("/api/health").json()
+    assert body["ha"]["role"] == "leader" and body["ha"]["instance"] and body["ha"]["epoch"] is None
+
+
+def test_no_ha_means_no_gate(redis):
+    app.app.state.runtime = app.build_runtime(config.Config(mode="demo"))
+    c = TestClient(app.app, raise_server_exceptions=False, follow_redirects=False)
+    assert c.get("/readyz").json() == {"ready": True, "role": "single"}
+    assert "ha" not in c.get("/api/health").json()

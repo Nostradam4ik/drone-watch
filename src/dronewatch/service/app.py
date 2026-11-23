@@ -14,7 +14,7 @@ import sqlite3
 import time
 import uuid
 import zlib
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager, closing
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -316,6 +316,23 @@ def build_dashboard_access(cfg: config.Config) -> DashboardAccess:
 
 app = FastAPI(title="Drone Watch", lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)   # схема API не публічна
 app.include_router(dashboard_web.router)
+HA_OPEN_PATHS = frozenset({"/readyz", "/api/health"})   # лише вони відповідають і резерву: балансувальнику й моніторингу
+HA_CHANGING_METHODS = frozenset({"POST", "PUT", "PATCH", "DELETE"})
+
+
+@app.middleware("http")
+async def ha_gate(request: Request, call_next: Callable[[Request], Awaitable[Response]]) -> Response:
+    """Резерв нічого не віддає людям (його треки мають інші номери, ніж у лідера); лідер без оренди (DEGRADED) віддає перегляд і
+    приймає події датчиків, але змін не робить. Без HA ворота нічого не змінюють. Це другий рубіж: перший `/readyz` у балансувальника."""
+    rt: Runtime | None = getattr(request.app.state, "runtime", None)
+    if rt is not None and rt.ha is not None and request.url.path not in HA_OPEN_PATHS:
+        role = rt.ha.elector.role
+        if role is ha.Role.STANDBY or (role is ha.Role.DEGRADED and request.method in HA_CHANGING_METHODS
+                                        and request.url.path != "/api/events"):
+            return JSONResponse({"detail": "Ця копія зараз резерв чи без оренди лідера"}, status_code=503, headers={"Retry-After": "3"})
+    return await call_next(request)
+
+
 app.middleware("http")(dashboard_web.add_security_headers)
 app.add_middleware(dashboard_web.BodyLimitMiddleware)   # зовнішній шар: завелике тіло відсікається до будь-якого розбору
 
@@ -324,6 +341,13 @@ app.add_middleware(dashboard_web.BodyLimitMiddleware)   # зовнішній ш�
 async def session_store_error(request: Request, exc: SessionStoreError) -> JSONResponse:
     """Спільне сховище сесій недоступне: 503 (fail-closed), без подробиць."""
     return JSONResponse({"detail": "Сховище сесій недоступне"}, status_code=503, headers={"Retry-After": "5"})
+
+
+@app.exception_handler(ha.NotActiveError)
+@app.exception_handler(ha.FencedError)
+async def ha_not_leader(request: Request, exc: Exception) -> JSONResponse:
+    """Немає чинної оренди (чи її перехопив інший): змін не робимо, 503 без подробиць."""
+    return JSONResponse({"detail": "Немає чинної оренди лідера"}, status_code=503, headers={"Retry-After": "3"})
 
 
 @app.exception_handler(RequestValidationError)
@@ -596,7 +620,20 @@ def health(user: Annotated[str | None, Depends(current_user)], rt: RuntimeDep) -
             "mqtt": rt.mqtt.status() if rt.mqtt else None,
             "audit": ({"ok": rt.audit_status.ok, "rows": rt.audit_status.rows, "broken_at": rt.audit_status.broken_at}
                       if rt.audit_status else None)}   # результат старту, не перевірка зараз: verify() тримає замок рушія
+    if rt.ha is not None:
+        body["ha"] = {"role": rt.ha.elector.role.value, "epoch": rt.ha.elector.epoch, "instance": rt.ha.instance_id}
     return body if scanning else JSONResponse(body, status_code=503)
+
+
+@app.get("/readyz", include_in_schema=False)
+def readyz(rt: RuntimeDep) -> JSONResponse:
+    """Для балансувальника: 200 лише там, де люди бачать систему. Без HA завжди готові; резерв 503; DEGRADED 200 (інакше при
+    падінні Redis не лишилось би жодної копії, що показує тривоги)."""
+    if rt.ha is None:
+        return JSONResponse({"ready": True, "role": "single"})
+    role = rt.ha.elector.role
+    ready = role is not ha.Role.STANDBY
+    return JSONResponse({"ready": ready, "role": role.value}, status_code=200 if ready else 503)
 
 
 @app.get("/api/sensors", dependencies=[Depends(require_role("viewer"))])
@@ -715,6 +752,9 @@ def get_audit(ident: AdminDep, request: Request, rt: RuntimeDep, limit: int = 10
 async def ws(websocket: WebSocket) -> None:
     rt: Runtime | None = getattr(websocket.app.state, "runtime", None)
     access: DashboardAccess = getattr(websocket.app.state, "access", None) or DashboardAccess()
+    if rt is not None and rt.ha is not None and rt.ha.elector.role is ha.Role.STANDBY:
+        await websocket.close(code=1013)   # резерв людям нічого не віддає
+        return
     try:
         ident = await asyncio.to_thread(access.identity, websocket)
     except SessionStoreError:
