@@ -592,6 +592,8 @@ def test_detached_alerts_panel_shows_only_alerts_and_reviews_them(dash):
     expect(panel.page.locator("#mapwrap")).to_be_hidden()
     expect(panel.page.locator("#tracks")).to_be_hidden()
     expect(panel.page.locator("#sensors-box")).to_be_hidden()
+    expect(panel.page.locator("#ai-box")).to_be_hidden()   # правило з #id не має перебивати приховування
+    expect(panel.page.locator("#audit-box")).to_be_hidden()
     posted: list[Any] = []
 
     def review(route: Any) -> None:
