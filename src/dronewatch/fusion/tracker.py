@@ -149,6 +149,8 @@ class Tracker:
                 if r.name not in self.down and np.linalg.norm(tr.x[:3] - r.pos) < RADAR_COVER * r.max_range and r.in_fov(tr.x)]
 
     def in_radar_cover(self, tr: Track) -> bool:
+        # Свідомо без будинків і рельєфу: якщо радар не бачить ціль через затулення,
+        # підтвердження радара все одно вимагаємо (fail-closed, рішення користувача).
         return bool(self._cover_radars(tr))
 
     def _near_existing(self, pos: Floats) -> bool:
