@@ -659,3 +659,11 @@ def test_slow_websocket_client_is_dropped_and_does_not_stall_others(monkeypatch)
     asyncio.run(appmod.broadcast(rt, Acc(), {"x": 1}))
     assert time.monotonic() - t0 < 2 and fast.sent == [{"x": 1}]
     assert slow not in rt.clients and fast in rt.clients
+
+
+def test_detached_panel_pages_need_login_and_only_known_names():
+    c, _, _ = _client(auth=True)
+    assert c.get("/panel/alerts", follow_redirects=False).status_code == 303   # без входу на форму входу
+    c.post("/api/login", json=LOGIN)
+    assert c.get("/panel/alerts").status_code == 200 and c.get("/panel/tracks").status_code == 200
+    assert c.get("/panel/../etc").status_code == 404 and c.get("/panel/sensors").status_code == 404

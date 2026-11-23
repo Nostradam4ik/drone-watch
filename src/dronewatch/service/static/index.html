@@ -63,11 +63,12 @@
       </div>
     </div>
   </div>
+  <div id="splitter" role="separator" aria-orientation="vertical" tabindex="0" title="Тягніть, щоб змінити ширину панелі (двічі клацніть: за замовчуванням)" aria-label="Ширина бокової панелі"></div>
   <aside>
-    <div>
-      <h2 class="hd-alerts">Тривоги<span id="alerts-new" hidden></span></h2>
+    <div class="sec-alerts">
+      <h2 class="hd-alerts"><span>Тривоги<span id="alerts-new" hidden></span></span><button class="linkbtn detach" type="button" data-detach="alerts" title="Відкрити в окремому вікні (можна перетягнути на інший монітор)" aria-label="Відкріпити тривоги в окреме вікно">⧉</button></h2>
     </div>
-    <div id="alerts"><div class="empty">Тривог немає</div></div>
+    <div id="alerts" class="sec-alerts"><div class="empty">Тривог немає</div></div>
     <div id="sensors-box">
       <h2 class="hd-sensors"><span>Датчики</span><button class="linkbtn" id="edit-sensors" type="button" hidden>✎ Розставити</button></h2>
       <div id="editor" hidden>
@@ -78,8 +79,8 @@
       <div id="sensors"></div>
       <details id="catalog"><summary>Типи датчиків: розміри й характеристики</summary><div id="catalog-body"></div></details>
     </div>
-    <div>
-      <h2 class="hd-tracks">Активні треки</h2>
+    <div class="sec-tracks">
+      <h2 class="hd-tracks"><span>Активні треки</span><button class="linkbtn detach" type="button" data-detach="tracks" title="Відкрити в окремому вікні (можна перетягнути на інший монітор)" aria-label="Відкріпити треки в окреме вікно">⧉</button></h2>
       <div id="tracks"><table><thead><tr><th>ID</th><th class="l">Тип</th><th>Рівень</th><th>V, м/с</th><th>H, м</th></tr></thead><tbody id="tbody"></tbody></table></div>
     </div>
     <details id="audit-box" hidden>

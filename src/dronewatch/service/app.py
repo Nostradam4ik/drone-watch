@@ -407,6 +407,20 @@ def index(ident: Annotated[Identity | None, Depends(page_identity)]) -> Response
     return FileResponse(BASE / "static" / "index.html")
 
 
+PANELS = ("alerts", "tracks")   # панелі, які можна відкріпити в окреме вікно (на інший монітор)
+
+
+@app.get("/panel/{name}", include_in_schema=False)
+def panel(name: str, ident: Annotated[Identity | None, Depends(page_identity)]) -> Response:
+    """Та сама сторінка, але JS показує лише одну панель (тривоги чи треки). Вхід і роль ті самі, що для `/`: окреме вікно
+    не дає нічого, чого немає в основному. Невідому панель віддаємо як 404 (жодних шляхів із клієнта)."""
+    if ident is None or not has_role(ident.role, "viewer"):
+        return RedirectResponse("/login", status_code=303)
+    if name not in PANELS:
+        return Response(status_code=404)
+    return FileResponse(BASE / "static" / "index.html")
+
+
 VENDOR_FILES = {"maplibre-gl.js": "text/javascript", "maplibre-gl.css": "text/css", "three.module.min.js": "text/javascript",
                 "pmtiles.js": "text/javascript"}
 
@@ -421,7 +435,7 @@ def vendor(name: str) -> Response:   # бібліотеки віддаємо с�
 # Код і стилі самого дашборда. JS це ES-модулі: index.html підключає лише main.js, решту він тягне через import (сервер віддає
 # тільки файли з цього списку, тож новий модуль треба додати сюди).
 APP_FILES = {"dashboard.css": "text/css", **{f"{n}.js": "text/javascript" for n in
-             ("core", "map", "viewer3d", "dossier", "panels", "sound", "editor", "audit", "replay", "main")}}
+             ("core", "map", "viewer3d", "dossier", "panels", "sound", "editor", "audit", "replay", "layout", "main")}}
 
 
 @app.get("/static/app/{name}", include_in_schema=False)

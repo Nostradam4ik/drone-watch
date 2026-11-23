@@ -14,6 +14,8 @@ export const sensorState = id => ((S.state && S.state.sensors || []).find(s => s
 // Спільний змінний стан сторінки. Модуль не може переприсвоїти чужу змінну, тож усе, що міняють з різних файлів, лежить тут:
 // cfg (/api/config), state (останній кадр з сервера), selected (id цілі), map і popup (MapLibre), me (/api/me), а також
 // стан редактора розстановки: editing, tool, drag, suppressClick, reloading.
+// Відкріплене вікно (/panel/alerts, /panel/tracks): яка панель у ньому, або null в головному вікні
+export const PANEL = /^\/panel\/(alerts|tracks)\/?$/.exec(location.pathname)?.[1] ?? null;
 export const S = { cfg: null, state: null, selected: null, map: null, popup: null, me: null,
   editing: false, tool: null, drag: null, suppressClick: false, reloading: false,
   replay: null, liveMsg: null };   // replay: відтворення інциденту (replay.js); liveMsg: останній живий кадр, поки воно йде
