@@ -224,7 +224,7 @@ def run_subscriber(redis, handler):
 
 def test_relay_subscriber_delivers_lists_and_ignores_garbage(redis):
     got: list[list[dict]] = []
-    relay, stop, t = run_subscriber(redis, got.append)
+    _relay, stop, t = run_subscriber(redis, got.append)
     while not redis.subscribers:   # дочекатись підписки
         pass
     for payload in ("не json", "42", json.dumps(["рядок", 5]), json.dumps([{"sensor_id": "r1"}, "сміття"])):
