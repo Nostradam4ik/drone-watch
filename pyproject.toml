@@ -40,6 +40,7 @@ dronewatch-buildings = "dronewatch.service.buildings_build:main"
 dronewatch-dem = "dronewatch.service.dem_build:main"
 dronewatch-bench = "dronewatch.service.flood_bench:main"
 dronewatch-eval = "dronewatch.service.evaluate:main"
+dronewatch-gps2truth = "dronewatch.service.gps_to_truth:main"
 dronewatch-emulate = "dronewatch.emulator.emulate:main"
 
 [tool.setuptools.packages.find]
