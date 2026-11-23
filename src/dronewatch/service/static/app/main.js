@@ -2,7 +2,7 @@
 import { initAudit } from "./audit.js";
 import { LoginRequired, PANEL, ROLE_UA, S, api, apiPost, can, esc } from "./core.js";
 import { revealAnswer, select } from "./dossier.js";
-import { initLayout, listenPanels } from "./layout.js";
+import { initLayout, initTabs, listenPanels } from "./layout.js";
 import { initMap, toLL } from "./map.js";
 import { render, renderCatalog } from "./panels.js";
 import { startReplay } from "./replay.js";
@@ -23,6 +23,7 @@ async function start() {
   document.getElementById("edit-sensors").hidden = !S.cfg.editable;
   document.getElementById("ai-box").hidden = !can("operator");
   initAudit();
+  initTabs();
   initMap();
   connect();
 }

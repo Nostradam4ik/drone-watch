@@ -66,6 +66,31 @@ if (PANEL) {
   document.title = "Drone Watch — " + PANELS[PANEL];
 }
 
+// Вкладки нижньої частини панелі. Викликається після того, як з ролі відомо, чи є AI та журнал: недоступних вкладок не показуємо
+const TABS = ["tracks", "sensors", "ai", "audit"];
+export function initTabs() {
+  if (PANEL) return;
+  const aside = document.querySelector("aside"), bar = document.getElementById("tabs");
+  document.getElementById("tab-ai").hidden = document.getElementById("ai-box").hidden;
+  document.getElementById("tab-audit").hidden = document.getElementById("audit-box").hidden;
+  const visible = () => [...bar.querySelectorAll("button")].filter(b => !b.hidden);
+  function show(name, save) {
+    if (!visible().some(b => b.dataset.tab === name)) name = "tracks";
+    aside.dataset.tab = name;
+    bar.querySelectorAll("button").forEach(b => { const on = b.dataset.tab === name; b.setAttribute("aria-selected", String(on)); b.tabIndex = on ? 0 : -1; });
+    if (save) { try { localStorage.setItem("dw-tab", name); } catch (err) { /* вкладка не запамʼятається */ } }
+  }
+  bar.addEventListener("click", e => { const b = e.target.closest("button[data-tab]"); if (b) show(b.dataset.tab, true); });
+  bar.addEventListener("keydown", e => {
+    const bs = visible(), i = bs.findIndex(b => b.getAttribute("aria-selected") === "true");
+    const to = e.key === "ArrowRight" ? bs[(i + 1) % bs.length] : e.key === "ArrowLeft" ? bs[(i + bs.length - 1) % bs.length] : null;
+    if (to) { show(to.dataset.tab, true); to.focus(); e.preventDefault(); }
+  });
+  let saved = "tracks";
+  try { const v = localStorage.getItem("dw-tab"); if (TABS.includes(v)) saved = v; } catch (err) { /* за замовчуванням: треки */ }
+  show(saved, false);
+}
+
 export function initLayout() {
   if (PANEL) return;
   initSplitter();

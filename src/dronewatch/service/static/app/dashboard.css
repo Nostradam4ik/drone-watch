@@ -98,7 +98,7 @@ main { display: grid; grid-template-columns: 1fr 6px var(--aside-w, 348px); min-
 #legend i { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 7px; vertical-align: -1px; }
 #legend label { cursor: pointer; color: var(--text); }
 
-aside { border-left: 1px solid var(--line); background: var(--panel); display: grid; grid-template-rows: auto minmax(132px, 30vh) auto auto auto;
+aside { border-left: 1px solid var(--line); background: var(--panel); display: flex; flex-direction: column;
         min-height: 0; overflow-y: auto; }   /* запобіжник: якщо все разом не влазить у висоту вікна, прокручується бокова панель,
                                                  а не ховається форма AI за межами екрана */
 h2 { margin: 0; padding: 9px 16px 8px 13px; font: 600 12.5px/1 var(--face-label); color: var(--text);
@@ -260,3 +260,22 @@ body.panel #ai-box, body.panel #sensors-box, body.panel #audit-box { display: no
 body.panel aside > * { display: none; }
 body.panel-alerts aside > .sec-alerts, body.panel-tracks aside > .sec-tracks { display: block; }
 body.panel #alerts, body.panel #tracks { max-height: none; overflow: visible; }
+
+/* Бокова панель: тривоги завжди зверху, під ними вкладки (треки, датчики, AI, журнал), одна відкрита на всю решту висоти */
+aside > .sec-alerts { flex: none; }
+aside > #alerts { flex: 1 1 38%; min-height: 110px; }
+#tabs { flex: none; display: flex; gap: 2px; padding: 0 8px; border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); background: var(--ink); }
+#tabs button { appearance: none; background: none; border: 0; border-bottom: 2px solid transparent; color: var(--muted); cursor: pointer;
+               font: 600 12.5px var(--face-label); padding: 9px 12px 7px; }
+#tabs button:hover { color: var(--text); }
+#tabs button[aria-selected="true"] { color: var(--text); border-bottom-color: var(--ok); }
+#tabs button:focus-visible { outline: 2px solid var(--ok); outline-offset: -2px; }
+#tabs button.warn::after { content: " ●"; color: var(--crit); font-size: 10px; }
+aside > .sec-tracks, aside > #sensors-box, aside > #audit-box, aside > #ai-box { flex: 1 1 52%; min-height: 0; overflow-y: auto; }
+aside > #ai-box { max-height: none; overflow: hidden; }
+aside > .sec-tracks #tracks { max-height: none; overflow: visible; }
+/* Відкрита лише вибрана вкладка. Правила з #id (display: grid в #ai-box) сильніші за прості, тож ховаємо їх теж через #id.
+   Умова [data-tab] потрібна, щоб відкріплені вікна (там вкладок немає) цих правил не торкались. */
+aside[data-tab]:not([data-tab="tracks"]) .sec-tracks, aside[data-tab]:not([data-tab="sensors"]) #sensors-box,
+aside[data-tab]:not([data-tab="audit"]) #audit-box, aside[data-tab]:not([data-tab="ai"]) #ai-box { display: none; }
+body.panel #tabs { display: none; }
