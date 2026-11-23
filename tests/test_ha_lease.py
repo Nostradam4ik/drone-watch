@@ -1,6 +1,7 @@
 """Оренда лідера: автомат ролей Elector на керованому «часі» й фейковому сховищі."""
 import pytest
 
+from dronewatch.service import ha
 from dronewatch.service.ha import Elector, FencedError, LeaseStoreError, Role
 
 
@@ -185,3 +186,104 @@ def test_fenced_error_carries_stored():
 def test_rejects_nonpositive_ttl():
     with pytest.raises(ValueError, match="ttl"):
         Elector(FakeStore(Clock()), "a", 0, on_promote=lambda e: None, on_demote=lambda r: None)
+
+
+# ---------- Redis-реалізація ----------
+class FakeRedis:
+    """Мінімум Redis: set(nx, px), incr, get, eval за тотожністю скрипта з константою модуля; down імітує обрив."""
+
+    def __init__(self) -> None:
+        self.data: dict[str, str] = {}
+        self.ttl: dict[str, int] = {}
+        self.down = False
+
+    def _check(self) -> None:
+        if self.down:
+            raise ConnectionError("redis://:secret@host down")
+
+    def set(self, k, v, px=None, nx=False):
+        self._check()
+        if nx and k in self.data:
+            return None
+        self.data[k], self.ttl[k] = str(v), px
+        return True
+
+    def get(self, k):
+        self._check()
+        return self.data.get(k)
+
+    def incr(self, k):
+        self._check()
+        self.data[k] = str(int(self.data.get(k, "0")) + 1)
+        return int(self.data[k])
+
+    def eval(self, script, numkeys, *args):
+        self._check()
+        key, rest = args[0], args[numkeys:]
+        if script is ha._RENEW_LUA:
+            if self.data.get(key) == rest[0]:
+                self.ttl[key] = int(rest[1])
+                return 1
+            return 0
+        if script is ha._RELEASE_LUA:
+            if self.data.get(key) == rest[0]:
+                del self.data[key]
+                return 1
+            return 0
+        if script is ha._RAISE_EPOCH_LUA:
+            if int(self.data.get(key, "0")) < int(rest[0]):
+                self.data[key] = str(rest[0])
+            return 1
+        raise AssertionError("невідомий скрипт")
+
+
+def test_acquire_sets_value_and_epoch():
+    r = FakeRedis()
+    s = ha.RedisLeaseStore(r)
+    assert s.acquire("a", 6000) == 1
+    assert r.data["dw:leader"] == "a:1" and r.ttl["dw:leader"] == 6000 and r.data["dw:epoch"] == "1"
+
+
+def test_acquire_fails_when_held_but_epoch_still_grows():
+    s = ha.RedisLeaseStore(FakeRedis())
+    assert s.acquire("a", 6000) == 1
+    assert s.acquire("b", 6000) is None
+
+
+def test_renew_only_if_value_matches():
+    r = FakeRedis()
+    s = ha.RedisLeaseStore(r)
+    s.acquire("a", 6000)
+    assert s.renew("a", 1, 9000) is True and r.ttl["dw:leader"] == 9000
+    assert s.renew("b", 1, 9000) is False
+    assert s.renew("a", 2, 9000) is False
+
+
+def test_release_only_if_value_matches():
+    r = FakeRedis()
+    s = ha.RedisLeaseStore(r)
+    s.acquire("a", 6000)
+    s.release("b", 1)
+    assert "dw:leader" in r.data
+    s.release("a", 1)
+    assert "dw:leader" not in r.data
+
+
+def test_raise_epoch_never_lowers():
+    r = FakeRedis()
+    s = ha.RedisLeaseStore(r)
+    s.raise_epoch(50)
+    assert r.data["dw:epoch"] == "50"
+    s.raise_epoch(10)
+    assert r.data["dw:epoch"] == "50"
+    assert s.acquire("a", 6000) == 51
+
+
+def test_redis_error_becomes_lease_store_error_without_password():
+    r = FakeRedis()
+    s = ha.RedisLeaseStore(r)
+    r.down = True
+    for call in (lambda: s.acquire("a", 1), lambda: s.renew("a", 1, 1), lambda: s.release("a", 1), lambda: s.raise_epoch(1)):
+        with pytest.raises(LeaseStoreError) as e:
+            call()
+        assert "secret" not in str(e.value)

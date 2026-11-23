@@ -11,7 +11,7 @@ import threading
 import time
 from collections.abc import Callable
 from enum import StrEnum
-from typing import Protocol
+from typing import Any, Protocol
 
 log = logging.getLogger("dronewatch.ha")
 
@@ -49,6 +49,47 @@ class LeaseStore(Protocol):
 
     def raise_epoch(self, at_least: int) -> None:
         """Лічильник epoch не нижче `at_least` (Redis могли перезапустити й обнулити)."""
+
+
+PREFIX = "dw:"
+# Порівняння й зміна ключа атомарно: інакше між GET і SET ключ міг би спливти й дістатися іншому, а ми б його затерли.
+_RENEW_LUA = "if redis.call('get', KEYS[1]) == ARGV[1] then redis.call('pexpire', KEYS[1], ARGV[2]) return 1 else return 0 end"
+_RELEASE_LUA = "if redis.call('get', KEYS[1]) == ARGV[1] then return redis.call('del', KEYS[1]) else return 0 end"
+_RAISE_EPOCH_LUA = ("local cur = tonumber(redis.call('get', KEYS[1]) or '0') "
+                    "if cur < tonumber(ARGV[1]) then redis.call('set', KEYS[1], ARGV[1]) end return 1")
+
+
+class RedisLeaseStore:
+    """Оренда в Redis: `dw:leader` = `<owner>:<epoch>`, `dw:epoch` = лічильник. Будь-який збій клієнта це LeaseStoreError
+    (fail-closed, як у dashboard_redis), без тексту помилки: у ньому може бути URL із паролем."""
+
+    def __init__(self, client: Any, *, prefix: str = PREFIX) -> None:
+        self._r, self._leader, self._epoch = client, prefix + "leader", prefix + "epoch"
+
+    def acquire(self, owner: str, ttl_ms: int) -> int | None:
+        try:
+            epoch = int(self._r.incr(self._epoch))   # лічильник росте і при невдалій спробі: epoch лише зростає
+            return epoch if self._r.set(self._leader, f"{owner}:{epoch}", px=ttl_ms, nx=True) else None
+        except Exception as e:
+            raise LeaseStoreError(type(e).__name__) from None
+
+    def renew(self, owner: str, epoch: int, ttl_ms: int) -> bool:
+        try:
+            return bool(self._r.eval(_RENEW_LUA, 1, self._leader, f"{owner}:{epoch}", ttl_ms))
+        except Exception as e:
+            raise LeaseStoreError(type(e).__name__) from None
+
+    def release(self, owner: str, epoch: int) -> None:
+        try:
+            self._r.eval(_RELEASE_LUA, 1, self._leader, f"{owner}:{epoch}")
+        except Exception as e:
+            raise LeaseStoreError(type(e).__name__) from None
+
+    def raise_epoch(self, at_least: int) -> None:
+        try:
+            self._r.eval(_RAISE_EPOCH_LUA, 1, self._epoch, at_least)
+        except Exception as e:
+            raise LeaseStoreError(type(e).__name__) from None
 
 
 class Elector:
