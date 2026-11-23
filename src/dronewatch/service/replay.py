@@ -51,9 +51,17 @@ class ReplayRecorder:
         self._last = float("-inf")
         self._now = float("-inf")   # час останнього скану: за ним рахується термін зберігання
         self._max_frames = int((opts.before_s + opts.after_s) / opts.step_s) + 10
-        db.execute("""CREATE TABLE IF NOT EXISTS incident_replays (
+        self._ensure_table()
+
+    def _ensure_table(self) -> None:
+        self.db.execute("""CREATE TABLE IF NOT EXISTS incident_replays (
             incident_id INTEGER PRIMARY KEY, ts REAL, complete INTEGER, data BLOB)""")
-        db.commit()
+        self.db.commit()
+
+    def rebind(self, db: sqlite3.Connection) -> None:
+        """Той самий кільцевий буфер, інша БД (HA: резерв пише в памʼять, лідер у файл). Буфер кадрів не губиться."""
+        self.db = db
+        self._ensure_table()
 
     def on_scan(self, ts: float, frame: Callable[[], list[list[Any]]], new_alerts: list[Any],
                 setup: Callable[[], dict[str, Any]]) -> None:

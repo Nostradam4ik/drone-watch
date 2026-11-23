@@ -29,6 +29,7 @@ from dronewatch.service.audit import AuditEntry, AuditError, AuditLog
 from dronewatch.service.auth import SensorAuth
 from dronewatch.service.catalog import DRONES, UNKNOWN_MODEL, describe
 from dronewatch.service.forecast import EDGE_FRACTION, LOST_KEEP_S, forecast, loss_reason, search_area
+from dronewatch.service.ha import FencedError, NotActiveError
 from dronewatch.service.replay import SIDE_CODE, ReplayOptions, ReplayRecorder
 
 log = logging.getLogger("dronewatch.engine")
@@ -56,6 +57,7 @@ Measurement = tuple[str, Floats]               # (датчик, вимірюва
 
 VALID_REVIEW_STATUSES: tuple[str, ...] = ("new", "confirmed", "dismissed")
 MAX_REVIEW_NOTE = 500
+MAX_PENDING = 200   # тривог, піднятих без чинної оренди, що чекають запису (найновіші)
 
 
 class Alert(TypedDict):
@@ -128,12 +130,29 @@ class Zone:
         return {"name": self.name, "radius": self.radius, "level": self.level, "center": self.center.tolist()}
 
 
+def _open_db(path: str) -> sqlite3.Connection:
+    """Відкриває БД і створює/мігрує таблиці рушія (інциденти, рішення оператора, запобіжник epoch для HA)."""
+    db = sqlite3.connect(path, check_same_thread=False)
+    db.execute("""CREATE TABLE IF NOT EXISTS incidents (
+        id INTEGER PRIMARY KEY AUTOINCREMENT, ts REAL, track_id INTEGER, level TEXT, zone TEXT,
+        x REAL, y REAL, z REAL, speed REAL, sensors TEXT)""")
+    have = {r[1] for r in db.execute("PRAGMA table_info(incidents)")}
+    for col, typ in (("model", "TEXT"), ("model_name", "TEXT"), ("side", "TEXT"), ("status", "TEXT"),
+                     ("reviewed_by", "TEXT"), ("reviewed_at", "REAL"), ("review_note", "TEXT"), ("failover", "INTEGER")):
+        if col not in have:   # міграція старих журналів: нові колонки лишаються NULL у старих рядках (NULL status = new)
+            db.execute(f"ALTER TABLE incidents ADD COLUMN {col} {typ}")
+    db.execute("""CREATE TABLE IF NOT EXISTS incident_reviews (
+        id INTEGER PRIMARY KEY AUTOINCREMENT, incident_id INTEGER, status TEXT, by TEXT, ts REAL, note TEXT)""")
+    db.commit()
+    return db
+
+
 class Engine:
     def __init__(self, sensors: Iterable[Sensor], zones: list[Zone], db_path: str = ":memory:", scan_dt: float = 0.5,
                  min_age_s: float = 5.0, require_radar: bool = True, max_coast: int = 2, sensor_timeout_s: float = 5.0,
                  clock: Callable[[], float] = time.time, max_events_per_sensor: int = 150, max_tracks: int = 200,
                  auth: SensorAuth | None = None, origin: tuple[float, float] = DEFAULT_ORIGIN,
-                 replay: ReplayOptions | None = None) -> None:
+                 replay: ReplayOptions | None = None, standby: bool = False) -> None:
         # min_age_s: тривога лише для треку, підтвердженого щонайменше стільки секунд (відсів короткоживучих хибних)
         # require_radar: у зоні радара тривога лише з радарним підтвердженням; max_coast: скільки сканів без детекцій трек ще «живий»
         self.min_age_s, self.require_radar, self.max_coast = min_age_s, require_radar, max_coast
@@ -170,20 +189,91 @@ class Engine:
             ("events_in", "events_rejected", "events_unauthorized", "events_dropped", "heartbeats", "scans",
              "scan_errors", "tracks_capped", "bearings_truncated"), 0)
         self.calibration: dict[str, Any] = {"done": False, "note": "не виконано"}
-        self.db = sqlite3.connect(db_path, check_same_thread=False)
-        self.db.execute("""CREATE TABLE IF NOT EXISTS incidents (
-            id INTEGER PRIMARY KEY AUTOINCREMENT, ts REAL, track_id INTEGER, level TEXT, zone TEXT,
-            x REAL, y REAL, z REAL, speed REAL, sensors TEXT)""")
-        have = {r[1] for r in self.db.execute("PRAGMA table_info(incidents)")}
-        for col, typ in (("model", "TEXT"), ("model_name", "TEXT"), ("side", "TEXT"), ("status", "TEXT"),
-                         ("reviewed_by", "TEXT"), ("reviewed_at", "REAL"), ("review_note", "TEXT")):
-            if col not in have:   # міграція старих журналів: нові колонки лишаються NULL у старих рядках (NULL status = new)
-                self.db.execute(f"ALTER TABLE incidents ADD COLUMN {col} {typ}")
-        self.db.execute("""CREATE TABLE IF NOT EXISTS incident_reviews (
-            id INTEGER PRIMARY KEY AUTOINCREMENT, incident_id INTEGER, status TEXT, by TEXT, ts REAL, note TEXT)""")
-        self.db.commit()
+        # HA: резерв працює на :memory:, тож його побічні ефекти нешкідливі; справжній файл відкриває activate()
+        self.active = not standby
+        self.epoch: int | None = None
+        self.pending: list[Alert] = []   # тривоги, підняті без чинної оренди: записуються при підвищенні (failover=1)
+        self.db = _open_db(":memory:" if standby else db_path)
+        self._replay_opts = replay
         self.replay = ReplayRecorder(self.db, replay) if replay is not None else None   # None: відтворення вимкнено
         self.audit = AuditLog(self.db, self.lock)   # той самий файл БД; append бере self.lock, тож під замком лише append_locked
+
+    # --- HA: роль резерв/лідер
+    def activate(self, db_path: str, epoch: int) -> None:
+        """Стає лідером: відкриває справжній файл БД, захоплює запобіжник epoch у самому файлі (FencedError, якщо там уже новіший),
+        дописує тривоги, підняті без оренди (failover=1). Той самий epoch удруге дозволений: лідер, що повернувся до Redis."""
+        db = _open_db(db_path)
+        try:
+            db.execute("CREATE TABLE IF NOT EXISTS ha_epoch (id INTEGER PRIMARY KEY CHECK (id = 1), epoch INTEGER NOT NULL)")
+            db.execute("BEGIN IMMEDIATE")
+            row = db.execute("SELECT epoch FROM ha_epoch").fetchone()
+            if row is not None and row[0] > epoch:
+                db.rollback()
+                raise FencedError(f"у файлі БД epoch {row[0]} новіший за {epoch}", stored=int(row[0]))
+            db.execute("INSERT INTO ha_epoch (id, epoch) VALUES (1, ?) ON CONFLICT(id) DO UPDATE SET epoch = excluded.epoch", (epoch,))
+            db.commit()
+        except BaseException:
+            db.close()
+            raise
+        with self.lock:
+            old = self.db
+            self.db, self.audit = db, AuditLog(db, self.lock)
+            if self.replay is not None:
+                self.replay.rebind(db)
+            for a in self.pending:
+                a["id"] = self._insert_incident(a, failover=True)
+            if self.pending:
+                db.commit()
+                log.warning("HA: записано %d тривог, піднятих без чинної оренди", len(self.pending))
+            self.pending.clear()
+            self.active, self.epoch = True, epoch
+            old.close()
+
+    def deactivate(self) -> None:
+        """Більше не лідер: назад на :memory:. Тривоги далі йдуть у pending і показуються, але нічого не пишеться у файл."""
+        with self.lock:
+            self._deactivate_locked()
+
+    def _deactivate_locked(self) -> None:
+        if not self.active and self.epoch is None:
+            return
+        old = self.db
+        self.db = _open_db(":memory:")
+        self.audit = AuditLog(self.db, self.lock)
+        if self.replay is not None:
+            self.replay.rebind(self.db)
+        self.active, self.epoch = False, None
+        old.close()
+
+    def fence(self) -> None:
+        """Перевірка перед записом: чинна ли ще наша епоха у файлі. NotActiveError, якщо ми не лідер; FencedError (і перехід у
+        резерв), якщо у файлі новіший epoch. Без HA (epoch None) нічого не робить."""
+        with self.lock:
+            self._fence_locked()
+
+    def _fence_locked(self) -> None:
+        if not self.active:
+            raise NotActiveError("немає чинної оренди: запис і дії оператора заборонені")
+        if self.epoch is None:
+            return
+        row = self.db.execute("SELECT epoch FROM ha_epoch").fetchone()
+        if row is None or row[0] != self.epoch:
+            stored = int(row[0]) if row else 0
+            self._deactivate_locked()
+            raise FencedError(f"у файлі БД epoch {stored}, мій {self.epoch}: лідером став інший", stored=stored)
+
+    def _stash_pending(self, alerts: list[Alert]) -> None:
+        self.pending.extend(alerts)
+        if len(self.pending) > MAX_PENDING:
+            log.error("HA: тривог без запису понад %d, найстаріші відкинуто з журналу (на екрані вони є)", MAX_PENDING)
+            del self.pending[:-MAX_PENDING]
+
+    def _insert_incident(self, a: Alert, *, failover: bool = False) -> int:
+        cur = self.db.execute("INSERT INTO incidents (ts, track_id, level, zone, x, y, z, speed, sensors,"
+                              " model, model_name, side, status, failover) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,'new',?)",
+                              (a["ts"], a["track_id"], a["level"], a["zone"], *a["pos"], a["speed"], ",".join(a["sensors"]),
+                               a["model"], a["model_name"], a["side"], 1 if failover else None))
+        return cur.lastrowid or 0
 
     # --- вхід
     def reset(self) -> None:
@@ -349,7 +439,7 @@ class Engine:
         if self.replay is None:
             return
         try:
-            self.replay.on_scan(self.clock(), self._replay_frame, alerts, self._replay_setup)
+            self.replay.on_scan(self.clock(), self._replay_frame, alerts if self.active else [], self._replay_setup)
         except Exception:
             log.exception("запис для відтворення інцидентів не вдався")
 
@@ -516,14 +606,15 @@ class Engine:
                                    "sensors": sorted(k for k, ts in tr.kinds.items() if t - ts < 3.0),
                                    "model": ident["model"], "model_name": ident["model_name"], "side": ident["side"],
                                    "id": 0, "status": "new", "reviewed_by": None, "reviewed_at": None, "review_note": None})
-        for a in new_alerts:
-            cur = self.db.execute("INSERT INTO incidents (ts, track_id, level, zone, x, y, z, speed, sensors,"
-                                  " model, model_name, side, status) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,'new')",
-                                  (a["ts"], a["track_id"], a["level"], a["zone"], *a["pos"], a["speed"], ",".join(a["sensors"]),
-                                   a["model"], a["model_name"], a["side"]))
-            a["id"] = cur.lastrowid or 0
         if new_alerts:
-            self.db.commit()
+            try:
+                self._fence_locked()   # без HA це no-op; з HA: чинна ли ще наша оренда (інакше тривога йде в pending)
+            except (NotActiveError, FencedError):
+                self._stash_pending(new_alerts)
+            else:
+                for a in new_alerts:
+                    a["id"] = self._insert_incident(a)
+                self.db.commit()
             self.alerts = (new_alerts[::-1] + self.alerts)[:200]
         alive = {tr.id for tr in self.tracker.tracks}
         for tid in list(self.max_level):
@@ -544,6 +635,7 @@ class Engine:
             raise ValueError(f"недопустимий статус: {status}")
         clean = (note or "").strip()[:MAX_REVIEW_NOTE] or None
         with self.lock:
+            self._fence_locked()
             if self.db.execute("SELECT 1 FROM incidents WHERE id=?", (incident_id,)).fetchone() is None:
                 return None
             ts = self.clock()
