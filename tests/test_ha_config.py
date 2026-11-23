@@ -37,3 +37,15 @@ def test_ha_enabled_ok_in_live():
 def test_ttl_bounds(ttl):
     with pytest.raises(ValidationError):
         HaCfg(lease_ttl_s=ttl)
+
+
+def test_demo_ha_config_is_copy_of_demo_config_plus_ha_block():
+    """deploy/config.ha.yaml не розходиться з deploy/config.yaml (датчики, зони, вхід), крім блоку ha."""
+    from pathlib import Path
+
+    from dronewatch.service import config
+
+    root = Path(__file__).parent.parent / "deploy"
+    base, ha = config.load(root / "config.yaml"), config.load(root / "config.ha.yaml")
+    assert ha.ha.enabled and ha.ha.redis_url == "redis://127.0.0.1:6379" and not base.ha.enabled
+    assert ha.model_copy(update={"ha": base.ha}) == base

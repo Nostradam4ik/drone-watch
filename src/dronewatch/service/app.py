@@ -239,7 +239,8 @@ def build_ha(cfg: config.Config, rt: Runtime) -> ha.HaState | None:
     assert url   # config._check вимагає redis_url при ha.enabled
     check_redis_url(url)
     client = dashboard_redis.connect(url)
-    owner = socket.gethostname() if cfg.ha.instance_id == "auto" else cfg.ha.instance_id
+    # HA_INSTANCE_ID потрібен, коли копії ділять hostname (наприклад, один мережевий простір у docker-compose)
+    owner = os.environ.get("HA_INSTANCE_ID") or (socket.gethostname() if cfg.ha.instance_id == "auto" else cfg.ha.instance_id)
 
     def promote(epoch: int) -> None:
         rt.engine.activate(rt.db_path, epoch)

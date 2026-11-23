@@ -44,6 +44,11 @@ def test_ha_auto_instance_id_is_hostname(redis, monkeypatch):
     assert app.build_runtime(ha_cfg()).ha.elector.owner == "host-7"
 
 
+def test_ha_instance_id_env_overrides_config(redis, monkeypatch):
+    monkeypatch.setenv("HA_INSTANCE_ID", "from-env")
+    assert app.build_runtime(ha_cfg(instance_id="node-a")).ha.elector.owner == "from-env"
+
+
 def test_ha_start_fails_without_redis(monkeypatch, tmp_path):
     monkeypatch.setenv("DB_PATH", str(tmp_path / "i.db"))
 

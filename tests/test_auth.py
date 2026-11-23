@@ -392,10 +392,13 @@ def test_broker_files_match_demo_stack():
     hc_pw = " ".join(compose["services"]["mosquitto"]["healthcheck"]["test"]).split("-P ")[1].split()[0]
     passwd = dict(line.split(":", 1) for line in (root / "deploy" / "mosquitto.passwd").read_text(encoding="utf-8").split())
 
-    expected = {**sensor_keys, "dronewatch-service": svc_pw, "healthcheck": hc_pw}
-    assert set(passwd) == set(expected), "у passwd рівно датчики, сервіс і healthcheck, ніхто зайвий"
+    ha_pw = compose["services"]["ha-b"]["environment"]["MQTT_PASSWORD"]   # друга копія HA: окремий логін, бо client_id = логін
+    expected = {**sensor_keys, "dronewatch-service": svc_pw, "dronewatch-service-2": ha_pw, "healthcheck": hc_pw}
+    assert set(passwd) == set(expected), "у passwd рівно датчики, обидві копії сервісу і healthcheck, ніхто зайвий"
     assert all(_pbkdf2(expected[u], passwd[u]) for u in expected), "хеші в passwd не відповідають паролям у compose"
     assert compose["services"]["service"]["environment"]["MQTT_USER"] == "dronewatch-service"
+    assert compose["services"]["ha-a"]["environment"]["MQTT_USER"] == "dronewatch-service"
+    assert compose["services"]["ha-b"]["environment"]["MQTT_USER"] == "dronewatch-service-2", "копії HA не ділять логін брокера"
 
     active = [line.split("#")[0].strip() for line in (root / "deploy" / "mosquitto.conf").read_text(encoding="utf-8").splitlines()]
     assert "allow_anonymous false" in active and "use_username_as_clientid true" in active
@@ -413,6 +416,7 @@ def test_broker_files_match_demo_stack():
             per_user[cur] = []
         else:
             per_user[cur].append(line)
-    assert per_user == {"dronewatch-service": ["topic read dronewatch/events/#"], "healthcheck": ["topic read $SYS/broker/uptime"]}
+    assert per_user == {"dronewatch-service": ["topic read dronewatch/events/#"],
+                        "dronewatch-service-2": ["topic read dronewatch/events/#"], "healthcheck": ["topic read $SYS/broker/uptime"]}
 
 

@@ -3,7 +3,8 @@ FROM python:3.15-slim
 WORKDIR /app
 # Залежності беруться з pyproject.toml і ставляться окремим шаром: він перезбирається лише при зміні залежностей, а не коду
 COPY pyproject.toml .
-RUN python -c "import tomllib; print('\n'.join(tomllib.load(open('pyproject.toml','rb'))['project']['dependencies']))" > /tmp/req.txt \
+# + extra redis: без нього ні спільні сесії, ні HA (профіль ha) не стартують; на роботу однієї копії він не впливає
+RUN python -c "import tomllib; p = tomllib.load(open('pyproject.toml','rb'))['project']; print('\n'.join(p['dependencies'] + p['optional-dependencies']['redis']))" > /tmp/req.txt \
     && pip install --no-cache-dir -r /tmp/req.txt && rm /tmp/req.txt
 COPY src src
 RUN pip install --no-cache-dir --no-deps .

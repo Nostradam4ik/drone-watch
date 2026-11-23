@@ -56,6 +56,10 @@ class LeaseStore(Protocol):
 
 PREFIX = "dw:"
 # Порівняння й зміна ключа атомарно: інакше між GET і SET ключ міг би спливти й дістатися іншому, а ми б його затерли.
+# Захоплення теж атомарне й лічильник росте ЛИШЕ при успіху: резерв пробує кожні ttl/3, і без цього epoch ріс би вічно
+_ACQUIRE_LUA = ("if redis.call('exists', KEYS[1]) == 1 then return 0 end "
+                "local e = redis.call('incr', KEYS[2]) "
+                "redis.call('set', KEYS[1], ARGV[1] .. ':' .. e, 'PX', ARGV[2]) return e")
 _RENEW_LUA = "if redis.call('get', KEYS[1]) == ARGV[1] then redis.call('pexpire', KEYS[1], ARGV[2]) return 1 else return 0 end"
 _RELEASE_LUA = "if redis.call('get', KEYS[1]) == ARGV[1] then return redis.call('del', KEYS[1]) else return 0 end"
 _RAISE_EPOCH_LUA = ("local cur = tonumber(redis.call('get', KEYS[1]) or '0') "
@@ -71,8 +75,8 @@ class RedisLeaseStore:
 
     def acquire(self, owner: str, ttl_ms: int) -> int | None:
         try:
-            epoch = int(self._r.incr(self._epoch))   # лічильник росте і при невдалій спробі: epoch лише зростає
-            return epoch if self._r.set(self._leader, f"{owner}:{epoch}", px=ttl_ms, nx=True) else None
+            epoch = int(self._r.eval(_ACQUIRE_LUA, 2, self._leader, self._epoch, owner, ttl_ms))
+            return epoch or None   # 0: оренду тримає інший
         except Exception as e:
             raise LeaseStoreError(type(e).__name__) from None
 

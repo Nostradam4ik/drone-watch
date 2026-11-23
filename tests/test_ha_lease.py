@@ -250,6 +250,13 @@ class FakeRedis:
     def eval(self, script, numkeys, *args):
         self._check()
         key, rest = args[0], args[numkeys:]
+        if script is ha._ACQUIRE_LUA:
+            if key in self.data:
+                return 0
+            epoch = int(self.data.get(args[1], "0")) + 1
+            self.data[args[1]] = str(epoch)
+            self.data[key], self.ttl[key] = f"{rest[0]}:{epoch}", int(rest[1])
+            return epoch
         if script is ha._RENEW_LUA:
             if self.data.get(key) == rest[0]:
                 self.ttl[key] = int(rest[1])
@@ -274,10 +281,13 @@ def test_acquire_sets_value_and_epoch():
     assert r.data["dw:leader"] == "a:1" and r.ttl["dw:leader"] == 6000 and r.data["dw:epoch"] == "1"
 
 
-def test_acquire_fails_when_held_but_epoch_still_grows():
-    s = ha.RedisLeaseStore(FakeRedis())
+def test_failed_acquire_does_not_burn_epoch():
+    r = FakeRedis()
+    s = ha.RedisLeaseStore(r)
     assert s.acquire("a", 6000) == 1
-    assert s.acquire("b", 6000) is None
+    for _ in range(5):   # резерв пробує кожні ttl/3: лічильник не має рости
+        assert s.acquire("b", 6000) is None
+    assert r.data["dw:epoch"] == "1"
 
 
 def test_renew_only_if_value_matches():
