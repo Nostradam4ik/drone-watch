@@ -64,6 +64,14 @@ def test_config_tells_dashboard_it_can_edit_and_what_to_offer(client):
     assert all("type" in s for s in c["sensors"])
 
 
+def test_config_reports_sensor_height_and_it_survives_a_layout_save(client):
+    """Редактор повертає розстановку з конфігу: без поля height у конфігу кожне збереження скидало б висоту датчика в нуль."""
+    assert all(s["height"] == 0.0 for s in client.get("/api/config").json()["sensors"])
+    body = {"sensors": [{**placed("r1", "radar-mid"), "height": 12.5}]}
+    assert client.put("/api/layout", json=body).status_code == 200
+    assert [s["height"] for s in client.get("/api/config").json()["sensors"]] == [12.5]
+
+
 def test_put_layout_replaces_sensors_and_bumps_revision(client):
     before = client.get("/api/config").json()["layout_rev"]
     body = {"sensors": [placed("alpha", "radar-long", 100, 200), placed("rf9", "rf", -300, 50), placed("ac9", "acoustic", 40, 40)]}

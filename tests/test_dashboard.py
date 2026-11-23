@@ -139,6 +139,23 @@ def test_login_limiter_memory_is_bounded():
     assert len(lim._attempts) <= 60, len(lim._attempts)
 
 
+def test_login_limiter_refuses_new_keys_when_full_of_fresh_ones(caplog):
+    """Усі ключі свіжі (розподілений перебір з багатьох адрес): стеля не обходиться, нових адрес не приймаємо (fail-closed)."""
+    clock = Clock()
+    lim = LoginLimiter(max_failures=3, window_s=10, clock=clock, max_keys=50)
+    results = [lim.attempt(f"ip{i}") for i in range(200)]
+    assert len(lim._attempts) <= 50, len(lim._attempts)
+    assert results[:50] == [0.0] * 50
+    assert all(r > 0 for r in results[50:]), "нова адреса при повній таблиці: відмова з підказкою, коли повторити"
+    assert lim.attempt("ip0") == 0.0, "відомі адреси далі рахуються за звичайним правилом"
+    assert len([r for r in caplog.records if "таблиця лімітера" in r.getMessage()]) == 1, "у лозі один ERROR на вікно, а не на кожну спробу"
+    clock.now += 11
+    assert lim.attempt("ip999") == 0.0, "вікно минуло: місце звільнилось"
+    for i in range(200):   # таблиця знову забита: нове вікно, нове повідомлення
+        lim.attempt(f"again{i}")
+    assert len([r for r in caplog.records if "таблиця лімітера" in r.getMessage()]) == 2
+
+
 def test_limiter_cannot_be_bypassed_by_a_parallel_burst():
     """Регрес із перевірки безпеки: «перевірити ліміт, потім записати невдачу» дозволяло залпу з 40 запитів пройти повністю."""
     import threading
@@ -376,7 +393,8 @@ def test_logs_never_contain_passwords_and_are_injection_safe():
         root.setLevel(old)
     text = "\n".join(r.getMessage() for r in records)
     assert "Wrong-Secret-Password-1" not in text and PASSWORD not in text
-    assert "fake line injected" in text and "\nINFO fake" not in text, "переніс рядка в імені не має підробляти запис у лозі"
+    assert "fake line injected" not in text, "невідоме ім'я (там може бути пароль) у лог не потрапляє, отже запису не підробити"
+    assert "\nINFO fake" not in text
     assert any("вхід: alice" in r.getMessage() for r in records) and any("невдалий вхід" in r.getMessage() for r in records)
 
 
@@ -641,3 +659,11 @@ def test_slow_websocket_client_is_dropped_and_does_not_stall_others(monkeypatch)
     asyncio.run(appmod.broadcast(rt, Acc(), {"x": 1}))
     assert time.monotonic() - t0 < 2 and fast.sent == [{"x": 1}]
     assert slow not in rt.clients and fast in rt.clients
+
+
+def test_detached_panel_pages_need_login_and_only_known_names():
+    c, _, _ = _client(auth=True)
+    assert c.get("/panel/alerts", follow_redirects=False).status_code == 303   # без входу на форму входу
+    c.post("/api/login", json=LOGIN)
+    assert c.get("/panel/alerts").status_code == 200 and c.get("/panel/tracks").status_code == 200
+    assert c.get("/panel/../etc").status_code == 404 and c.get("/panel/sensors").status_code == 404

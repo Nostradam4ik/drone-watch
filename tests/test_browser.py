@@ -147,6 +147,11 @@ def alert(aid: int, track_id: int, level: str = "CRITICAL", status: str = "new",
     return a
 
 
+def tab(page: Page, name: str) -> None:
+    """Нижня частина бокової панелі має вкладки (треки, датчики, AI, журнал): відкрити потрібну."""
+    page.locator(f"#tab-{name}").click()
+
+
 def watch_errors(page: Page) -> list[str]:
     errors: list[str] = []
     page.on("pageerror", lambda e: errors.append(f"pageerror: {e}"))
@@ -208,8 +213,38 @@ def test_page_loads_and_shows_live_tracks_from_the_real_websocket(server, browse
     expect(page.locator("#conn")).to_have_text("на звʼязку")
     expect(page.locator("#mode")).to_have_text("ДЕМО (симуляція)")
     expect(page.locator("#tbody tr").first).to_be_visible(timeout=20_000)   # симуляція: перший трек за кілька секунд
+    tab(page, "sensors")
     expect(page.locator("#sensors .sensor").first).to_be_visible()
     expect(page.locator("#edit-sensors")).to_be_visible()   # демо: розстановка датчиків доступна
+    ctx.close()
+    assert not errors, "\n".join(errors)
+
+
+def test_sensor_height_is_edited_and_saved_with_the_layout(server, browser):
+    ctx = browser.new_context()
+    page = ctx.new_page()
+    errors = watch_errors(page)
+    assert sign_in(page, server["base"], "admin") == 200
+    page.goto(server["base"] + "/")
+    tab(page, "sensors")
+    expect(page.locator("#sensors .sensor").first).to_be_visible(timeout=20_000)
+    page.locator("#edit-sensors").click()
+    field = page.locator("#sensors input[data-h]").first
+    expect(field).to_be_visible()
+    sid = field.get_attribute("data-h")
+    with page.expect_request(lambda r: r.url.endswith("/api/layout") and r.method == "PUT") as req:
+        field.fill("15")
+        field.press("Enter")
+    body = json.loads(req.value.post_data or "{}")
+    assert {s["id"]: s["height"] for s in body["sensors"]}[sid] == 15, "висота йде в тілі PUT"
+    assert all("height" in s for s in body["sensors"])
+    expect(page.locator(f'#sensors input[data-h="{sid}"]')).to_have_value("15")
+    # ще раз збереження іншим способом не скидає висоту (регрес: редактор раніше не надсилав height взагалі)
+    page.locator("#edit-sensors").click()
+    assert {s["id"]: s["height"] for s in login_json(server["base"], "admin", "/api/config")["sensors"]}[sid] == 15
+    page.locator("#edit-sensors").click()
+    with page.expect_request(lambda r: r.url.endswith("/api/layout") and r.method == "DELETE"):
+        page.locator("#layout-reset").click()   # повертаємо вбудовані датчики: решта тестів модуля чекає демо-розстановку
     ctx.close()
     assert not errors, "\n".join(errors)
 
@@ -274,6 +309,8 @@ def test_lost_radar_shows_degraded_banner(dash):
     expect(banner).to_be_visible()
     expect(banner).to_contain_text("без радара")
     expect(dash.page.locator("#sens")).to_have_class("chip off")
+    expect(dash.page.locator("#tab-sensors")).to_have_class("warn")   # placeholder
+    tab(dash.page, "sensors")
     expect(dash.page.locator("#sensors .sensor.LOST").first).to_contain_text("42 с")
 
 
@@ -378,6 +415,7 @@ def test_ai_answer_is_rendered_as_safe_markdown_with_tool_chips(dash):
         route.fulfill(status=200, content_type="application/json",
                       body=json.dumps({"answer": "У зоні **2 цілі** <b>x</b>", "tool_calls": [{"name": "get_incident_stats"}]}))
     dash.page.route("**/api/ai/ask", ask)
+    tab(dash.page, "ai")
     dash.page.locator("#ai-q-input").fill("що в зоні A?")
     dash.page.locator("#ai-form button").click()
     answer = dash.page.locator("#ai-log .ai-a")
@@ -390,6 +428,7 @@ def test_ai_answer_is_rendered_as_safe_markdown_with_tool_chips(dash):
 
 def test_ai_unavailable_is_reported(dash):
     dash.page.route("**/api/ai/ask", lambda r: r.fulfill(status=503, body="{}"))
+    tab(dash.page, "ai")
     dash.page.locator("#ai-q-input").fill("стан?")
     dash.page.locator("#ai-form button").click()
     expect(dash.page.locator("#ai-log .ai-a")).to_have_text("AI недоступний")
@@ -406,6 +445,8 @@ def test_viewer_sees_no_review_buttons_editor_or_ai(dash_as):
     expect(d.page.locator("#edit-sensors")).to_be_hidden()
     expect(d.page.locator("#ai-box")).to_be_hidden()
     expect(d.page.locator("#audit-box")).to_be_hidden()
+    expect(d.page.locator("#tab-ai")).to_be_hidden()      # вкладок AI й журналу в перегляду немає
+    expect(d.page.locator("#tab-audit")).to_be_hidden()
     expect(d.page.locator("#who-name")).to_have_text("viewer (перегляд)")
     assert not d.errors, d.errors
 
@@ -414,7 +455,9 @@ def test_operator_reviews_but_cannot_edit_layout(dash_as):
     d = dash_as("operator")
     d.push(d.state(alerts=[alert(1, 1)]))
     expect(d.page.locator("button[data-review]")).to_have_count(2)
+    tab(d.page, "ai")
     expect(d.page.locator("#ai-form")).to_be_visible()
+    tab(d.page, "sensors")
     expect(d.page.locator("#edit-sensors")).to_be_hidden()
     expect(d.page.locator("#audit-box")).to_be_hidden()
     expect(d.page.locator("#catalog-body [draggable]")).to_have_count(0)
@@ -430,8 +473,11 @@ def test_forbidden_review_shows_insufficient_rights_toast(dash):
 
 def test_admin_sees_audit_tab_with_integrity_ok(dash_as):
     d = dash_as("admin")
+    tab(d.page, "sensors")
     expect(d.page.locator("#edit-sensors")).to_be_visible()
+    tab(d.page, "ai")
     expect(d.page.locator("#ai-form")).to_be_visible()
+    tab(d.page, "audit")
     expect(d.page.locator("#audit-box")).to_be_visible()
     d.page.locator("#audit-box summary").click()
     expect(d.page.locator("#audit-body tr", has_text="login").first).to_be_visible()
@@ -440,13 +486,254 @@ def test_admin_sees_audit_tab_with_integrity_ok(dash_as):
 
 
 def test_audit_rows_are_rendered_as_text(dash_as, server):
-    evil = '<img src=x onerror="window.__pwned=1">'
+    # Невідоме ім'я журнал не зберігає (там може бути пароль), а відомі імена конфіг обмежує безпечними символами. Тож
+    # зловмисний рядок потрапляє в журнал через шлях відмовленого запиту (запис `denied`): клієнт керує ним повністю.
+    evil = '<img src=x onerror=window.__pwned=1>'
     d0 = dash_as("viewer")
-    assert sign_in(d0.page, server["base"], "viewer", username=evil, password="wrong-password-xx") == 401
+    status = d0.page.evaluate("""async (p) => (await fetch(p, {method: "POST", credentials: "same-origin",
+        headers: {"Content-Type": "application/json"}, body: "{}"})).status""", f"/api/incidents/{evil}/review")
+    assert status == 403
     d = dash_as("admin")
+    tab(d.page, "audit")
     d.page.locator("#audit-box summary").click()
-    row = d.page.locator("#audit-body tr", has_text="login_failed").first
+    row = d.page.locator("#audit-body tr", has_text="denied").first
     expect(row).to_contain_text(evil)
     assert d.page.locator("#audit-body img").count() == 0
     assert d.page.evaluate("window.__pwned") is None
     assert not d.errors, d.errors
+
+
+# ---------- відтворення інциденту ----------
+def replay_payload(cfg: dict[str, Any], complete: bool = True) -> dict[str, Any]:
+    row = lambda x, lvl: [1, x, 20.0, 50.0, 1.0, 0.0, lvl, "e", 0, 1, 0]  # noqa: E731
+    return {"incident_id": 7, "ts": 1795352316.0, "complete": complete, "v": 1, "step": 0.2,
+            "target": {"track_id": 1, "pos": [10.0, 20.0, 50.0], "level": "WARNING", "zone": "A"},
+            "setup": {"sensors": [{k: s[k] for k in ("id", "label", "pos", "max_range", "heading_deg", "fov_deg")} for s in cfg["sensors"]],
+                      "zones": cfg["zones"], "origin": cfg["origin"]},
+            "frames": [[-3.0, [row(8.0, 0)]], [-2.0, [row(9.0, 0)]], [0.0, [row(10.0, 1)]], [2.0, [row(11.0, 1)]]]}
+
+
+def test_replay_plays_pauses_seeks_and_restores_live_view(dash):
+    dash.page.route("**/api/incidents/7/replay", lambda r: r.fulfill(json=replay_payload(dash.cfg)))
+    dash.push(dash.state(tracks=[track(1)], alerts=[alert(7, 1)]))
+    dash.page.locator('button[data-replay="7"]').click()
+    expect(dash.page.locator("#replay")).to_be_visible()
+    expect(dash.page.locator("#rp-time")).to_contain_text("T")
+    dash.page.locator("#rp-play").click()   # пауза
+    expect(dash.page.locator("#rp-play")).to_have_text("▶")
+    dash.page.locator("#rp-seek").fill("0")
+    expect(dash.page.locator("#rp-time")).to_have_text("T−3 с")
+    dash.page.locator("#rp-seek").fill("3")
+    expect(dash.page.locator("#rp-time")).to_have_text("T+2 с")
+    dash.page.locator("#rp-close").click()
+    expect(dash.page.locator("#replay")).to_be_hidden()
+    dash.push(dash.state(tracks=[track(2), track(3)], alerts=[alert(7, 1)]))
+    expect(dash.page.locator("#tbody tr")).to_have_count(2)   # живий вигляд повернувся
+
+
+def test_live_alerts_still_arrive_during_replay(dash):
+    dash.page.route("**/api/incidents/7/replay", lambda r: r.fulfill(json=replay_payload(dash.cfg)))
+    dash.push(dash.state(tracks=[track(1)], alerts=[alert(7, 1)]))
+    dash.page.locator('button[data-replay="7"]').click()
+    expect(dash.page.locator("#replay")).to_be_visible()
+    dash.push(dash.state(tracks=[track(1)], alerts=[alert(8, 1, level="CRITICAL"), alert(7, 1)]))
+    expect(dash.page.locator("#alerts .alert")).to_have_count(2)   # жива тривога не губиться під час відтворення
+    dash.page.keyboard.press("Escape")
+    expect(dash.page.locator("#replay")).to_be_hidden()
+
+
+def test_missing_replay_gives_a_toast_not_a_player(dash):
+    dash.page.route("**/api/incidents/7/replay", lambda r: r.fulfill(status=404, json={"detail": "немає"}))
+    dash.push(dash.state(tracks=[track(1)], alerts=[alert(7, 1)]))
+    dash.page.locator('button[data-replay="7"]').click()
+    expect(dash.page.locator("#toast .toast.WARNING")).to_contain_text("Запису відтворення")
+    expect(dash.page.locator("#replay")).to_be_hidden()
+
+
+# ---------- розкладка: роздільник і відкріплені панелі ----------
+def aside_width(page: Page) -> float:
+    return float(page.evaluate("document.querySelector('aside').getBoundingClientRect().width"))
+
+
+def test_splitter_resizes_the_side_panel_and_remembers_it(dash):
+    page = dash.page
+    assert abs(aside_width(page) - 348) < 2
+    box = page.locator("#splitter").bounding_box()
+    assert box is not None
+    y = box["y"] + box["height"] / 2
+    page.mouse.move(box["x"] + 3, y)
+    page.mouse.down()
+    page.mouse.move(box["x"] - 150, y, steps=5)
+    page.mouse.up()
+    assert 480 < aside_width(page) < 520
+    page.reload()
+    expect(page.locator("#conn")).to_have_text("на звʼязку", timeout=20_000)
+    assert 480 < aside_width(page) < 520   # ширина пережила перезавантаження
+    page.locator("#splitter").dblclick()
+    assert abs(aside_width(page) - 348) < 2
+    page.locator("#splitter").focus()
+    page.keyboard.press("ArrowLeft")
+    assert abs(aside_width(page) - 368) < 2   # з клавіатури: 20 px за натискання
+    page.keyboard.press("ArrowRight")
+    page.keyboard.press("ArrowRight")
+    assert abs(aside_width(page) - 328) < 2
+    for _ in range(10):
+        page.keyboard.press("Shift+ArrowRight")
+    assert abs(aside_width(page) - 280) < 2   # менше мінімуму не стискається
+
+
+def open_panel(dash: Dashboard, name: str) -> Dashboard:
+    """Відкріплена панель у тому ж контексті (та сама сесія й BroadcastChannel), WebSocket підмінено так само."""
+    page = dash.page.context.new_page()
+    panel = Dashboard(page, dash.cfg)
+    panel.errors = watch_errors(page)
+
+    def on_ws(ws: WebSocketRoute) -> None:
+        panel.ws = ws
+    page.route_web_socket("**/ws", on_ws)
+    page.goto(dash.page.url.split("/")[0] + "//" + dash.page.url.split("/")[2] + "/panel/" + name)
+    expect(page.locator("#conn")).to_have_text("на звʼязку")
+    return panel
+
+
+def test_detach_button_opens_the_panel_in_its_own_window(dash):
+    with dash.page.expect_popup() as popup:
+        dash.page.locator('button[data-detach="alerts"]').click()
+    assert popup.value.url.endswith("/panel/alerts")
+    popup.value.close()
+
+
+def test_detached_alerts_panel_shows_only_alerts_and_reviews_them(dash):
+    panel = open_panel(dash, "alerts")
+    errors = panel.errors
+    panel.push(panel.state(tracks=[track(7, "CRITICAL", "enemy")], alerts=[alert(1, 7)]))
+    expect(panel.page.locator("#alerts .alert")).to_have_count(1)
+    expect(panel.page.locator("#mapwrap")).to_be_hidden()
+    expect(panel.page.locator("#tracks")).to_be_hidden()
+    expect(panel.page.locator("#sensors-box")).to_be_hidden()
+    expect(panel.page.locator("#ai-box")).to_be_hidden()   # правило з #id не має перебивати приховування
+    expect(panel.page.locator("#audit-box")).to_be_hidden()
+    posted: list[Any] = []
+
+    def review(route: Any) -> None:
+        posted.append(route.request.post_data_json)
+        route.fulfill(status=200, content_type="application/json", body="{}")
+    panel.page.route("**/api/incidents/1/review", review)
+    panel.page.locator('#alerts button[data-review="confirmed"]').click()
+    deadline = time.time() + 5
+    while not posted and time.time() < deadline:
+        panel.page.wait_for_timeout(50)
+    assert posted == [{"status": "confirmed", "note": None}]
+    assert not errors, "\n".join(errors)
+
+
+def test_clicks_in_detached_panels_drive_the_main_window(dash):
+    tracks = [track(1), track(2, "CRITICAL", "enemy")]
+    dash.push(dash.state(tracks=tracks, alerts=[alert(1, 2)]))
+    tracks_panel = open_panel(dash, "tracks")
+    alerts_panel = open_panel(dash, "alerts")
+    for p in (tracks_panel, alerts_panel):
+        p.push(p.state(tracks=tracks, alerts=[alert(1, 2)]))
+    expect(alerts_panel.page.locator("#alerts .alert")).to_have_count(1)
+    expect(tracks_panel.page.locator('#tbody tr[data-id="1"]')).to_be_visible()
+    expect(tracks_panel.page.locator("#alerts")).to_be_hidden()
+    tracks_panel.page.locator('#tbody tr[data-id="1"]').click()
+    expect(dash.page.locator('#tbody tr[data-id="1"]')).to_have_class("sel")   # головне вікно виділило ціль
+    alerts_panel.page.locator("#alerts .alert .id").click()
+    dash.push(dash.state(tracks=tracks, alerts=[alert(1, 2)]))
+    expect(dash.page.locator('#tbody tr[data-id="2"]')).to_have_class("sel")
+    for p in (tracks_panel, alerts_panel):
+        assert not p.errors, "\n".join(p.errors)
+
+
+# ---------- вкладки бокової панелі ----------
+def test_tabs_show_one_bottom_pane_and_keep_alerts_visible(dash):
+    page = dash.page
+    dash.push(dash.state(tracks=[track(1)], alerts=[alert(1, 1)]))
+    expect(page.locator("#tracks")).to_be_visible()
+    expect(page.locator("#sensors-box")).to_be_hidden()
+    expect(page.locator("#ai-box")).to_be_hidden()
+    tab(page, "sensors")
+    expect(page.locator("#sensors-box")).to_be_visible()
+    expect(page.locator("#tracks")).to_be_hidden()
+    expect(page.locator("#alerts .alert")).to_be_visible()   # тривоги видно на будь-якій вкладці
+    tab(page, "ai")
+    expect(page.locator("#ai-box")).to_be_visible()
+    expect(page.locator("#alerts .alert")).to_be_visible()
+    page.locator("#tab-ai").focus()
+    page.keyboard.press("ArrowRight")   # стрілки перемикають вкладки (admin бачить ще й журнал, оператор повертається до треків)
+    expect(page.locator("#tab-ai")).to_have_attribute("aria-selected", "false")
+
+
+def test_selected_tab_is_remembered_and_lost_sensor_marks_its_tab(dash):
+    page = dash.page
+    tab(page, "sensors")
+    page.reload()
+    expect(page.locator("#conn")).to_have_text("на звʼязку", timeout=20_000)
+    expect(page.locator("#sensors-box")).to_be_visible()   # після перезавантаження та сама вкладка
+    tab(page, "tracks")
+    sensors = [{"id": s["id"], "label": s["kind"], "state": "LOST" if s["kind"] == "radar" else "OK", "age_s": 9.0} for s in dash.cfg["sensors"]]
+    page.route_web_socket("**/ws", lambda ws: setattr(dash, "ws", ws))
+    page.reload()
+    expect(page.locator("#conn")).to_have_text("на звʼязку")
+    dash.push(dash.state(sensors=sensors))
+    expect(page.locator("#tab-sensors")).to_have_class("warn")   # втрату датчика видно, хоч відкрито треки
+
+
+# ---------- плавний рух цілей ----------
+def test_targets_glide_between_scan_frames(server, browser):
+    ctx = browser.new_context()   # без reduced_motion: саме він вимикає згладжування
+    page = ctx.new_page()
+    errors = watch_errors(page)
+    assert sign_in(page, server["base"], "viewer") == 200
+    page.goto(server["base"] + "/")
+    expect(page.locator("#conn")).to_have_text("на звʼязку")
+    xs = page.evaluate("""async () => {
+        const { S } = await import("/static/app/core.js"), m = await import("/static/app/map.js");
+        S.cfg = { ...S.cfg, scan_dt: 0.5 }; S.replay = null;
+        const tr = x => ({ id: 9001, x, y: 0, vx: 10, vy: 0 });
+        S.state = { tracks: [tr(0)] }; m.displayTracks(1000);
+        S.state = { tracks: [tr(5)] };                      // новий кадр: ціль за вимірюванням у 5 м, летить 10 м/с
+        const at = t => m.displayTracks(t)[0].x;
+        const out = [at(1000), at(1250), at(1500), at(3500)];   // початок, половина, кінець кадру, кадр, що дуже запізнився
+        S.state = { tracks: [tr(5000)] };                   // стрибок на кілометри: не пливемо, а стаємо на місце
+        out.push(at(1500));
+        return out;
+    }""")
+    assert xs[0] == 0 and abs(xs[1] - 5) < 1e-6 and abs(xs[2] - 10) < 1e-6   # рівномірно від 0 до передбаченого 10 м
+    assert abs(xs[3] - 20) < 1e-6   # запізнілий кадр: ще не довше за 1 с по швидкості, далі стоїмо
+    assert xs[4] == 5000
+    ctx.close()
+    assert not errors, "\n".join(errors)
+
+
+# ---------- прогноз і втрачені цілі ----------
+def lost(tid: int, reason: str = "dive", side: str = "enemy", age: float = 12.0, **kw: Any) -> dict[str, Any]:
+    r = {"id": tid, "age": age, "reason": reason, "x": 100.0, "y": 50.0, "z": 40.0, "vx": 10.0, "vy": 0.0, "model_name": "Герань-2",
+         "side": side, "level": "WARNING", "err": 6.0, "search": {"fx": 220.0, "fy": 50.0, "r": 30.0}}
+    r.update(kw)
+    return r
+
+
+def test_lost_targets_are_listed_with_a_reason_and_announced_once(dash):
+    page = dash.page
+    expect(page.locator("#lost-box")).to_be_hidden()   # поки нікого не втрачено, блоку немає
+    dash.push(dash.state(tracks=[track(1)]))            # перший кадр: нічого не оголошуємо
+    dash.push(dash.state(tracks=[track(1)], lost=[lost(7), lost(8, "low", side="friend")]))
+    expect(page.locator("#lost-box")).to_be_visible()
+    expect(page.locator("#lost-list .lost-row")).to_have_count(2)
+    expect(page.locator('#lost-list .lost-row[data-id="7"]')).to_contain_text("імовірно впала")
+    toasts = page.locator("#toast .toast.WARNING")
+    expect(toasts).to_have_count(1)                      # тост лише про чужу ціль: про «свого» не лякаємо
+    expect(toasts.first).to_contain_text("#7")
+    dash.push(dash.state(tracks=[track(1)], lost=[lost(7, age=13.0), lost(8, "low", side="friend")]))
+    expect(toasts).to_have_count(1)                      # той самий запис удруге не оголошується
+
+
+def test_untrusted_lost_text_is_escaped_and_forecast_toggle_exists(dash):
+    dash.push(dash.state(lost=[lost(9, "unknown", model_name="<img src=x onerror=window.__pwned=1>")]))
+    expect(dash.page.locator("#lost-list .lost-row")).to_contain_text("<img src=x")
+    assert dash.page.locator("#lost-list img").count() == 0
+    assert dash.page.evaluate("window.__pwned") is None
+    dash.page.locator("#legend-toggle").click()
+    expect(dash.page.locator("#fc-on")).to_be_checked()   # прогноз за замовчуванням увімкнено

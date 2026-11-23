@@ -8,7 +8,7 @@ import yaml
 from pydantic import BaseModel, Field, ValidationError, field_validator, model_validator
 
 from dronewatch.fusion.models import Sensor
-from dronewatch.service.dashboard_auth import Role, parse_hash
+from dronewatch.service.dashboard_auth import Role, check_redis_url, parse_hash
 from dronewatch.service.engine import Zone
 
 
@@ -54,6 +54,14 @@ class DashboardCfg(BaseModel):
     auth: Literal["required", "disabled"] = "required"
     users: list[DashboardUser] = []
     session_ttl_s: float = Field(default=8 * 3600, gt=0, le=30 * 86400)   # скільки діє сесія після входу
+    session_store: Literal["memory", "redis"] = Field(default="memory", description="redis: сесії й ліміт входів спільні для процесів")
+    redis_url: str | None = Field(default=None, description="rediss://... (TLS) або redis://localhost; пароль краще в DRONEWATCH_REDIS_URL")
+
+    @model_validator(mode="after")
+    def _redis_ok(self) -> "DashboardCfg":
+        if self.redis_url is not None:
+            check_redis_url(self.redis_url)
+        return self
 
 
 class SensorCfg(BaseModel):
@@ -132,6 +140,20 @@ class MapCfg(BaseModel):
     йому, яку ділянку розглядає оператор, тому онлайн-тайли вмикаються свідомо (online_tiles: true) і лише без файлу."""
     pmtiles: str = "data/map/paris.pmtiles"   # шлях відносно робочої теки сервісу
     online_tiles: bool = False
+    # Для лінії видимості в покритті: контури будинків (dronewatch-buildings) і висоти рельєфу (dronewatch-dem). Немає файлу:
+    # покриття без нього, і дашборд це каже.
+    buildings: str = "data/map/buildings.npz"
+    dem: str = "data/map/dem.npz"
+    target_alt_m: float = Field(default=30.0, ge=0, le=500)   # висота цілі над землею, для якої рахується видимість
+
+
+class ReplayCfg(BaseModel):
+    """Запис для відтворення інцидентів: кадри цілей за before_s до тривоги й after_s після неї, раз на step_s секунд."""
+    enabled: bool = True
+    before_s: float = Field(default=60.0, ge=0, le=600)
+    after_s: float = Field(default=60.0, ge=0, le=600)
+    step_s: float = Field(default=1.0, ge=0.25, le=10)
+    retention_days: float = Field(default=30.0, gt=0, le=3650)   # старші записи прибираються
 
 
 class Config(BaseModel):
@@ -151,6 +173,7 @@ class Config(BaseModel):
     auth: AuthCfg = AuthCfg()
     dashboard: DashboardCfg = DashboardCfg()
     ai: AiCfg = AiCfg()
+    replay: ReplayCfg = ReplayCfg()
 
     @model_validator(mode="after")
     def _check(self) -> Self:

@@ -7,18 +7,23 @@
 - Перевірка сталочасова й однакова за тривалістю для відомого та невідомого імені (інакше за часом відповіді видно, які імена існують).
 - Сесія: довгий випадковий токен у cookie; на сервері лежить лише SHA-256 від нього, тож дамп памʼяті чи лог не дають готової сесії.
 - Підбір паролів обмежує `LoginLimiter` (за адресою клієнта).
-- Сесії в памʼяті одного процесу: перезапуск сервісу виходить усіх. Для кількох процесів потрібне спільне сховище."""
+- Сесії за замовчуванням у памʼяті одного процесу (перезапуск виходить усіх); для кількох процесів `dashboard.session_store: redis`
+  (`dashboard_redis.py`). Збій спільного сховища це `SessionStoreError` (503), ніколи не дозвіл."""
 import base64
 import hashlib
 import hmac
 import ipaddress
+import logging
 import secrets
 import threading
 import time
 from collections import deque
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
-from typing import Literal
+from typing import Literal, Protocol
+from urllib.parse import urlsplit
+
+log = logging.getLogger("dronewatch")
 
 MIN_PASSWORD_LEN = 12        # keygen не видасть хеш для коротшого пароля
 MAX_PASSWORD_LEN = 256       # довший відкидаємо ще до хешування: інакше великі «паролі» стали б дешевою атакою на CPU
@@ -94,11 +99,49 @@ class Users:
         self._entries = dict(entries)
         self._dummy = hash_password(secrets.token_urlsafe(16))   # для вирівнювання часу, коли імені немає
 
+    def knows(self, name: str) -> bool:
+        return name in self._entries
+
+    def role_of(self, name: str) -> Role | None:
+        """Роль користувача за поточним конфігом; None, якщо його там уже немає."""
+        entry = self._entries.get(name)
+        return entry.role if entry else None
+
     def authenticate(self, name: str, password: str) -> Role | None:
         """Роль користувача, якщо пароль вірний; інакше None."""
         entry = self._entries.get(name)
         verified = verify_password(password, entry.password_hash if entry else self._dummy)
         return entry.role if entry is not None and verified else None
+
+
+class SessionStoreError(Exception):
+    """Спільне сховище сесій недоступне: сервіс відповідає 503 (fail-closed), а не вважає, що сесії чи ліміту нема."""
+
+
+class SessionStoreLike(Protocol):
+    ttl_s: float
+
+    def create(self, user: str, role: Role) -> str: ...
+    def get(self, token: str | None) -> "Session | None": ...
+    def revoke(self, token: str | None) -> bool: ...
+
+
+class LimiterLike(Protocol):
+    window_s: float
+
+    def attempt(self, key: str) -> float: ...
+    def reset(self, key: str) -> None: ...
+
+
+def check_redis_url(url: str) -> str:
+    """`rediss://` (TLS) або `redis://` лише на цю ж машину (127.0.0.1, ::1, localhost): сесійні токени й ліміти не мають
+    ходити мережею відкритим текстом. ValueError, якщо схема чи адреса не підходить."""
+    parts = urlsplit(url)
+    if parts.scheme == "rediss" and parts.hostname:
+        return url
+    if parts.scheme == "redis" and parts.hostname in ("localhost", "127.0.0.1", "::1"):
+        return url
+    raise ValueError("redis_url: потрібен rediss://хост (TLS); звичайний redis:// лише для localhost")
 
 
 @dataclass(slots=True)
@@ -170,6 +213,7 @@ class LoginLimiter:
                  max_keys: int = 10_000) -> None:
         self.max_failures, self.window_s, self._clock, self._max_keys = max_failures, window_s, clock, max_keys
         self._attempts: dict[str, deque[float]] = {}
+        self._overflow_logged = -float("inf")   # коли востаннє писали про повну таблицю (раз на вікно, щоб не засмічувати лог)
         self._lock = threading.Lock()
 
     def _recent(self, key: str, now: float) -> deque[float]:
@@ -187,6 +231,12 @@ class LoginLimiter:
                 return max(0.0, q[0] + self.window_s - now)
             if key not in self._attempts and len(self._attempts) >= self._max_keys:   # стеля памʼяті: прибираємо ключі без свіжих спроб
                 self._attempts = {k: r for k in list(self._attempts) if (r := self._recent(k, now))}
+                if len(self._attempts) >= self._max_keys:   # усі ключі свіжі: не росте далі, нову адресу не приймаємо (fail-closed)
+                    if now - self._overflow_logged >= self.window_s:
+                        self._overflow_logged = now
+                        log.error("таблиця лімітера входу повна свіжими адресами (%d): нові адреси відхиляються до кінця вікна "
+                                  "(схоже на розподілений перебір)", self._max_keys)
+                    return max(1.0, min(r[0] for r in self._attempts.values()) + self.window_s - now)
             self._attempts.setdefault(key, deque()).append(now)
             return 0.0
 

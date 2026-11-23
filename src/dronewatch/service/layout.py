@@ -19,6 +19,7 @@ class PlacedSensor(BaseModel):
     x: float = Field(ge=-LIMIT_M, le=LIMIT_M)   # схід, м
     y: float = Field(ge=-LIMIT_M, le=LIMIT_M)   # північ, м
     heading: float = Field(default=0.0, ge=0.0, lt=360.0)   # куди дивиться, компасні градуси; важливо лише для секторних типів
+    height: float = Field(default=0.0, ge=0.0, le=300.0)    # висота над землею, м (дах, щогла): для лінії видимості
 
     @field_validator("type")
     @classmethod
@@ -45,7 +46,7 @@ class Layout(BaseModel):
 
 
 def build(layout: Layout) -> list[Sensor]:
-    return [make_sensor(s.type, s.id, s.x, s.y, s.heading) for s in layout.sensors]
+    return [make_sensor(s.type, s.id, s.x, s.y, s.heading, s.height) for s in layout.sensors]
 
 
 # Охоронювані зони виводяться з радарів: навколо кожного радара буферна (увага) і критична (загроза) зона, радіус пропорційний

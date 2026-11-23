@@ -7,7 +7,7 @@ from fastapi.routing import APIRoute, APIWebSocketRoute
 from fastapi.testclient import TestClient
 from starlette.websockets import WebSocketDisconnect
 
-from dronewatch.service import app, config
+from dronewatch.service import app, config, dashboard_web
 from dronewatch.service.audit import AuditError
 from dronewatch.service.dashboard_auth import LoginLimiter, SessionStore, UserEntry, Users, has_role
 from dronewatch.service.dashboard_web import ANONYMOUS, COOKIE, DashboardAccess
@@ -23,7 +23,7 @@ STATIC_ROUTES = {("GET", "/static/vendor/{name}"), ("GET", "/static/app/{name}")
                  ("GET", "/static/webfonts/{name}")}
 
 
-PAGE_ONLY_ROUTES = {("GET", "/")}   # лише тут дозволена page_identity (dw_page_only): вона сама нічого не забороняє
+PAGE_ONLY_ROUTES = {("GET", "/"), ("GET", "/panel/{name}")}   # лише тут дозволена page_identity (dw_page_only): вона сама нічого не забороняє
 
 
 def has_marker(dependant, marker) -> bool:
@@ -252,6 +252,18 @@ def test_login_success_failure_logout_are_audited(login_client):
     assert rows[1]["role"] == "admin" and rows[2]["user"] == "alice" and rows[2]["role"] == "admin"
     assert all(r["ip"] for r in rows)
     assert all(PASSWORD not in str(r) and "wrong-password-123" not in str(r) for r in rows), "паролів у журналі немає"
+
+
+def test_unknown_username_is_not_written_anywhere(login_client, caplog):
+    """Пароль, набраний у полі імені, не потрапляє ні в журнал дій, ні в лог: невідоме ім'я не зберігаємо."""
+    secret = "Tr0ub4dor&3-typed-in-the-name-field"
+    with caplog.at_level("WARNING"):
+        assert login_client.post("/api/login", json={"username": secret, "password": "x" * 12}).status_code == 401
+    assert secret not in str(_audit(login_client).read()) and secret not in caplog.text
+    row = next(r for r in _audit(login_client).read() if r["action"] == "login_failed")
+    assert row["user"] == "?"
+    login_client.post("/api/login", json={"username": "alice", "password": "wrong-password-123"})
+    assert _audit(login_client).read()[0]["user"] == "alice", "відоме ім'я лишається для розслідування"
 
 
 def test_blocked_logins_are_aggregated(login_client):
@@ -503,3 +515,45 @@ def test_denied_rows_have_a_global_cap_with_one_summary_row(demo_client, monkeyp
         assert demo_client.post("/api/incidents/1/review", json={"status": "confirmed"}).status_code == 403
     actions = _actions(demo_client)
     assert actions.count("denied") == 2 and actions.count("denied_flood") == 1
+
+
+# ---------- захист зміни стану: Content-Type/Origin і ліміт тіла ----------
+STATE_ALLOWLIST = {("POST", "/api/events")}   # ключ датчика, не cookie: CSRF тут немає чим скористатись
+
+
+def test_every_state_change_has_origin_guard():
+    missing = [(m, p) for m, p, dep in http_routes()
+               if m in ("POST", "PUT", "DELETE", "PATCH") and (m, p) not in STATE_ALLOWLIST and not has_marker(dep, "dw_state_guard")]
+    assert missing == []
+
+
+@pytest.mark.parametrize(("method", "path", "body"), [("PUT", "/api/layout", LAYOUT), ("POST", "/api/coverage", LAYOUT),
+                                                      ("POST", "/api/ai/ask", {"question": "?"})])
+def test_json_routes_reject_form_and_foreign_origin(demo_client, method, path, body):
+    login_as(demo_client, "admin")
+    assert demo_client.request(method, path, data="x=1").status_code == 415
+    assert demo_client.request(method, path, json=body, headers={"Origin": "http://evil.example"}).status_code == 403
+
+
+def test_delete_layout_rejects_foreign_origin(demo_client):
+    login_as(demo_client, "admin")
+    assert demo_client.delete("/api/layout", headers={"Origin": "http://evil.example"}).status_code == 403
+    assert demo_client.delete("/api/layout").status_code == 200
+
+
+def test_oversized_body_gets_413_by_content_length(demo_client):
+    login_as(demo_client, "admin")
+    r = demo_client.post("/api/coverage", content=b"x" * (dashboard_web.MAX_BODY_BYTES + 1), headers={"Content-Type": "application/json"})
+    assert r.status_code == 413
+
+
+def test_oversized_chunked_body_gets_413(demo_client):
+    login_as(demo_client, "admin")
+    big = (b"x" * 65536 for _ in range(dashboard_web.MAX_BODY_BYTES // 65536 + 2))   # генератор: без Content-Length
+    r = demo_client.post("/api/coverage", content=big, headers={"Content-Type": "application/json"})
+    assert r.status_code == 413
+
+
+def test_body_under_the_limit_still_works(demo_client):
+    login_as(demo_client, "admin")
+    assert demo_client.post("/api/coverage", json=LAYOUT).status_code == 200

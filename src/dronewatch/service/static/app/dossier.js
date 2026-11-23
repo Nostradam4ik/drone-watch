@@ -1,6 +1,10 @@
 // ---------- досьє цілі ----------
 // Радар міряє лише положення й рух. Тип і приналежність дає RF-ідентифікація (протокол дрона), а без неї лишається
 // явно позначена оцінка за швидкістю й висотою, а не вигадана класифікація.
+import { KIND_UA, LEVEL_UA, S, SIDE, esc, mdLite } from "./core.js";
+import { pushData, toLL } from "./map.js";
+import { ensureViewer, setDroneModel, startViewer, stopViewer } from "./viewer3d.js";
+
 function guessClass(t) {
   if (t.speed >= 22) return "швидкісний профіль (можливо, FPV або крилатий)";
   if (t.speed <= 6) return "повільний/завислий профіль (мультикоптер?)";
@@ -19,7 +23,7 @@ function dossierParts(t) {
   const ident = t.identity_conflict
     ? `<div class="hint">RF-датчики називають різні моделі для цієї цілі: приналежність не визначено, потрібна перевірка оператором.</div>`
     : t.identified_by
-    ? `<div class="hint">Тип і приналежність: RF-ідентифікація протоколу${cfg.demo ? " (симуляція: модель задає емулятор)" : ""}. Радар сам «свій/ворог» не визначає.</div>`
+    ? `<div class="hint">Тип і приналежність: RF-ідентифікація протоколу${S.cfg.demo ? " (симуляція: модель задає емулятор)" : ""}. Радар сам «свій/ворог» не визначає.</div>`
     : `<div class="hint">${esc(guessClass(t))}. Оцінка за швидкістю, не розпізнавання: RF-ідентифікації немає.</div>`;
   const dive = t.diving ? `<div class="dive">⬇ ПІКІРУЄ: до землі ~${t.ttg} с. Прогнозна точка падіння позначена на карті.</div>` : "";
   const head = `<div class="ttl"><span>ЦІЛЬ #${t.id}</span><b style="color:${side.color}">${side.label}</b></div>` + dive +
@@ -59,46 +63,50 @@ function fillDossier(p, t) {
 // Досьє високе (3D-модель + дані) і відкривається НАД ціллю: якщо ціль надто високо чи скраю, зсуваємо карту,
 // щоб вікно не обрізалось краєм екрана.
 function ensureFits(p, t) {
-  if (popup !== p) return;
-  const el = p.getElement(), box = map.getContainer();
+  if (S.popup !== p) return;
+  const el = p.getElement(), box = S.map.getContainer();
   const W = box.clientWidth, H = box.clientHeight, h = el.offsetHeight + 34, half = el.offsetWidth / 2 + 12;
   if (h + 20 > H) return;   // карта замала для такого вікна: нічого не вдієш
-  const pt = map.project(toLL(t.x, t.y));
+  const pt = S.map.project(toLL(t.x, t.y));
   const dx = Math.max(half, Math.min(W - half, pt.x)), dy = Math.max(h + 20, Math.min(H - 40, pt.y));
   if (Math.abs(dx - pt.x) < 2 && Math.abs(dy - pt.y) < 2) return;
-  map.easeTo({ center: toLL(t.x, t.y), offset: [dx - W / 2, dy - H / 2], duration: 450 });
+  S.map.easeTo({ center: toLL(t.x, t.y), offset: [dx - W / 2, dy - H / 2], duration: 450 });
 }
 
-function updateDossier() {
-  const t = state && state.tracks.find(tt => tt.id === selected);
-  if (!t || !map) {
-    if (popup) { const p = popup; popup = null; stopViewer(); p.remove(); }
+export function updateDossier() {
+  if (S.replay) {   // у записі досьє немає: бракує живих даних (тип, похибка), а вигадувати їх не будемо
+    if (S.popup) { const p = S.popup; S.popup = null; stopViewer(); p.remove(); }
     return;
   }
-  if (!popup) {
+  const t = S.state && S.state.tracks.find(tt => tt.id === S.selected);
+  if (!t || !S.map) {
+    if (S.popup) { const p = S.popup; S.popup = null; stopViewer(); p.remove(); }
+    return;
+  }
+  if (!S.popup) {
     const el = document.createElement("div");
     el.innerHTML = '<div class="dhead"></div><div class="viewer"><div class="vcap"></div></div><div class="dbody"></div>';
     const p = new maplibregl.Popup({ closeButton: true, closeOnClick: false, anchor: "bottom", offset: 20, maxWidth: "300px", className: "dossier" });
     p._head = el.querySelector(".dhead"); p._view = el.querySelector(".viewer"); p._cap = el.querySelector(".vcap"); p._body = el.querySelector(".dbody");
-    p.on("close", () => { if (popup === p) { popup = null; stopViewer(); selected = null; refreshSelection(); } });
-    popup = p;
-    p.setLngLat(toLL(t.x, t.y)).setDOMContent(el).addTo(map);
+    p.on("close", () => { if (S.popup === p) { S.popup = null; stopViewer(); S.selected = null; refreshSelection(); } });
+    S.popup = p;
+    p.setLngLat(toLL(t.x, t.y)).setDOMContent(el).addTo(S.map);
     fillDossier(p, t);
     requestAnimationFrame(() => ensureFits(p, t));
     return;
   }
-  popup.setLngLat(toLL(t.x, t.y));
-  fillDossier(popup, t);
+  S.popup.setLngLat(toLL(t.x, t.y));
+  fillDossier(S.popup, t);
 }
 
 function refreshSelection() {
   pushData();
-  document.querySelectorAll("#tbody tr").forEach(tr => tr.classList.toggle("sel", +tr.dataset.id === selected));
+  document.querySelectorAll("#tbody tr").forEach(tr => tr.classList.toggle("sel", +tr.dataset.id === S.selected));
 }
-function select() { refreshSelection(); updateDossier(); }
+export function select() { refreshSelection(); updateDossier(); }
 
 // Слово за словом — читається як «AI зараз думає», а не як статичний блок тексту, що просто зʼявився.
-async function revealAnswer(el, text) {
+export async function revealAnswer(el, text) {
   const words = text.split(" ");
   let acc = "";
   for (const w of words) {
@@ -110,7 +118,7 @@ async function revealAnswer(el, text) {
   el.innerHTML = mdLite(text);
 }
 
-function toast(a) {
+export function toast(a) {
   const el = document.createElement("div");
   el.className = "toast " + a.level;
   el.textContent = a.text || ((a.level === "CRITICAL" ? "ЗАГРОЗА: " : "Увага: ") + "ціль #" + a.track_id + " — " + a.zone);

@@ -39,7 +39,7 @@ header h1 { font: 700 17px/1 var(--face-label); margin: 0; letter-spacing: -.01e
            font: 500 11px var(--face-label); letter-spacing: .02em; cursor: pointer; }
 .linkbtn:hover { color: var(--text); border-color: var(--muted); }
 
-main { display: grid; grid-template-columns: 1fr 348px; min-height: 0; }
+main { display: grid; grid-template-columns: 1fr 6px var(--aside-w, 348px); min-height: 0; }
 #mapwrap { position: relative; min-height: 0; background: var(--ink); }
 #map { position: absolute; inset: 0; }
 #maptag { position: absolute; right: 14px; bottom: 44px; max-width: 60%; font: 11px var(--face-data); color: var(--muted);
@@ -98,7 +98,7 @@ main { display: grid; grid-template-columns: 1fr 348px; min-height: 0; }
 #legend i { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 7px; vertical-align: -1px; }
 #legend label { cursor: pointer; color: var(--text); }
 
-aside { border-left: 1px solid var(--line); background: var(--panel); display: grid; grid-template-rows: auto minmax(132px, 30vh) auto auto auto;
+aside { border-left: 1px solid var(--line); background: var(--panel); display: flex; flex-direction: column;
         min-height: 0; overflow-y: auto; }   /* запобіжник: якщо все разом не влазить у висоту вікна, прокручується бокова панель,
                                                  а не ховається форма AI за межами екрана */
 h2 { margin: 0; padding: 9px 16px 8px 13px; font: 600 12.5px/1 var(--face-label); color: var(--text);
@@ -167,6 +167,8 @@ h2.hd-sensors .linkbtn.on { background: var(--sensor); color: #04100d; border-co
 #cov-stats i { width: 10px; height: 10px; border-radius: 2px; flex: none; }
 #cov-stats b { margin-left: auto; color: var(--text); font-weight: 600; white-space: nowrap; padding-left: 6px; }
 #cov-stats .sub { border-top: 1px solid var(--line); padding-top: 3px; margin-top: 2px; }
+.sensor .sensor-h { margin-left: 8px; color: var(--muted); font-size: 11.5px; white-space: nowrap; cursor: default; }
+.sensor .sensor-h input { width: 46px; padding: 1px 3px; background: #0b1119; color: inherit; border: 1px solid #2a3544; border-radius: 4px; font: inherit; }
 .sensor .del { margin-left: 8px; width: 20px; height: 20px; padding: 0; line-height: 1; background: none; color: var(--muted);
                border: 1px solid var(--line); border-radius: 3px; cursor: pointer; flex: none; }
 .sensor .del:hover { color: var(--crit); border-color: var(--crit); }
@@ -213,7 +215,7 @@ td.NONE, dd.NONE { color: var(--ok); } td.WARNING, dd.WARNING { color: var(--war
          padding: 8px 12px; border-radius: 3px; font: 12px var(--face-data); }
 .toast.WARNING { border-color: var(--warn); border-left-color: var(--warn); }
 
-@media (max-width: 800px) { main { grid-template-columns: 1fr; grid-template-rows: 55vh 1fr; } aside { border-left: 0; border-top: 1px solid var(--line); } }
+@media (max-width: 800px) { #splitter { display: none; } main { grid-template-columns: 1fr; grid-template-rows: 55vh 1fr; } aside { border-left: 0; border-top: 1px solid var(--line); } }
 
 /* журнал дій (admin) */
 #audit-box[hidden] { display: none; }
@@ -223,3 +225,65 @@ td.NONE, dd.NONE { color: var(--ok); } td.WARNING, dd.WARNING { color: var(--war
 #audit-wrap table { width: 100%; border-collapse: collapse; }
 #audit-wrap td, #audit-wrap th { padding: 2px 6px; white-space: nowrap; }
 #ai-box[hidden] { display: none; }
+
+/* ---------- відтворення інциденту ---------- */
+.alert .rpbtn { margin-top: 6px; font: 600 11px var(--face-label); padding: 2px 8px; border: 1px solid var(--line); background: transparent;
+  color: var(--muted); border-radius: 3px; cursor: pointer; }
+.alert .rpbtn:hover { color: var(--text); border-color: var(--muted); }
+#replay { position: absolute; left: 50%; bottom: 18px; transform: translateX(-50%); z-index: 6; display: flex; align-items: center; gap: 10px;
+  padding: 8px 12px; background: #060a10ee; border: 1px solid var(--warn); border-left: 3px solid var(--warn); border-radius: 3px;
+  font: 11px var(--face-data); max-width: calc(100% - 28px); }
+#replay[hidden] { display: none; }
+#replay .rp-tag { color: var(--warn); font: 700 11px var(--face-label); letter-spacing: .08em; }
+#replay button, #replay select { font: 600 11px var(--face-label); background: transparent; color: var(--text); border: 1px solid var(--line);
+  border-radius: 3px; padding: 3px 8px; cursor: pointer; }
+#replay input[type=range] { width: min(320px, 30vw); accent-color: var(--warn); }
+#rp-time { min-width: 92px; color: var(--text); }
+
+/* Роздільник між картою й боковою панеллю: тягнеться мишею чи стрілками, двічі клацнути = ширина за замовчуванням */
+#splitter { cursor: col-resize; background: var(--line); touch-action: none; transition: background .12s; }
+#splitter:hover, #splitter:focus-visible, #splitter.drag { background: var(--accent-ui, var(--muted)); outline: none; }
+aside { border-left: 0; }
+
+/* Кнопка «відкріпити» в заголовку панелі */
+h2.hd-alerts, h2.hd-tracks { display: flex; align-items: center; justify-content: space-between; padding-right: 12px; }
+h2 .detach { padding: 2px 8px; font-size: 13px; line-height: 1; }
+
+/* Відкріплене вікно (/panel/alerts, /panel/tracks): лише одна панель на весь екран. Решта розмітки лишається в DOM,
+   бо render() пише в неї за id, тож код малювання один на обидва вікна. */
+body.panel { grid-template-rows: auto 1fr; }
+body.panel #mapwrap, body.panel #splitter, body.panel .detach, body.panel header > :not(.brand):not(#conn):not(.spacer) { display: none; }
+body.panel main { grid-template-columns: 1fr; }
+body.panel main { min-height: 0; }
+body.panel aside { display: block; border: 0; overflow-y: auto; height: 100%; }
+body.panel #ai-box, body.panel #sensors-box, body.panel #audit-box { display: none; }   /* правила з #id сильніші за `aside > *` */
+body.panel aside > * { display: none; }
+body.panel-alerts aside > .sec-alerts, body.panel-tracks aside > .sec-tracks { display: block; }
+body.panel #alerts, body.panel #tracks { max-height: none; overflow: visible; }
+
+/* Бокова панель: тривоги завжди зверху, під ними вкладки (треки, датчики, AI, журнал), одна відкрита на всю решту висоти */
+aside > .sec-alerts { flex: none; }
+aside > #alerts { flex: 1 1 38%; min-height: 110px; }
+#tabs { flex: none; display: flex; gap: 2px; padding: 0 8px; border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); background: var(--ink); }
+#tabs button { appearance: none; background: none; border: 0; border-bottom: 2px solid transparent; color: var(--muted); cursor: pointer;
+               font: 600 12.5px var(--face-label); padding: 9px 12px 7px; }
+#tabs button:hover { color: var(--text); }
+#tabs button[aria-selected="true"] { color: var(--text); border-bottom-color: var(--ok); }
+#tabs button:focus-visible { outline: 2px solid var(--ok); outline-offset: -2px; }
+#tabs button.warn::after { content: " ●"; color: var(--crit); font-size: 10px; }
+aside > .sec-tracks, aside > #sensors-box, aside > #audit-box, aside > #ai-box { flex: 1 1 52%; min-height: 0; overflow-y: auto; }
+aside > #ai-box { max-height: none; overflow: hidden; }
+aside > .sec-tracks #tracks { max-height: none; overflow: visible; }
+/* Відкрита лише вибрана вкладка. Правила з #id (display: grid в #ai-box) сильніші за прості, тож ховаємо їх теж через #id.
+   Умова [data-tab] потрібна, щоб відкріплені вікна (там вкладок немає) цих правил не торкались. */
+aside[data-tab]:not([data-tab="tracks"]) .sec-tracks, aside[data-tab]:not([data-tab="sensors"]) #sensors-box,
+aside[data-tab]:not([data-tab="audit"]) #audit-box, aside[data-tab]:not([data-tab="ai"]) #ai-box { display: none; }
+body.panel #tabs { display: none; }
+
+/* Втрачені цілі у вкладці «Треки» */
+#lost-box { border-top: 1px solid var(--line); }
+#lost-box h3 { margin: 0; padding: 8px 13px 4px; font: 600 12px var(--face-label); color: var(--warn); }
+#lost-box h3 .hint { color: var(--muted); font-weight: 400; }
+.lost-row { padding: 6px 13px; border-bottom: 1px solid var(--line); cursor: pointer; display: grid; gap: 2px; }
+.lost-row:hover { background: #ffffff0a; }
+.lost-row .why { color: var(--muted); font-size: 11.5px; }

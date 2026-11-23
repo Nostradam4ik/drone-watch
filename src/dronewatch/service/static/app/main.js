@@ -1,21 +1,43 @@
 // ---------- старт сторінки, вихід, AI-асистент, WebSocket. Підключається останнім: start() кличе все інше ----------
+import { initAudit } from "./audit.js";
+import { LoginRequired, PANEL, ROLE_UA, S, api, apiPost, can, esc } from "./core.js";
+import { revealAnswer, select } from "./dossier.js";
+import { initLayout, initTabs, listenPanels } from "./layout.js";
+import { initMap, toLL } from "./map.js";
+import { render, renderCatalog } from "./panels.js";
+import { startReplay } from "./replay.js";
+
 async function start() {
-  cfg = await api("/api/config");
+  S.cfg = await api("/api/config");
   const mode = document.getElementById("mode");
-  mode.textContent = cfg.demo ? "ДЕМО (симуляція)" : "бойовий режим"; mode.className = "chip " + (cfg.demo ? "" : "live");
-  me = await api("/api/me");
-  if (me.auth) {   // без автентифікації (демо) ні імені, ні кнопки виходу
-    document.getElementById("who-name").textContent = me.user + " (" + (ROLE_UA[me.role] || me.role) + ")";
+  mode.textContent = S.cfg.demo ? "ДЕМО (симуляція)" : "бойовий режим"; mode.className = "chip " + (S.cfg.demo ? "" : "live");
+  S.me = await api("/api/me");
+  if (S.me.auth) {   // без автентифікації (демо) ні імені, ні кнопки виходу
+    document.getElementById("who-name").textContent = S.me.user + " (" + (ROLE_UA[S.me.role] || S.me.role) + ")";
     document.getElementById("who").hidden = document.getElementById("logout").hidden = false;
   }
-  cfg.editable = cfg.editable && can("admin");   // розстановку датчиків робить лише admin (і лише в демо)
+  initLayout();
+  if (PANEL) { connect(); return; }   // відкріплена панель: ні карти, ні каталогу, ні редактора, лише кадри стану
+  S.cfg.editable = S.cfg.editable && can("admin");   // розстановку датчиків робить лише admin (і лише в демо)
   renderCatalog();
-  document.getElementById("edit-sensors").hidden = !cfg.editable;
+  document.getElementById("edit-sensors").hidden = !S.cfg.editable;
   document.getElementById("ai-box").hidden = !can("operator");
   initAudit();
+  initTabs();
   initMap();
   connect();
 }
+
+// Запити від відкріплених вікон: виділити ціль (або зняти виділення) і відтворити інцидент. Лише цілі числа, нічого іншого не береться
+listenPanels(d => {
+  if (PANEL) return;
+  if ("select" in d && (d.select === null || Number.isInteger(d.select))) {
+    S.selected = d.select;
+    const t = S.state && S.state.tracks.find(tt => tt.id === S.selected);
+    if (t && S.map) S.map.easeTo({ center: toLL(t.x, t.y), duration: 600 });
+    select();
+  } else if (Number.isInteger(d.replay) && d.replay > 0) startReplay(d.replay);
+});
 
 document.getElementById("logout").addEventListener("click", async () => {
   await fetch("/api/logout", { method: "POST", credentials: "same-origin", headers: { "Content-Type": "application/json" }, body: "{}" });

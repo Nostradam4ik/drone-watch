@@ -1,43 +1,57 @@
 // Спільне для всіх файлів дашборда: підписи, глобальний стан сторінки, екранування, запити до API.
-// Файли — звичайні <script> (не модулі): спільні змінні верхнього рівня видно в усіх. Порядок у index.html важливий.
-const COLORS = { NONE: "#33e6c2", WARNING: "#ffb020", CRITICAL: "#ff3b63" };
+// Файли — ES-модулі: залежності між ними явні (import/export), точка входу main.js.
+export const COLORS = { NONE: "#33e6c2", WARNING: "#ffb020", CRITICAL: "#ff3b63" };
 // Колір цілі = чия вона (приналежність), а зона загрози показана кільцем навколо: так два різні питання не зливаються в один колір.
-const SIDE = {
+export const SIDE = {
   enemy:   { color: "#ff3b63", label: "ВОРОГ" },
   friend:  { color: "#33e6c2", label: "СВІЙ" },
   unknown: { color: "#b9c6cf", label: "НЕ ВИЗНАЧЕНО" },
 };
-const LEVEL_UA = { NONE: "—", WARNING: "увага", CRITICAL: "загроза" };
-const KIND_UA = { radar: "радар", rf: "RF", acoustic: "акуст." };
-const SENSOR_UA = { OK: "справний", WAITING: "очікуємо", LOST: "немає звʼязку" };
-const sensorState = id => ((state && state.sensors || []).find(s => s.id === id) || {}).state;
-let cfg = null, state = null, selected = null, trails = new Map(), seenAlerts = new Set(), firstMsg = true, lastTbody = null, lastAlerts = null;
-let map = null, popup = null;
+export const LEVEL_UA = { NONE: "—", WARNING: "увага", CRITICAL: "загроза" };
+export const KIND_UA = { radar: "радар", rf: "RF", acoustic: "акуст." };
+// Чому ціль могла зникнути (код від сервера): повний текст для списку й тосту, короткий для підпису на карті.
+// Це припущення за останнім станом, а не знання: у тексті «імовірно», «можливо».
+export const LOST_UA = {
+  dive: "імовірно впала (пікірувала)", radar_silent: "радар не підтвердив: можливо, хибний трек",
+  sensor_down: "зникла, коли датчик мовчав: можлива відмова апаратури", low: "зникла низько: посадка або схована за забудовою",
+  edge: "імовірно вилетіла за дальність датчиків", unknown: "зникла без видимої причини",
+};
+export const LOST_SHORT = { dive: "упала?", radar_silent: "хибна?", sensor_down: "відмова?", low: "сіла?", edge: "вилетіла?", unknown: "зникла" };
+export const SENSOR_UA = { OK: "справний", WAITING: "очікуємо", LOST: "немає звʼязку" };
+export const sensorState = id => ((S.state && S.state.sensors || []).find(s => s.id === id) || {}).state;
+// Спільний змінний стан сторінки. Модуль не може переприсвоїти чужу змінну, тож усе, що міняють з різних файлів, лежить тут:
+// cfg (/api/config), state (останній кадр з сервера), selected (id цілі), map і popup (MapLibre), me (/api/me), а також
+// стан редактора розстановки: editing, tool, drag, suppressClick, reloading.
+// Відкріплене вікно (/panel/alerts, /panel/tracks): яка панель у ньому, або null в головному вікні
+export const PANEL = /^\/panel\/(alerts|tracks)\/?$/.exec(location.pathname)?.[1] ?? null;
+export const S = { cfg: null, state: null, selected: null, map: null, popup: null, me: null,
+  editing: false, tool: null, drag: null, suppressClick: false, reloading: false,
+  replay: null, liveMsg: null };   // replay: відтворення інциденту (replay.js); liveMsg: останній живий кадр, поки воно йде
+export const trails = new Map();   // id цілі -> останні точки шлейфу
 // Роль користувача з /api/me. Лише для показу: сервер усе одно відхиляє заборонені запити (403), UI ховає недоступне.
-const ROLE_UA = { viewer: "перегляд", operator: "оператор", admin: "адмін" };
+export const ROLE_UA = { viewer: "перегляд", operator: "оператор", admin: "адмін" };
 const ROLE_RANK = { viewer: 0, operator: 1, admin: 2 };
-let me = null;
-const can = role => (ROLE_RANK[me && me.role] ?? -1) >= ROLE_RANK[role];
+export const can = role => (ROLE_RANK[S.me && S.me.role] ?? -1) >= ROLE_RANK[role];
 
-function esc(s) { return String(s).replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c])); }
+export function esc(s) { return String(s).replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c])); }
 
 // Відповідь AI — звичайний текст з markdown-розміткою (**жирний**, переноси рядків), а не HTML. Усе спершу
 // екранується через esc(), і лише тоді controlled-регексом додаються свої ж безпечні теги — вхід моделі
 // ніколи не потрапляє в розмітку як є.
 // Висоту міряє лише радар: трек із самих пеленгів має умовні 60 м трекера, а не виміряні (alt_known від сервера)
-const altText = t => t.alt_known === false ? "—" : String(Math.round(t.z));
-function mdLite(s) { return esc(s).replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>").replace(/\n/g, "<br>"); }
+export const altText = t => t.alt_known === false ? "—" : String(Math.round(t.z));
+export function mdLite(s) { return esc(s).replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>").replace(/\n/g, "<br>"); }
 
 
 // Усі запити до API йдуть сюди: 401 означає, що входу немає або сесія скінчилась, тож ведемо на форму входу
-class LoginRequired extends Error {}
-async function api(path) {
+export class LoginRequired extends Error {}
+export async function api(path) {
   const response = await fetch(path, { credentials: "same-origin" });
   if (response.status === 401) { location.replace("/login"); throw new LoginRequired(); }
   return response.json();
 }
 
-async function apiPost(path, body) {
+export async function apiPost(path, body) {
   const response = await fetch(path, { method: "POST", credentials: "same-origin",
     headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
   if (response.status === 401) { location.replace("/login"); throw new LoginRequired(); }

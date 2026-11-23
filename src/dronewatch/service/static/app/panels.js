@@ -1,6 +1,16 @@
 // ---------- кадр стану з сервера: шапка, таблиця треків, тривоги, список датчиків ----------
-function render(msg) {
-  state = msg;
+import { KIND_UA, LEVEL_UA, LOST_UA, PANEL, S, SENSOR_UA, SIDE, altText, can, esc, trails } from "./core.js";
+import { select, toast, updateDossier } from "./dossier.js";
+import { realInfoHtml, reloadConfig, sensorSpec, typeInfo } from "./editor.js";
+import { isSector, pushData, shortName, toLL } from "./map.js";
+import { sendToMain } from "./layout.js";
+import { soundCheck } from "./sound.js";
+import { startReplay } from "./replay.js";
+import { stopViewer } from "./viewer3d.js";
+
+export function render(msg) {
+  S.liveMsg = msg;
+  if (!S.replay) S.state = msg;   // під час відтворення карта показує запис, а тривоги, тости й звук лишаються живими
   document.getElementById("s-tracks").textContent = msg.tracks.filter(t => !t.coasting).length;
   document.getElementById("s-tent").textContent = msg.tentative;
   document.getElementById("s-enemy").textContent = msg.tracks.filter(t => t.side === "enemy" && !t.coasting).length;
@@ -18,9 +28,9 @@ function render(msg) {
     mq.className = "chip " + (msg.mqtt.connected && !idle ? "live" : "off");
   }
 
-  if (cfg && msg.layout_rev !== undefined && msg.layout_rev !== cfg.layout_rev && !drag && !reloading) {   // розстановку змінили деінде (інша вкладка)
-    reloading = true;
-    reloadConfig().finally(() => { reloading = false; });
+  if (!S.replay && S.cfg && msg.layout_rev !== undefined && msg.layout_rev !== S.cfg.layout_rev && !S.drag && !S.reloading) {   // розстановку змінили деінде (інша вкладка)
+    S.reloading = true;
+    reloadConfig().finally(() => { S.reloading = false; });
   }
   renderSensors(msg.sensors || []);
   const st = msg.stats, ov = document.getElementById("overload"), shed = st.events_dropped + st.tracks_capped + st.bearings_truncated;
@@ -31,17 +41,17 @@ function render(msg) {
   if (shed) ov.textContent = "перевантаження: відкинуто " + st.events_dropped + " подій" + (st.tracks_capped ? ", треків " + st.tracks_capped : "");
 
   const ids = new Set(msg.tracks.map(t => t.id));
-  msg.tracks.forEach(t => {
+  if (!S.replay) msg.tracks.forEach(t => {
     const tr = trails.get(t.id) || []; tr.push([t.x, t.y]); if (tr.length > 60) tr.shift(); trails.set(t.id, tr);
   });
-  [...trails.keys()].forEach(id => { if (!ids.has(id)) trails.delete(id); });
+  if (!S.replay) [...trails.keys()].forEach(id => { if (!ids.has(id)) trails.delete(id); });
 
   const rows = msg.tracks.filter(t => !t.coasting).sort((a, b) => ({ CRITICAL: 2, WARNING: 1, NONE: 0 }[b.level] - { CRITICAL: 2, WARNING: 1, NONE: 0 }[a.level]) || a.id - b.id);
   const tbodyHtml = rows.map(t =>
-    `<tr data-id="${t.id}" class="${t.id === selected ? "sel" : ""}"><td>#${t.id}</td>` +
+    `<tr data-id="${t.id}" class="${t.id === S.selected ? "sel" : ""}"><td>#${t.id}</td>` +
     `<td class="l"><i class="sd" style="background:${(SIDE[t.side] || SIDE.unknown).color}"></i>${esc(t.model_name ? shortName(t) : "—")}${t.diving ? ' <b style="color:var(--crit)">⬇</b>' : ""}</td>` +
     `<td class="${t.level}"${t.side === "friend" ? ' style="opacity:.55" title="мітка «свій» з RF, не автентифікована"' : ""}>${LEVEL_UA[t.level]}</td><td>${t.speed}</td><td${t.alt_known === false ? ' title="висоту не виміряно: ціль бачать лише пеленгові датчики"' : ""}>${altText(t)}</td></tr>`).join("");
-  if (tbodyHtml !== lastTbody) { lastTbody = tbodyHtml; document.getElementById("tbody").innerHTML = tbodyHtml; }   // не чіпаємо DOM, коли нічого не змінилось
+  if (!S.replay && tbodyHtml !== lastTbody) { lastTbody = tbodyHtml; document.getElementById("tbody").innerHTML = tbodyHtml; }   // не чіпаємо DOM, коли нічого не змінилось
 
   const box = document.getElementById("alerts");
   const counter = document.getElementById("alerts-new");
@@ -52,7 +62,7 @@ function render(msg) {
     const alertsHtml = ordered.map(a =>
       `<div class="alert ${a.level}${a.side === "friend" ? " friend" : ""}${a.status !== "new" ? " reviewed" : ""}" data-track="${a.track_id}" title="Показати ціль на карті"><span><span class="lvl">${a.level === "CRITICAL" ? "ЗАГРОЗА" : "УВАГА"}</span> <span class="id">#${a.track_id} · ${esc(a.zone)}</span>${alertTag(msg, a)}</span>` +
       `<span class="meta"><span>${new Date(a.ts * 1000).toLocaleTimeString()}</span><span class="sep"></span><span>${a.speed} м/с</span><span class="sep"></span><span>${esc(a.sensors.map(k => KIND_UA[k] || k).join(", "))}</span></span>` +
-      reviewHtml(a) + `</div>`).join("");
+      reviewHtml(a) + (a.id ? `<button type="button" class="rpbtn" data-replay="${a.id}" title="Показати, що відбувалось за хвилину до й після тривоги">▶ Відтворити</button>` : "") + `</div>`).join("");
     if (alertsHtml !== lastAlerts) { lastAlerts = alertsHtml; rebuildAlerts(box, alertsHtml); }   // чернетка коментаря не входить у HTML: набір тексту не перебудовує список
     const current = new Set();
     msg.alerts.forEach(a => {
@@ -61,14 +71,38 @@ function render(msg) {
     });
     seenAlerts = current;   // памʼятаємо лише тривоги, що ще в списку: множина не росте безмежно
   } else if (lastAlerts !== "") { lastAlerts = ""; seenAlerts = new Set(); box.innerHTML = '<div class="empty">Тривог немає</div>'; }
-  soundCheck(msg, firstMsg);
+  renderLost(msg);
+  if (!PANEL) soundCheck(msg, firstMsg);   // звук лише в головному вікні, інакше сигнал лунав би двічі
   firstMsg = false;
-  document.getElementById("truth-row").hidden = !(cfg && cfg.demo && msg.truth);
+  document.getElementById("truth-row").hidden = !(S.cfg && S.cfg.demo && msg.truth);
+  if (S.replay || PANEL) return;
   pushData();
   updateDossier();
 }
 
+// Втрачені цілі: рядок у вкладці «Треки» (клік наводить карту на зону пошуку) і тост про нову втрату (не про «своїх»)
+let seenLost = new Set(), lostHtml = "";
+function renderLost(msg) {
+  const list = msg.lost || [], box = document.getElementById("lost-box");
+  box.hidden = !list.length;
+  const html = list.map(r => `<div class="lost-row" data-id="${r.id}" title="Показати зону пошуку на карті"><span><b>#${r.id}</b> ${esc(r.model_name || "ціль")} · ${Math.round(r.age)} с тому</span>` +
+    `<span class="why">${esc(LOST_UA[r.reason] || "зникла")}</span></div>`).join("");
+  if (html !== lostHtml) { lostHtml = html; document.getElementById("lost-list").innerHTML = html; }
+  const now = new Set(list.map(r => r.id));
+  if (!firstMsg && !PANEL) list.forEach(r => { if (!seenLost.has(r.id) && r.side !== "friend") toast({ level: "WARNING", text: "Ціль #" + r.id + " зникла: " + (LOST_UA[r.reason] || "") }); });
+  seenLost = now;
+}
+document.getElementById("lost-list").addEventListener("click", e => {
+  const row = e.target.closest(".lost-row"); if (!row || PANEL || !S.map) return;
+  const r = ((S.state && S.state.lost) || []).find(x => x.id === +row.dataset.id);
+  if (r) S.map.easeTo({ center: toLL(r.search.fx, r.search.fy), duration: 600 });
+});
+
+// Після відтворення таблиця цілей має перемалюватись, навіть якщо живий кадр не змінився
+export function invalidateTable() { lastTbody = null; }
+
 // Рішення оператора по тривозі. Усе від користувача (автор, коментар) іде через esc.
+let seenAlerts = new Set(), firstMsg = true, lastTbody = null, lastAlerts = null;
 const REVIEW_UA = { confirmed: "підтверджено", dismissed: "відхилено" };
 const noteDraft = {};   // id тривоги -> незавершений коментар (переживає перебудову DOM між сканами)
 function reviewHtml(a) {
@@ -120,12 +154,12 @@ function alertTag(msg, a) {
 }
 
 function specOf(s) {   // «· 1500 м · сектор 120°»: що датчик бачить
-  const c = cfg && cfg.sensors.find(x => x.id === s.id);
+  const c = S.cfg && S.cfg.sensors.find(x => x.id === s.id);
   return c ? " · " + c.max_range + " м" + (isSector(c) ? " · сектор " + c.fov_deg + "°" : "") : "";
 }
 
 const accuracyText = (kind, sg) => kind === "radar" ? `дальність ±${sg[0]} м, азимут ±${sg[1]}°, кут місця ±${sg[2]}°` : `пеленг ±${sg[0]}°`;
-const openSensors = new Set();   // датчики, чий опис розгорнуто в списку
+export const openSensors = new Set();   // датчики, чий опис розгорнуто в списку
 
 // Що це за датчик і що він вміє: з його власних даних (працює і в бойовому режимі), плюс реальна модель, якщо це вона
 function ownSpecHtml(c) {
@@ -135,24 +169,27 @@ function ownSpecHtml(c) {
     (t && t.real ? realInfoHtml(t) : "");
 }
 
-function renderCatalog() {
-  const item = t => `<details${cfg.editable ? ` draggable="true" data-type="${esc(t.id)}" title="Перетягніть на карту, щоб поставити"` : ""}><summary>${esc(t.name)}<span>${t.max_range} м${t.fov_deg < 360 ? " · " + t.fov_deg + "°" : ""}</span></summary>` +
+export function renderCatalog() {
+  const item = t => `<details${S.cfg.editable ? ` draggable="true" data-type="${esc(t.id)}" title="Перетягніть на карту, щоб поставити"` : ""}><summary>${esc(t.name)}<span>${t.max_range} м${t.fov_deg < 360 ? " · " + t.fov_deg + "°" : ""}</span></summary>` +
     `<div class="sp">${esc(sensorSpec(t))}</div>${realInfoHtml(t)}</details>`;
-  const types = cfg.sensor_types || [], generic = types.filter(t => !t.real), real = types.filter(t => t.real);
+  const types = S.cfg.sensor_types || [], generic = types.filter(t => !t.real), real = types.filter(t => t.real);
   document.getElementById("catalog-body").innerHTML =
-    (cfg.editable ? "" : `<div class="sp">Розстановка недоступна в бойовому режимі: датчики задає конфіг. Запустіть демо (mode: demo), щоб перетягувати датчики на карту.</div>`) +
+    (S.cfg.editable ? "" : `<div class="sp">Розстановка недоступна в бойовому режимі: датчики задає конфіг. Запустіть демо (mode: demo), щоб перетягувати датчики на карту.</div>`) +
     `<div class="grp">Типи (узагальнені)</div>` + generic.map(item).join("") +
     (real.length ? `<div class="grp">Реальні моделі (дані виробника)</div>` + real.map(item).join("") : "");
 }
 
-function renderSensors(list) {
-  const kindName = s => { const c = cfg && cfg.sensors.find(x => x.id === s.id), t = c && typeInfo(c.type); return t ? t.name : (KIND_UA[s.label] || s.label); };
+export function renderSensors(list) {
+  if (document.activeElement && document.activeElement.matches && document.activeElement.matches("input[data-h]")) return;   // не перемальовуємо, поки вводять висоту
+  const kindName = s => { const c = S.cfg && S.cfg.sensors.find(x => x.id === s.id), t = c && typeInfo(c.type); return t ? t.name : (KIND_UA[s.label] || s.label); };
   document.getElementById("sensors").innerHTML = list.map(s =>
     `<div class="sensor ${s.state}"><i></i><span>${esc(s.id)} <span class="st">${esc(kindName(s))}${esc(specOf(s))}</span></span>` +
     `<span class="st">${SENSOR_UA[s.state]}${s.state === "LOST" && s.age_s != null ? " · " + Math.round(s.age_s) + " с" : ""}</span>` +
-    (editing ? `<button class="del" type="button" data-del="${esc(s.id)}" title="Прибрати датчик" aria-label="Прибрати датчик ${esc(s.id)}">×</button>` : "") + `</div>` +
-    (openSensors.has(s.id) ? `<div class="sensor-spec">${(() => { const c = cfg && cfg.sensors.find(x => x.id === s.id); return c ? ownSpecHtml(c) : ""; })()}</div>` : "")).join("");
+    (S.editing ? `<label class="sensor-h" title="Висота над землею, м (дах, щогла): впливає на лінію видимості">↑<input type="number" min="0" max="300" step="1" data-h="${esc(s.id)}" value="${esc(String(((S.cfg && S.cfg.sensors.find(x => x.id === s.id)) || {}).height || 0))}" aria-label="Висота датчика ${esc(s.id)}, м"> м</label>` : "") +
+    (S.editing ? `<button class="del" type="button" data-del="${esc(s.id)}" title="Прибрати датчик" aria-label="Прибрати датчик ${esc(s.id)}">×</button>` : "") + `</div>` +
+    (openSensors.has(s.id) ? `<div class="sensor-spec">${(() => { const c = S.cfg && S.cfg.sensors.find(x => x.id === s.id); return c ? ownSpecHtml(c) : ""; })()}</div>` : "")).join("");
   const lost = list.filter(s => s.state === "LOST"), ok = list.filter(s => s.state === "OK").length;
+  document.getElementById("tab-sensors").classList.toggle("warn", lost.length > 0);   // втрачений датчик видно, навіть коли відкрита інша вкладка
   const badge = document.getElementById("sens");
   badge.textContent = "датчики: " + ok + "/" + list.length;
   badge.className = "chip " + (lost.length ? "off" : ok === list.length ? "live" : "");
@@ -168,9 +205,10 @@ function renderSensors(list) {
 document.getElementById("tbody").addEventListener("click", e => {
   const tr = e.target.closest("tr"); if (!tr) return;
   const id = +tr.dataset.id;
-  selected = selected === id ? null : id;   // повторний клік знімає виділення
-  const t = state && state.tracks.find(tt => tt.id === selected);
-  if (t && map) map.easeTo({ center: toLL(t.x, t.y), duration: 600 });
+  S.selected = S.selected === id ? null : id;   // повторний клік знімає виділення
+  if (PANEL) { sendToMain({ select: S.selected }); invalidateTable(); return; }   // карти тут немає: наводить головне вікно
+  const t = S.state && S.state.tracks.find(tt => tt.id === S.selected);
+  if (t && S.map) S.map.easeTo({ center: toLL(t.x, t.y), duration: 600 });
   select();
 });
 document.getElementById("truth").addEventListener("change", pushData);
@@ -178,10 +216,13 @@ document.getElementById("truth").addEventListener("change", pushData);
 // Клік по тривозі наводить карту на ціль і відкриває її досьє
 document.getElementById("alerts").addEventListener("click", e => {
   if (e.target.closest(".rv")) return;   // кнопки й коментар рішення не наводять карту на ціль
-  const card = e.target.closest(".alert[data-track]"); if (!card || !map) return;
+  const rp = e.target.closest("button[data-replay]");
+  if (rp) { if (PANEL) sendToMain({ replay: +rp.dataset.replay }); else startReplay(+rp.dataset.replay); return; }
+  if (PANEL) { const c = e.target.closest(".alert[data-track]"); if (c) sendToMain({ select: +c.dataset.track }); return; }
+  const card = e.target.closest(".alert[data-track]"); if (!card || !S.map) return;
   const id = +card.dataset.track;
-  if (!state || !state.tracks.some(t => t.id === id)) { toast({ level: "WARNING", track_id: id, zone: "ціль вже не відстежується" }); return; }
-  if (popup) { const p = popup; popup = null; stopViewer(); p.remove(); }   // нове досьє відкриється біля цілі й карта зсунеться до неї
-  selected = id;
+  if (!S.state || !S.state.tracks.some(t => t.id === id)) { toast({ level: "WARNING", track_id: id, zone: "ціль вже не відстежується" }); return; }
+  if (S.popup) { const p = S.popup; S.popup = null; stopViewer(); p.remove(); }   // нове досьє відкриється біля цілі й карта зсунеться до неї
+  S.selected = id;
   select();
 });

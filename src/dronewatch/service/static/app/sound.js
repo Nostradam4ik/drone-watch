@@ -32,7 +32,7 @@ function alarm(kind) {
   ALARMS[kind]();
 }
 const announced = { dive: new Set(), critical: new Set(), warning: new Set() };
-function soundCheck(msg, silent) {
+export function soundCheck(msg, silent) {
   const ids = new Set(msg.tracks.map(t => t.id));
   for (const set of Object.values(announced)) for (const id of set) if (!ids.has(id)) set.delete(id);
   let loudest = null;   // за один кадр звучить лише найважливіше: пікірування > загроза > увага
