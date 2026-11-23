@@ -57,6 +57,8 @@ Measurement = tuple[str, Floats]               # (датчик, вимірюва
 
 VALID_REVIEW_STATUSES: tuple[str, ...] = ("new", "confirmed", "dismissed")
 MAX_REVIEW_NOTE = 500
+MAX_PENDING_AGE_S = 3600.0   # тривога без запису старша за це при підвищенні не дописується (на екрані вона давно була)
+DEDUP_WINDOW_S = 10.0   # той самий інцидент у лідера й резерву: та сама зона й рівень, час у межах стільки секунд
 MAX_PENDING = 200   # тривог, піднятих без чинної оренди, що чекають запису (найновіші)
 
 
@@ -222,12 +224,7 @@ class Engine:
             self.db, self.audit = db, AuditLog(db, self.lock)
             if self.replay is not None:
                 self.replay.rebind(db)
-            for a in self.pending:
-                a["id"] = self._insert_incident(a, failover=True)
-            if self.pending:
-                db.commit()
-                log.warning("HA: записано %d тривог, піднятих без чинної оренди", len(self.pending))
-            self.pending.clear()
+            self._flush_pending()
             self.active, self.epoch = True, epoch
             old.close()
 
@@ -263,6 +260,30 @@ class Engine:
             stored = int(row[0]) if row else 0
             self._deactivate_locked()
             raise FencedError(f"у файлі БД epoch {stored}, мій {self.epoch}: лідером став інший", stored=stored)
+
+    def _flush_pending(self) -> None:
+        """Під self.lock, self.db уже справжня. Дописує тривоги, підняті без оренди, але не ті, що попередній лідер уже записав
+        (резерв бачив ті самі події, тож його pending повний копій): тривога збігається з рядком журналу, якщо зона, рівень і час
+        (±DEDUP_WINDOW_S) ті самі; кожен рядок журналу «гасить» не більше однієї тривоги. Дуже старі відкидаються."""
+        now = self.clock()
+        fresh = [a for a in self.pending if now - a["ts"] <= MAX_PENDING_AGE_S]
+        if len(fresh) != len(self.pending):
+            log.warning("HA: %d тривог без запису старші за %.0f с, не дописую", len(self.pending) - len(fresh), MAX_PENDING_AGE_S)
+        known = self.db.execute("SELECT id, zone, level, ts FROM incidents WHERE ts >= ?",
+                                (min((a["ts"] for a in fresh), default=0.0) - DEDUP_WINDOW_S,)).fetchall()
+        written = 0
+        for a in sorted(fresh, key=lambda x: x["ts"]):
+            hit = next((r for r in known if r[1] == a["zone"] and r[2] == a["level"] and abs(r[3] - a["ts"]) <= DEDUP_WINDOW_S), None)
+            if hit is not None:
+                known.remove(hit)
+                a["id"] = hit[0]   # на екрані ця тривога звʼязується з уже наявним інцидентом
+            else:
+                a["id"] = self._insert_incident(a, failover=True)
+                written += 1
+        if written:
+            self.db.commit()
+            log.warning("HA: дописано %d тривог, піднятих без чинної оренди", written)
+        self.pending.clear()
 
     def _stash_pending(self, alerts: list[Alert]) -> None:
         self.pending.extend(alerts)

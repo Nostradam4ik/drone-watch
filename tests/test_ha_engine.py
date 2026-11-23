@@ -163,3 +163,36 @@ def test_trusted_still_rejects_invalid_values():
     bad = {"sensor_id": ids[0], "ts": eng.clock(), "azimuth_deg": float("nan")}
     r = eng.ingest_detailed([bad], trusted=True)
     assert r.accepted == 0 and r.rejected == 1
+
+
+# ---------- дублі при підвищенні ----------
+def test_activate_skips_pending_already_recorded_by_previous_leader(tmp_path):
+    a = make(tmp_path, standby=True)
+    b = make(tmp_path, standby=True)
+    run_until_alert(a)
+    run_until_alert(b)   # ті самі події: резерв бачив те саме
+    a.activate(str(tmp_path / "ha.db"), 1)
+    n = rows(tmp_path / "ha.db", "SELECT count(*) FROM incidents")[0][0]
+    assert n >= 1
+    b.activate(str(tmp_path / "ha.db"), 2)
+    assert rows(tmp_path / "ha.db", "SELECT count(*) FROM incidents")[0][0] == n   # дублів нема
+    assert {x["id"] for x in b.alerts} == {r[0] for r in rows(tmp_path / "ha.db", "SELECT id FROM incidents")}
+
+
+def test_activate_writes_pending_the_previous_leader_never_saw(tmp_path):
+    a = make(tmp_path, standby=True)
+    b = make(tmp_path, standby=True)
+    a.activate(str(tmp_path / "ha.db"), 1)   # лідер живий, але подій не бачив
+    run_until_alert(b)
+    n = len(b.pending)
+    b.activate(str(tmp_path / "ha.db"), 2)
+    assert rows(tmp_path / "ha.db", "SELECT count(*) FROM incidents WHERE failover = 1")[0][0] == n
+
+
+def test_activate_drops_stale_pending(tmp_path):
+    eng = make(tmp_path, standby=True)
+    run_until_alert(eng)
+    for a in eng.pending:
+        a["ts"] -= engine_mod.MAX_PENDING_AGE_S + 100
+    eng.activate(str(tmp_path / "ha.db"), 1)
+    assert rows(tmp_path / "ha.db", "SELECT count(*) FROM incidents")[0][0] == 0 and eng.pending == []
