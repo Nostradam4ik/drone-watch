@@ -69,6 +69,12 @@
       <h2 class="hd-alerts"><span>Тривоги<span id="alerts-new" hidden></span></span><button class="linkbtn detach" type="button" data-detach="alerts" title="Відкрити в окремому вікні (можна перетягнути на інший монітор)" aria-label="Відкріпити тривоги в окреме вікно">⧉</button></h2>
     </div>
     <div id="alerts" class="sec-alerts"><div class="empty">Тривог немає</div></div>
+    <div id="tabs" role="tablist" aria-label="Нижня панель">
+      <button type="button" role="tab" id="tab-tracks" data-tab="tracks" aria-selected="true">Треки</button>
+      <button type="button" role="tab" id="tab-sensors" data-tab="sensors" aria-selected="false">Датчики</button>
+      <button type="button" role="tab" id="tab-ai" data-tab="ai" aria-selected="false" hidden>AI</button>
+      <button type="button" role="tab" id="tab-audit" data-tab="audit" aria-selected="false" hidden>Журнал</button>
+    </div>
     <div id="sensors-box">
       <h2 class="hd-sensors"><span>Датчики</span><button class="linkbtn" id="edit-sensors" type="button" hidden>✎ Розставити</button></h2>
       <div id="editor" hidden>

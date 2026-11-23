@@ -90,7 +90,13 @@ function addOverlays() {
   S.map.addLayer({ id: "zones-line", source: "zones", type: "line", filter: ["==", ["geometry-type"], "Polygon"],
     paint: { "line-color": ["get", "color"], "line-width": 1.6, "line-dasharray": [3, 2], "line-opacity": 0.85 } });
   label("zones-label", "zones", { layout: { "text-field": ["get", "name"], "text-anchor": "bottom" }, paint: { "text-color": ["get", "color"] } });
-  S.map.addLayer({ id: "ranges", source: "ranges", type: "line", paint: { "line-color": ["get", "color"], "line-width": 1, "line-opacity": 0.5 } });
+  // Дальність датчика: легка заливка + чітка лінія кольору датчика. Пеленгові (RF, акустичний) пунктиром: вони дають лише напрямок
+  S.map.addLayer({ id: "ranges-fill", source: "ranges", type: "fill", filter: ["==", ["geometry-type"], "Polygon"], paint: { "fill-color": ["get", "color"], "fill-opacity": 0.07 } });
+  S.map.addLayer({ id: "ranges", source: "ranges", type: "line", filter: ["all", ["==", ["geometry-type"], "Polygon"], ["==", ["get", "bearing"], false]],
+    paint: { "line-color": ["get", "color"], "line-width": 2, "line-opacity": 0.9 } });
+  S.map.addLayer({ id: "ranges-dash", source: "ranges", type: "line", filter: ["all", ["==", ["geometry-type"], "Polygon"], ["==", ["get", "bearing"], true]],
+    paint: { "line-color": ["get", "color"], "line-width": 2.2, "line-opacity": 0.95, "line-dasharray": [2.5, 1.5] } });
+  label("ranges-label", "ranges", { layout: { "text-field": ["get", "name"], "text-anchor": "bottom", "text-size": 11.5 }, paint: { "text-color": ["get", "color"] } });
   S.map.addLayer({ id: "trails", source: "trails", type: "line", layout: { "line-cap": "round", "line-join": "round" },
     paint: { "line-color": ["get", "color"], "line-width": 2, "line-opacity": ["get", "opacity"] } });
   S.map.addLayer({ id: "vectors", source: "vectors", type: "line", paint: { "line-color": ["get", "color"], "line-width": 1.6, "line-opacity": 0.9 } });
@@ -152,8 +158,12 @@ export function pushZones() {
 export function pushSensors() {
   if (!S.map || !S.cfg || !S.map.getSource("sensors")) return;
   const items = S.cfg.sensors.map(s => ({ s, lost: sensorState(s.id) === "LOST", color: SENSOR_COLOR[s.label] || "#4fc3ff" }));
-  S.map.getSource("ranges").setData(fc(items.map(({ s, lost, color }) => feat({ type: "LineString",
-    coordinates: isSector(s) ? sectorRing(s) : circleRing(s.pos[0], s.pos[1], s.max_range) }, { color: lost ? "#ff3863" : color }))));
+  S.map.getSource("ranges").setData(fc(items.flatMap(({ s, lost, color }) => {
+    const c = lost ? "#ff3863" : color, bearing = s.kind === "bearing";
+    return [feat({ type: "Polygon", coordinates: [isSector(s) ? sectorRing(s) : circleRing(s.pos[0], s.pos[1], s.max_range)] }, { color: c, bearing }),
+            feat({ type: "Point", coordinates: toLL(s.pos[0], s.pos[1] + s.max_range) },   // підпис на північній точці кола: що це за коло
+              { color: c, name: s.id + " · видно до " + s.max_range + " м" + (bearing ? " (лише напрямок)" : "") })];
+  })));
   S.map.getSource("handles").setData(fc(S.editing ? items.filter(({ s }) => isSector(s)).map(({ s, color }) => {
     const a = s.heading_deg * Math.PI / 180, d = s.max_range * 0.35;   // ручка на осі огляду; тягнеш, і датчик повертається
     return feat({ type: "Point", coordinates: toLL(s.pos[0] + d * Math.sin(a), s.pos[1] + d * Math.cos(a)) }, { sid: s.id, color });
@@ -164,12 +174,77 @@ export function pushSensors() {
   scheduleCoverage();
 }
 
+// ---------- плавний рух ----------
+// Сервер шле кадр раз на scan_dt (0,5 с), тож без згладжування цілі стрибають. Між кадрами малюємо проміжні положення:
+// від того, де ціль зараз намальована, до положення, де вона має бути в момент наступного кадру (виміряна позиція + швидкість * scan_dt).
+// Так рух безперервний і не відстає від реальності на цілий кадр. Кадр, що запізнився, продовжує рух по швидкості, але не довше
+// MAX_COAST секунд: ціль не відлітає далеко за ненадійними даними. Під час відтворення інциденту й за prefers-reduced-motion малюємо як є.
+const MAX_COAST = 1.0, SNAP_M = 150, DRAW_MS = 33;
+const anim = new Map();   // id цілі -> { fx, fy (звідки), tx, ty (куди), vx, vy, t0 (мс) }
+let animFrame = null;
+const reduced = () => typeof matchMedia === "function" && matchMedia("(prefers-reduced-motion: reduce)").matches;
+const scanDt = () => (S.cfg && S.cfg.scan_dt) || 0.5;
+
+function shown(a, now) {   // де ціль намальована в момент now
+  const dt = scanDt(), u = (now - a.t0) / 1000 / dt;
+  if (u <= 1) return [a.fx + (a.tx - a.fx) * Math.max(u, 0), a.fy + (a.ty - a.fy) * Math.max(u, 0)];
+  const extra = Math.min((u - 1) * dt, MAX_COAST);
+  return [a.tx + a.vx * extra, a.ty + a.vy * extra];
+}
+
+function setTargets(tracks, now) {
+  const dt = scanDt(), ids = new Set(tracks.map(t => t.id));
+  for (const id of [...anim.keys()]) if (!ids.has(id)) anim.delete(id);
+  for (const t of tracks) {
+    const old = anim.get(t.id), tx = t.x + t.vx * dt, ty = t.y + t.vy * dt;
+    let fx = t.x, fy = t.y;   // нова ціль стартує з виміряної позиції
+    if (old) {
+      [fx, fy] = shown(old, now);
+      if (Math.hypot(fx - t.x, fy - t.y) > SNAP_M) { fx = t.x; fy = t.y; }   // стрибок (скидання, нова розстановка): не «пливемо» через пів карти
+    }
+    anim.set(t.id, { fx, fy, tx, ty, vx: t.vx, vy: t.vy, t0: now });
+  }
+}
+
+let animFor = null;
+export function displayTracks(now) {
+  const src = S.state ? S.state.tracks : [];
+  if (S.replay || reduced()) return src;
+  if (S.state !== animFor) { animFor = S.state; setTargets(src, now); }
+  return src.map(t => { const a = anim.get(t.id); if (!a) return t; const [x, y] = shown(a, now); return { ...t, x, y }; });
+}
+
+function startAnimLoop() {
+  if (animFrame !== null) return;
+  let last = 0;
+  const tick = now => {
+    animFrame = requestAnimationFrame(tick);
+    if (now - last < DRAW_MS || !S.map || !S.map.getSource("tracks") || S.replay || reduced() || !S.state) return;
+    last = now;
+    drawTracks(now);
+  };
+  animFrame = requestAnimationFrame(tick);
+}
+
 export function pushData() {
   if (!S.map || !S.cfg || !S.map.getSource("tracks")) return;
-  const set = (id, features) => S.map.getSource(id).setData(fc(features));
   pushZones();
   pushSensors();
+  drawTracks(performance.now());
+  startAnimLoop();
   const tracks = S.state ? S.state.tracks : [];
+  const set = (id, features) => S.map.getSource(id).setData(fc(features));
+  set("trails", tracks.map(t => feat({ type: "LineString", coordinates: (trails.get(t.id) || []).map(p => toLL(p[0], p[1])) },
+    { color: (SIDE[t.side] || SIDE.unknown).color, opacity: t.coasting ? 0.25 : 0.65 })).filter(f => f.geometry.coordinates.length > 1));
+  const showTruth = document.getElementById("truth").checked && S.state && S.state.truth;
+  set("truth", showTruth ? Object.values(S.state.truth).map(p => feat({ type: "Point", coordinates: toLL(p[0], p[1]) }, {})) : []);
+}
+
+// Усе, що залежить від положення цілі, перемальовується з проміжними координатами
+function drawTracks(now) {
+  if (!S.map || !S.map.getSource("tracks")) return;
+  const set = (id, features) => S.map.getSource(id).setData(fc(features));
+  const tracks = displayTracks(now);
   set("tracks", tracks.map(t => feat({ type: "Point", coordinates: toLL(t.x, t.y) }, {
     id: t.id, prio: t.id === S.selected ? 0 : t.diving ? 1 : t.level === "CRITICAL" ? 2 : t.level === "WARNING" ? 3 : 4,
     color: (SIDE[t.side] || SIDE.unknown).color, opacity: t.coasting ? 0.4 : 1, selected: t.id === S.selected,
@@ -187,12 +262,8 @@ export function pushData() {
     return [feat({ type: "LineString", coordinates: [toLL(t.x, t.y), toLL(ix, iy)] }, {}),
             feat({ type: "Point", coordinates: toLL(ix, iy) }, { text: "падіння ~" + Math.round(t.ttg) + " с" })];
   }));
-  set("trails", tracks.map(t => feat({ type: "LineString", coordinates: (trails.get(t.id) || []).map(p => toLL(p[0], p[1])) },
-    { color: (SIDE[t.side] || SIDE.unknown).color, opacity: t.coasting ? 0.25 : 0.65 })).filter(f => f.geometry.coordinates.length > 1));
   set("vectors", tracks.map(t => feat({ type: "LineString", coordinates: [toLL(t.x, t.y), toLL(t.x + t.vx * 5, t.y + t.vy * 5)] },   // де буде за 5 с
     { color: (SIDE[t.side] || SIDE.unknown).color })));
-  const showTruth = document.getElementById("truth").checked && S.state && S.state.truth;
-  set("truth", showTruth ? Object.values(S.state.truth).map(p => feat({ type: "Point", coordinates: toLL(p[0], p[1]) }, {})) : []);
 }
 
 function mapTag(text) {

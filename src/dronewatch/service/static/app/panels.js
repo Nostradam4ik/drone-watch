@@ -170,6 +170,7 @@ export function renderSensors(list) {
     (S.editing ? `<button class="del" type="button" data-del="${esc(s.id)}" title="Прибрати датчик" aria-label="Прибрати датчик ${esc(s.id)}">×</button>` : "") + `</div>` +
     (openSensors.has(s.id) ? `<div class="sensor-spec">${(() => { const c = S.cfg && S.cfg.sensors.find(x => x.id === s.id); return c ? ownSpecHtml(c) : ""; })()}</div>` : "")).join("");
   const lost = list.filter(s => s.state === "LOST"), ok = list.filter(s => s.state === "OK").length;
+  document.getElementById("tab-sensors").classList.toggle("warn", lost.length > 0);   // втрачений датчик видно, навіть коли відкрита інша вкладка
   const badge = document.getElementById("sens");
   badge.textContent = "датчики: " + ok + "/" + list.length;
   badge.className = "chip " + (lost.length ? "off" : ok === list.length ? "live" : "");

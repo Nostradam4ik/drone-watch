@@ -147,6 +147,11 @@ def alert(aid: int, track_id: int, level: str = "CRITICAL", status: str = "new",
     return a
 
 
+def tab(page: Page, name: str) -> None:
+    """Нижня частина бокової панелі має вкладки (треки, датчики, AI, журнал): відкрити потрібну."""
+    page.locator(f"#tab-{name}").click()
+
+
 def watch_errors(page: Page) -> list[str]:
     errors: list[str] = []
     page.on("pageerror", lambda e: errors.append(f"pageerror: {e}"))
@@ -208,6 +213,7 @@ def test_page_loads_and_shows_live_tracks_from_the_real_websocket(server, browse
     expect(page.locator("#conn")).to_have_text("на звʼязку")
     expect(page.locator("#mode")).to_have_text("ДЕМО (симуляція)")
     expect(page.locator("#tbody tr").first).to_be_visible(timeout=20_000)   # симуляція: перший трек за кілька секунд
+    tab(page, "sensors")
     expect(page.locator("#sensors .sensor").first).to_be_visible()
     expect(page.locator("#edit-sensors")).to_be_visible()   # демо: розстановка датчиків доступна
     ctx.close()
@@ -220,6 +226,7 @@ def test_sensor_height_is_edited_and_saved_with_the_layout(server, browser):
     errors = watch_errors(page)
     assert sign_in(page, server["base"], "admin") == 200
     page.goto(server["base"] + "/")
+    tab(page, "sensors")
     expect(page.locator("#sensors .sensor").first).to_be_visible(timeout=20_000)
     page.locator("#edit-sensors").click()
     field = page.locator("#sensors input[data-h]").first
@@ -302,6 +309,8 @@ def test_lost_radar_shows_degraded_banner(dash):
     expect(banner).to_be_visible()
     expect(banner).to_contain_text("без радара")
     expect(dash.page.locator("#sens")).to_have_class("chip off")
+    expect(dash.page.locator("#tab-sensors")).to_have_class("warn")   # placeholder
+    tab(dash.page, "sensors")
     expect(dash.page.locator("#sensors .sensor.LOST").first).to_contain_text("42 с")
 
 
@@ -406,6 +415,7 @@ def test_ai_answer_is_rendered_as_safe_markdown_with_tool_chips(dash):
         route.fulfill(status=200, content_type="application/json",
                       body=json.dumps({"answer": "У зоні **2 цілі** <b>x</b>", "tool_calls": [{"name": "get_incident_stats"}]}))
     dash.page.route("**/api/ai/ask", ask)
+    tab(dash.page, "ai")
     dash.page.locator("#ai-q-input").fill("що в зоні A?")
     dash.page.locator("#ai-form button").click()
     answer = dash.page.locator("#ai-log .ai-a")
@@ -418,6 +428,7 @@ def test_ai_answer_is_rendered_as_safe_markdown_with_tool_chips(dash):
 
 def test_ai_unavailable_is_reported(dash):
     dash.page.route("**/api/ai/ask", lambda r: r.fulfill(status=503, body="{}"))
+    tab(dash.page, "ai")
     dash.page.locator("#ai-q-input").fill("стан?")
     dash.page.locator("#ai-form button").click()
     expect(dash.page.locator("#ai-log .ai-a")).to_have_text("AI недоступний")
@@ -434,6 +445,8 @@ def test_viewer_sees_no_review_buttons_editor_or_ai(dash_as):
     expect(d.page.locator("#edit-sensors")).to_be_hidden()
     expect(d.page.locator("#ai-box")).to_be_hidden()
     expect(d.page.locator("#audit-box")).to_be_hidden()
+    expect(d.page.locator("#tab-ai")).to_be_hidden()      # вкладок AI й журналу в перегляду немає
+    expect(d.page.locator("#tab-audit")).to_be_hidden()
     expect(d.page.locator("#who-name")).to_have_text("viewer (перегляд)")
     assert not d.errors, d.errors
 
@@ -442,7 +455,9 @@ def test_operator_reviews_but_cannot_edit_layout(dash_as):
     d = dash_as("operator")
     d.push(d.state(alerts=[alert(1, 1)]))
     expect(d.page.locator("button[data-review]")).to_have_count(2)
+    tab(d.page, "ai")
     expect(d.page.locator("#ai-form")).to_be_visible()
+    tab(d.page, "sensors")
     expect(d.page.locator("#edit-sensors")).to_be_hidden()
     expect(d.page.locator("#audit-box")).to_be_hidden()
     expect(d.page.locator("#catalog-body [draggable]")).to_have_count(0)
@@ -458,8 +473,11 @@ def test_forbidden_review_shows_insufficient_rights_toast(dash):
 
 def test_admin_sees_audit_tab_with_integrity_ok(dash_as):
     d = dash_as("admin")
+    tab(d.page, "sensors")
     expect(d.page.locator("#edit-sensors")).to_be_visible()
+    tab(d.page, "ai")
     expect(d.page.locator("#ai-form")).to_be_visible()
+    tab(d.page, "audit")
     expect(d.page.locator("#audit-box")).to_be_visible()
     d.page.locator("#audit-box summary").click()
     expect(d.page.locator("#audit-body tr", has_text="login").first).to_be_visible()
@@ -476,6 +494,7 @@ def test_audit_rows_are_rendered_as_text(dash_as, server):
         headers: {"Content-Type": "application/json"}, body: "{}"})).status""", f"/api/incidents/{evil}/review")
     assert status == 403
     d = dash_as("admin")
+    tab(d.page, "audit")
     d.page.locator("#audit-box summary").click()
     row = d.page.locator("#audit-body tr", has_text="denied").first
     expect(row).to_contain_text(evil)
@@ -625,3 +644,64 @@ def test_clicks_in_detached_panels_drive_the_main_window(dash):
     expect(dash.page.locator('#tbody tr[data-id="2"]')).to_have_class("sel")
     for p in (tracks_panel, alerts_panel):
         assert not p.errors, "\n".join(p.errors)
+
+
+# ---------- вкладки бокової панелі ----------
+def test_tabs_show_one_bottom_pane_and_keep_alerts_visible(dash):
+    page = dash.page
+    dash.push(dash.state(tracks=[track(1)], alerts=[alert(1, 1)]))
+    expect(page.locator("#tracks")).to_be_visible()
+    expect(page.locator("#sensors-box")).to_be_hidden()
+    expect(page.locator("#ai-box")).to_be_hidden()
+    tab(page, "sensors")
+    expect(page.locator("#sensors-box")).to_be_visible()
+    expect(page.locator("#tracks")).to_be_hidden()
+    expect(page.locator("#alerts .alert")).to_be_visible()   # тривоги видно на будь-якій вкладці
+    tab(page, "ai")
+    expect(page.locator("#ai-box")).to_be_visible()
+    expect(page.locator("#alerts .alert")).to_be_visible()
+    page.locator("#tab-ai").focus()
+    page.keyboard.press("ArrowRight")   # стрілки перемикають вкладки (admin бачить ще й журнал, оператор повертається до треків)
+    expect(page.locator("#tab-ai")).to_have_attribute("aria-selected", "false")
+
+
+def test_selected_tab_is_remembered_and_lost_sensor_marks_its_tab(dash):
+    page = dash.page
+    tab(page, "sensors")
+    page.reload()
+    expect(page.locator("#conn")).to_have_text("на звʼязку", timeout=20_000)
+    expect(page.locator("#sensors-box")).to_be_visible()   # після перезавантаження та сама вкладка
+    tab(page, "tracks")
+    sensors = [{"id": s["id"], "label": s["kind"], "state": "LOST" if s["kind"] == "radar" else "OK", "age_s": 9.0} for s in dash.cfg["sensors"]]
+    page.route_web_socket("**/ws", lambda ws: setattr(dash, "ws", ws))
+    page.reload()
+    expect(page.locator("#conn")).to_have_text("на звʼязку")
+    dash.push(dash.state(sensors=sensors))
+    expect(page.locator("#tab-sensors")).to_have_class("warn")   # втрату датчика видно, хоч відкрито треки
+
+
+# ---------- плавний рух цілей ----------
+def test_targets_glide_between_scan_frames(server, browser):
+    ctx = browser.new_context()   # без reduced_motion: саме він вимикає згладжування
+    page = ctx.new_page()
+    errors = watch_errors(page)
+    assert sign_in(page, server["base"], "viewer") == 200
+    page.goto(server["base"] + "/")
+    expect(page.locator("#conn")).to_have_text("на звʼязку")
+    xs = page.evaluate("""async () => {
+        const { S } = await import("/static/app/core.js"), m = await import("/static/app/map.js");
+        S.cfg = { ...S.cfg, scan_dt: 0.5 }; S.replay = null;
+        const tr = x => ({ id: 9001, x, y: 0, vx: 10, vy: 0 });
+        S.state = { tracks: [tr(0)] }; m.displayTracks(1000);
+        S.state = { tracks: [tr(5)] };                      // новий кадр: ціль за вимірюванням у 5 м, летить 10 м/с
+        const at = t => m.displayTracks(t)[0].x;
+        const out = [at(1000), at(1250), at(1500), at(3500)];   // початок, половина, кінець кадру, кадр, що дуже запізнився
+        S.state = { tracks: [tr(5000)] };                   // стрибок на кілометри: не пливемо, а стаємо на місце
+        out.push(at(1500));
+        return out;
+    }""")
+    assert xs[0] == 0 and abs(xs[1] - 5) < 1e-6 and abs(xs[2] - 10) < 1e-6   # рівномірно від 0 до передбаченого 10 м
+    assert abs(xs[3] - 20) < 1e-6   # запізнілий кадр: ще не довше за 1 с по швидкості, далі стоїмо
+    assert xs[4] == 5000
+    ctx.close()
+    assert not errors, "\n".join(errors)
