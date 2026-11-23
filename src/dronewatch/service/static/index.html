@@ -57,6 +57,7 @@
       <div><i style="background:#b48cff"></i>RF-детектор</div>
       <div><i style="background:#ffb86b"></i>акустичний датчик</div>
       <div class="tip">Обертати й нахиляти карту: права кнопка миші + рух, або кнопка ⟲ справа (тоді лівою).</div>
+      <label><input type="checkbox" id="fc-on" checked> прогноз руху: де буде за 5, 10, 15 с (оцінка, коло = розкид 1σ)</label>
       <label id="cov-row"><input type="checkbox" id="cov-on" checked> підсвітити покриття буферної зони</label>
       <div id="cov-stats"></div>
       <label id="truth-row" hidden><input type="checkbox" id="truth"> показати істинні позиції (лише демо)</label>
@@ -88,6 +89,10 @@
     <div class="sec-tracks">
       <h2 class="hd-tracks"><span>Активні треки</span><button class="linkbtn detach" type="button" data-detach="tracks" title="Відкрити в окремому вікні (можна перетягнути на інший монітор)" aria-label="Відкріпити треки в окреме вікно">⧉</button></h2>
       <div id="tracks"><table><thead><tr><th>ID</th><th class="l">Тип</th><th>Рівень</th><th>V, м/с</th><th>H, м</th></tr></thead><tbody id="tbody"></tbody></table></div>
+      <div id="lost-box" hidden>
+        <h3>Втрачені цілі <span class="hint">(зникли з радарів; де шукати)</span></h3>
+        <div id="lost-list"></div>
+      </div>
     </div>
     <details id="audit-box" hidden>
       <summary>Журнал дій <span id="audit-integrity" class="chip"></span></summary>

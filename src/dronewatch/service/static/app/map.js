@@ -1,6 +1,6 @@
 // ---------- карта ----------
 // Система координат датчиків — метри (схід, північ) від точки (0, 0). cfg.origin каже, де ця точка лежить на Землі.
-import { COLORS, S, SIDE, sensorState, trails } from "./core.js";
+import { COLORS, LOST_SHORT, S, SIDE, sensorState, trails } from "./core.js";
 import { select } from "./dossier.js";
 import { addSensor, scheduleCoverage, setupSensorEditing } from "./editor.js";
 
@@ -82,7 +82,7 @@ function hudStyle(style) {
 
 function addOverlays() {
   if (S.map.getSource("tracks")) return;
-  for (const id of ["coverage", "zones", "ranges", "sensors", "handles", "trails", "vectors", "truth", "stalks", "impact", "tracks"]) S.map.addSource(id, { type: "geojson", data: fc([]) });
+  for (const id of ["coverage", "zones", "ranges", "sensors", "handles", "trails", "vectors", "truth", "stalks", "impact", "forecast", "lost", "tracks"]) S.map.addSource(id, { type: "geojson", data: fc([]) });
   S.map.addLayer({ id: "coverage-fill", source: "coverage", type: "fill", paint: { "fill-color": ["get", "color"], "fill-opacity": 0.34, "fill-antialias": false } });
   const label = (id, source, extra) => S.map.addLayer({ id, source, type: "symbol", layout: { "text-font": FONT, "text-size": 11, "text-allow-overlap": true, ...extra.layout },
     paint: { "text-halo-color": "#060a10", "text-halo-width": 1.6, ...extra.paint } });
@@ -111,6 +111,22 @@ function addOverlays() {
   S.map.addLayer({ id: "impact-pt", source: "impact", type: "circle", filter: ["==", ["geometry-type"], "Point"],
     paint: { "circle-radius": 9, "circle-color": "#ff3b63", "circle-opacity": 0.25, "circle-stroke-color": "#ff3b63", "circle-stroke-width": 2 } });
   label("impact-label", "impact", { layout: { "text-field": ["get", "text"], "text-anchor": "top", "text-offset": [0, 1.2] }, paint: { "text-color": "#ff7a93" } });
+  // Прогноз руху: коло розкиду на кожному горизонті, пунктир шляху, підписи часу. Це оцінка за поточною швидкістю
+  S.map.addLayer({ id: "forecast-fill", source: "forecast", type: "fill", filter: ["==", ["geometry-type"], "Polygon"], paint: { "fill-color": ["get", "color"], "fill-opacity": ["get", "fill"] } });
+  S.map.addLayer({ id: "forecast-ring", source: "forecast", type: "line", filter: ["==", ["geometry-type"], "Polygon"],
+    paint: { "line-color": ["get", "color"], "line-width": 1.2, "line-opacity": 0.7, "line-dasharray": [2, 2] } });
+  S.map.addLayer({ id: "forecast-path", source: "forecast", type: "line", filter: ["==", ["geometry-type"], "LineString"],
+    paint: { "line-color": ["get", "color"], "line-width": 1.4, "line-opacity": 0.75, "line-dasharray": [1, 2] } });
+  label("forecast-label", "forecast", { layout: { "text-field": ["get", "text"], "text-anchor": "top", "text-offset": [0, 0.5], "text-size": 10.5 }, paint: { "text-color": ["get", "color"] } });
+  // Зниклі цілі: останнє місце (×), відрізок «куди могла полетіти», коло пошуку, що росте з часом; з віком блякнуть
+  S.map.addLayer({ id: "lost-fill", source: "lost", type: "fill", filter: ["==", ["geometry-type"], "Polygon"], paint: { "fill-color": ["get", "color"], "fill-opacity": ["*", 0.12, ["get", "fade"]] } });
+  S.map.addLayer({ id: "lost-ring", source: "lost", type: "line", filter: ["==", ["geometry-type"], "Polygon"],
+    paint: { "line-color": ["get", "color"], "line-width": 1.6, "line-opacity": ["get", "fade"], "line-dasharray": [3, 2] } });
+  S.map.addLayer({ id: "lost-path", source: "lost", type: "line", filter: ["==", ["geometry-type"], "LineString"],
+    paint: { "line-color": ["get", "color"], "line-width": 1.4, "line-opacity": ["get", "fade"], "line-dasharray": [1, 2] } });
+  S.map.addLayer({ id: "lost-dot", source: "lost", type: "circle", filter: ["==", ["get", "part"], "last"],
+    paint: { "circle-radius": 5, "circle-color": "#060a10", "circle-stroke-color": ["get", "color"], "circle-stroke-width": 2, "circle-opacity": ["get", "fade"], "circle-stroke-opacity": ["get", "fade"] } });
+  label("lost-label", "lost", { layout: { "text-field": ["get", "text"], "text-anchor": "top", "text-offset": [0, 0.9], "text-size": 11 }, paint: { "text-color": ["get", "color"], "text-opacity": ["get", "fade"] } });
   S.map.addLayer({ id: "tracks-halo", source: "tracks", type: "circle",   // кільце = зона загрози, а не приналежність
     paint: { "circle-radius": 13, "circle-opacity": 0, "circle-stroke-color": ["get", "halo"], "circle-stroke-width": ["get", "haloW"], "circle-stroke-opacity": 0.95 } });
   S.map.addLayer({ id: "tracks-dot", source: "tracks", type: "circle",
@@ -234,6 +250,7 @@ export function pushData() {
   startAnimLoop();
   const tracks = S.state ? S.state.tracks : [];
   const set = (id, features) => S.map.getSource(id).setData(fc(features));
+  drawLost();
   set("trails", tracks.map(t => feat({ type: "LineString", coordinates: (trails.get(t.id) || []).map(p => toLL(p[0], p[1])) },
     { color: (SIDE[t.side] || SIDE.unknown).color, opacity: t.coasting ? 0.25 : 0.65 })).filter(f => f.geometry.coordinates.length > 1));
   const showTruth = document.getElementById("truth").checked && S.state && S.state.truth;
@@ -262,8 +279,40 @@ function drawTracks(now) {
     return [feat({ type: "LineString", coordinates: [toLL(t.x, t.y), toLL(ix, iy)] }, {}),
             feat({ type: "Point", coordinates: toLL(ix, iy) }, { text: "падіння ~" + Math.round(t.ttg) + " с" })];
   }));
+  drawForecast(tracks, set);
   set("vectors", tracks.map(t => feat({ type: "LineString", coordinates: [toLL(t.x, t.y), toLL(t.x + t.vx * 5, t.y + t.vy * 5)] },   // де буде за 5 с
     { color: (SIDE[t.side] || SIDE.unknown).color })));
+}
+
+document.getElementById("fc-on").addEventListener("change", () => pushData());
+
+const LOST_COLOR = { enemy: "#ff7a93", friend: "#33e6c2", unknown: "#b9c6cf" };
+
+// Прогноз: для виділеної цілі кола на 5, 10 і 15 с з підписами; для решти загрозливих (не «свій», рівень не NONE) одне коло на 10 с.
+// Початок шляху береться з намальованого (плавного) положення, а точки прогнозу приходять з сервера.
+function drawForecast(tracks, set) {
+  const on = document.getElementById("fc-on");
+  if (!on || !on.checked || S.replay) { set("forecast", []); return; }
+  set("forecast", tracks.filter(t => !t.coasting && t.forecast).flatMap(t => {
+    const sel = t.id === S.selected, threat = t.side !== "friend" && t.level !== "NONE";
+    if (!sel && !threat) return [];
+    const color = (SIDE[t.side] || SIDE.unknown).color, pts = sel ? t.forecast : [t.forecast[1]];
+    return [feat({ type: "LineString", coordinates: [toLL(t.x, t.y), ...pts.map(p => toLL(p.x, p.y))] }, { color }),
+      ...pts.flatMap(p => [feat({ type: "Polygon", coordinates: [circleRing(p.x, p.y, p.r)] }, { color, fill: sel ? 0.07 : 0.045 }),
+        ...(sel ? [feat({ type: "Point", coordinates: toLL(p.x, p.y) }, { color, text: p.t + " с · ±" + Math.round(p.r) + " м" })] : [])])];
+  }));
+}
+
+// Зниклі цілі (S.state.lost від сервера): де бачили востаннє й де шукати. Блякнуть за 90 с
+function drawLost() {
+  const lost = (S.state && S.state.lost) || [];
+  S.map.getSource("lost").setData(fc(lost.flatMap(r => {
+    const color = LOST_COLOR[r.side] || LOST_COLOR.unknown, fade = Math.max(0.3, 1 - r.age / 90), s = r.search;
+    return [feat({ type: "Polygon", coordinates: [circleRing(s.fx, s.fy, s.r)] }, { color, fade }),
+      feat({ type: "LineString", coordinates: [toLL(r.x, r.y), toLL(s.fx, s.fy)] }, { color, fade }),
+      feat({ type: "Point", coordinates: toLL(r.x, r.y) }, { color, fade, part: "last", text: "" }),
+      feat({ type: "Point", coordinates: toLL(s.fx, s.fy) }, { color, fade, part: "area", text: "#" + r.id + " × " + Math.round(r.age) + " с · " + (LOST_SHORT[r.reason] || "зникла") })];
+  })));
 }
 
 function mapTag(text) {

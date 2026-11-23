@@ -279,3 +279,11 @@ aside > .sec-tracks #tracks { max-height: none; overflow: visible; }
 aside[data-tab]:not([data-tab="tracks"]) .sec-tracks, aside[data-tab]:not([data-tab="sensors"]) #sensors-box,
 aside[data-tab]:not([data-tab="audit"]) #audit-box, aside[data-tab]:not([data-tab="ai"]) #ai-box { display: none; }
 body.panel #tabs { display: none; }
+
+/* Втрачені цілі у вкладці «Треки» */
+#lost-box { border-top: 1px solid var(--line); }
+#lost-box h3 { margin: 0; padding: 8px 13px 4px; font: 600 12px var(--face-label); color: var(--warn); }
+#lost-box h3 .hint { color: var(--muted); font-weight: 400; }
+.lost-row { padding: 6px 13px; border-bottom: 1px solid var(--line); cursor: pointer; display: grid; gap: 2px; }
+.lost-row:hover { background: #ffffff0a; }
+.lost-row .why { color: var(--muted); font-size: 11.5px; }
