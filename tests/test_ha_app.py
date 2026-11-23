@@ -180,3 +180,57 @@ def test_no_ha_means_no_gate(redis):
     c = TestClient(app.app, raise_server_exceptions=False, follow_redirects=False)
     assert c.get("/readyz").json() == {"ready": True, "role": "single"}
     assert "ha" not in c.get("/api/health").json()
+
+
+# ---------- релей HTTP-подій у резерв ----------
+import json
+import threading
+
+from dronewatch.service.ha import RedisEventRelay
+
+
+def test_post_events_publishes_relay_without_keys(client, redis):
+    role(Role.LEADER)
+    r = client.post("/api/events", json=[{"sensor_id": "r1", "heartbeat": True}], headers={"X-API-Key": "supersecret"})
+    assert r.status_code == 200
+    (channel, payload), = redis.published
+    assert channel == "dw:events" and "supersecret" not in payload and json.loads(payload)[0]["sensor_id"] == "r1"
+
+
+def test_relay_failure_does_not_break_post_events(client, redis):
+    role(Role.LEADER)
+    redis.down = True
+    r = client.post("/api/events", json=[{"sensor_id": "r1", "heartbeat": True}])
+    assert r.status_code == 200 and r.json()["accepted"] == 1
+
+
+def test_relay_handler_feeds_trusted_ingest_only_on_standby(client):
+    rt = app.app.state.runtime
+    role(Role.STANDBY)
+    rt.ha.on_relay([{"sensor_id": "r1", "heartbeat": True}])
+    assert rt.engine.stats["heartbeats"] == 1
+    role(Role.LEADER)   # власні публікації лідер отримує назад: їх не можна рахувати вдруге
+    rt.ha.on_relay([{"sensor_id": "r1", "heartbeat": True}])
+    assert rt.engine.stats["heartbeats"] == 1
+
+
+def run_subscriber(redis, handler):
+    stop = threading.Event()
+    relay = RedisEventRelay(redis)
+    t = threading.Thread(target=relay.subscribe, args=(handler, stop))
+    t.start()
+    return relay, stop, t
+
+
+def test_relay_subscriber_delivers_lists_and_ignores_garbage(redis):
+    got: list[list[dict]] = []
+    relay, stop, t = run_subscriber(redis, got.append)
+    while not redis.subscribers:   # дочекатись підписки
+        pass
+    for payload in ("не json", "42", json.dumps(["рядок", 5]), json.dumps([{"sensor_id": "r1"}, "сміття"])):
+        redis.publish("dw:events", payload)
+    while redis.subscribers[0]:
+        pass
+    stop.set()
+    t.join(timeout=3)
+    assert got == [[{"sensor_id": "r1"}]]   # лише обʼєкти з валідного списку

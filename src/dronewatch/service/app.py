@@ -247,8 +247,12 @@ def build_ha(cfg: config.Config, rt: Runtime) -> ha.HaState | None:
 
     elector = ha.Elector(ha.RedisLeaseStore(client), owner, cfg.ha.lease_ttl_s, on_promote=promote,
                          on_demote=lambda role: rt.engine.deactivate())
+    def relayed(events: list[dict[str, Any]]) -> None:
+        if elector.role is ha.Role.STANDBY:   # власні публікації лідер отримує назад: другий раз їх рахувати не можна
+            rt.engine.ingest_detailed(events, trusted=True)
+
     log.warning("HA: копія %s, резерв; оренда %.0f с", owner, cfg.ha.lease_ttl_s)
-    return ha.HaState(elector, owner)
+    return ha.HaState(elector, owner, relay=ha.RedisEventRelay(client), on_relay=relayed)
 
 
 def check_audit_chain(rt: Runtime) -> VerifyResult | None:
@@ -653,6 +657,8 @@ def post_events(events: Annotated[list[Detection], Body(max_length=MAX_HTTP_BATC
     """Ключ датчика в заголовку X-API-Key (не в тілі: тіла частіше потрапляють у логи). Ключ належить одному датчику:
     події інших датчиків у цьому ж запиті відхиляються. 401, якщо жодної події не прийнято через ключ."""
     r = rt.engine.ingest_detailed([{**e.model_dump(), "key": x_api_key} for e in events])
+    if rt.ha is not None and rt.ha.relay is not None and r.relay:
+        rt.ha.relay.publish(r.relay)   # резерв бачить ті самі події (без ключів); збій Redis подій не губить і відповідь не міняє
     if r.unauthorized and not r.accepted:
         return JSONResponse({"detail": "відсутній або хибний ключ датчика (заголовок X-API-Key)"}, status_code=401,
                             headers={"WWW-Authenticate": "ApiKey"})

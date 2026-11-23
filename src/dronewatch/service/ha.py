@@ -6,6 +6,8 @@
 Принцип: пише лише той, у кого чинна оренда. Лідер сам відраховує свій термін за монотонним годинником від ПОЧАТКУ запиту на
 поновлення, тож він перестає вважати себе лідером раніше, ніж ключ може перехопити інший. Старий лідер, що ожив, зупиняється
 на запобіжнику: `epoch` зростає при кожному захопленні й записаний у самому файлі БД (див. Engine.activate)."""
+import contextlib
+import json
 import logging
 import threading
 import time
@@ -91,6 +93,69 @@ class RedisLeaseStore:
             self._r.eval(_RAISE_EPOCH_LUA, 1, self._epoch, at_least)
         except Exception as e:
             raise LeaseStoreError(type(e).__name__) from None
+
+
+CHANNEL = "dw:events"
+MAX_RELAY_EVENTS = 2000   # пакет понад це підписник відкидає (HTTP-пакет лідера не більший за 1000)
+LOG_EVERY_S = 30.0
+
+
+class RedisEventRelay:
+    """Дзеркалення HTTP-подій лідера в резерв (best-effort, як MQTT QoS 0: застарілі виміри нікому не потрібні). Події йдуть БЕЗ
+    ключів датчиків і вже автентифіковані лідером; Redis має бути закритою внутрішньою мережею (як і для сесій)."""
+
+    def __init__(self, client: Any, *, channel: str = CHANNEL, clock: Callable[[], float] = time.monotonic) -> None:
+        self._r, self.channel, self._clock, self._last_log = client, channel, clock, float("-inf")
+
+    def _warn(self, what: str) -> None:
+        if self._clock() - self._last_log >= LOG_EVERY_S:   # не засмічуємо лог на кожен пакет під час аварії Redis
+            self._last_log = self._clock()
+            log.warning("HA релей: %s", what)
+
+    def publish(self, events: list[dict[str, Any]]) -> None:
+        try:
+            self._r.publish(self.channel, json.dumps(events, separators=(",", ":")))
+        except Exception as e:   # релей лише допомога резерву: збій не повинен ламати прийом подій
+            self._warn(f"не вдалося опублікувати ({type(e).__name__})")
+
+    def subscribe(self, handler: Callable[[list[dict[str, Any]]], None], stop: threading.Event) -> None:
+        """Цикл підписника до `stop`. Сміття (не JSON, не список, не обʼєкти) мовчки відкидається, збій Redis перечікується."""
+        ps = None
+        try:
+            while not stop.is_set():
+                try:
+                    if ps is None:
+                        ps = self._r.pubsub(ignore_subscribe_messages=True)
+                        ps.subscribe(self.channel)
+                    msg = ps.get_message(timeout=1.0)
+                except Exception as e:
+                    self._warn(f"підписка перервана ({type(e).__name__})")
+                    ps = None
+                    stop.wait(1.0)
+                    continue
+                if msg is None:
+                    stop.wait(0.01)
+                    continue
+                events = self._decode(msg.get("data"))
+                if events:
+                    try:
+                        handler(events)
+                    except Exception:
+                        log.exception("HA релей: обробник події впав")
+        finally:
+            if ps is not None:
+                with contextlib.suppress(Exception):
+                    ps.close()
+
+    @staticmethod
+    def _decode(data: Any) -> list[dict[str, Any]]:
+        try:
+            parsed = json.loads(data)
+        except (TypeError, ValueError):
+            return []
+        if not isinstance(parsed, list) or len(parsed) > MAX_RELAY_EVENTS:
+            return []
+        return [e for e in parsed if isinstance(e, dict)]
 
 
 class Elector:
@@ -208,15 +273,21 @@ class HaState:
     """Усе, що сервіс тримає для HA: автомат ролей, потік поновлення й ім'я цієї копії."""
     elector: Elector
     instance_id: str
+    relay: RedisEventRelay | None = None
+    on_relay: Callable[[list[dict[str, Any]]], None] | None = None   # куди резерв віддає події з релея
     stop: threading.Event = field(default_factory=threading.Event)
-    thread: threading.Thread | None = None
+    threads: list[threading.Thread] = field(default_factory=list)
 
     def start(self) -> None:
-        self.thread = threading.Thread(target=run_forever, args=(self.elector, self.stop), name="dw-ha", daemon=True)
-        self.thread.start()
+        self.threads = [threading.Thread(target=run_forever, args=(self.elector, self.stop), name="dw-ha", daemon=True)]
+        if self.relay is not None and self.on_relay is not None:
+            self.threads.append(threading.Thread(target=self.relay.subscribe, args=(self.on_relay, self.stop), name="dw-ha-relay",
+                                                 daemon=True))
+        for t in self.threads:
+            t.start()
 
     def shutdown(self) -> None:
         self.stop.set()
-        if self.thread is not None:
-            self.thread.join(timeout=5)
+        for t in self.threads:
+            t.join(timeout=5)
         self.elector.stop()

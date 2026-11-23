@@ -189,6 +189,21 @@ def test_rejects_nonpositive_ttl():
 
 
 # ---------- Redis-реалізація ----------
+class FakePubSub:
+    def __init__(self) -> None:
+        self.queue: list[dict] = []
+        self.closed = False
+
+    def subscribe(self, channel):
+        self.channel = channel
+
+    def get_message(self, timeout=0.0):
+        return self.queue.pop(0) if self.queue else None
+
+    def close(self):
+        self.closed = True
+
+
 class FakeRedis:
     """Мінімум Redis: set(nx, px), incr, get, eval за тотожністю скрипта з константою модуля; down імітує обрив."""
 
@@ -196,6 +211,8 @@ class FakeRedis:
         self.data: dict[str, str] = {}
         self.ttl: dict[str, int] = {}
         self.down = False
+        self.published: list[tuple[str, str]] = []
+        self.subscribers: list[list[dict]] = []
 
     def _check(self) -> None:
         if self.down:
@@ -216,6 +233,19 @@ class FakeRedis:
         self._check()
         self.data[k] = str(int(self.data.get(k, "0")) + 1)
         return int(self.data[k])
+
+    def publish(self, channel, message):
+        self._check()
+        self.published.append((channel, message))
+        for q in self.subscribers:
+            q.append({"type": "message", "channel": channel, "data": message})
+        return len(self.subscribers)
+
+    def pubsub(self, ignore_subscribe_messages=False):
+        self._check()
+        ps = FakePubSub()
+        self.subscribers.append(ps.queue)
+        return ps
 
     def eval(self, script, numkeys, *args):
         self._check()
