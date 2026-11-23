@@ -156,6 +156,14 @@ class ReplayCfg(BaseModel):
     retention_days: float = Field(default=30.0, gt=0, le=3650)   # старші записи прибираються
 
 
+class HaCfg(BaseModel):
+    """Активний рушій і гарячий резерв: кілька копій сервісу, пише й показує людям одна (оренда в Redis). Вимкнено: як раніше."""
+    enabled: bool = False
+    redis_url: str | None = None   # той самий Redis, що для сесій; закрита внутрішня мережа
+    lease_ttl_s: float = Field(default=6.0, ge=2, le=60)   # скільки живе оренда; перемикання не довше за це
+    instance_id: str = "auto"      # імʼя копії; auto = hostname
+
+
 class Config(BaseModel):
     mode: Literal["demo", "live"] = "demo"
     scan_dt: float = Field(default=0.5, gt=0)
@@ -174,9 +182,15 @@ class Config(BaseModel):
     dashboard: DashboardCfg = DashboardCfg()
     ai: AiCfg = AiCfg()
     replay: ReplayCfg = ReplayCfg()
+    ha: HaCfg = HaCfg()
 
     @model_validator(mode="after")
     def _check(self) -> Self:
+        if self.ha.enabled:
+            if self.mode != "live":
+                raise ValueError("ha.enabled працює лише з mode: live (демо не має що резервувати)")
+            if not self.ha.redis_url:
+                raise ValueError("ha.enabled вимагає ha.redis_url: оренда лідера живе в Redis")
         ids = [s.id for s in self.sensors]
         if len(ids) != len(set(ids)):
             raise ValueError("id датчиків мають бути унікальними")
