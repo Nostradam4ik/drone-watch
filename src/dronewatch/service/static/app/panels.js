@@ -1,5 +1,5 @@
 // ---------- кадр стану з сервера: шапка, таблиця треків, тривоги, список датчиків ----------
-import { KIND_UA, LEVEL_UA, PANEL, S, SENSOR_UA, SIDE, altText, can, esc, trails } from "./core.js";
+import { KIND_UA, LEVEL_UA, LOST_UA, PANEL, S, SENSOR_UA, SIDE, altText, can, esc, trails } from "./core.js";
 import { select, toast, updateDossier } from "./dossier.js";
 import { realInfoHtml, reloadConfig, sensorSpec, typeInfo } from "./editor.js";
 import { isSector, pushData, shortName, toLL } from "./map.js";
@@ -71,6 +71,7 @@ export function render(msg) {
     });
     seenAlerts = current;   // памʼятаємо лише тривоги, що ще в списку: множина не росте безмежно
   } else if (lastAlerts !== "") { lastAlerts = ""; seenAlerts = new Set(); box.innerHTML = '<div class="empty">Тривог немає</div>'; }
+  renderLost(msg);
   if (!PANEL) soundCheck(msg, firstMsg);   // звук лише в головному вікні, інакше сигнал лунав би двічі
   firstMsg = false;
   document.getElementById("truth-row").hidden = !(S.cfg && S.cfg.demo && msg.truth);
@@ -78,6 +79,24 @@ export function render(msg) {
   pushData();
   updateDossier();
 }
+
+// Втрачені цілі: рядок у вкладці «Треки» (клік наводить карту на зону пошуку) і тост про нову втрату (не про «своїх»)
+let seenLost = new Set(), lostHtml = "";
+function renderLost(msg) {
+  const list = msg.lost || [], box = document.getElementById("lost-box");
+  box.hidden = !list.length;
+  const html = list.map(r => `<div class="lost-row" data-id="${r.id}" title="Показати зону пошуку на карті"><span><b>#${r.id}</b> ${esc(r.model_name || "ціль")} · ${Math.round(r.age)} с тому</span>` +
+    `<span class="why">${esc(LOST_UA[r.reason] || "зникла")}</span></div>`).join("");
+  if (html !== lostHtml) { lostHtml = html; document.getElementById("lost-list").innerHTML = html; }
+  const now = new Set(list.map(r => r.id));
+  if (!firstMsg && !PANEL) list.forEach(r => { if (!seenLost.has(r.id) && r.side !== "friend") toast({ level: "WARNING", text: "Ціль #" + r.id + " зникла: " + (LOST_UA[r.reason] || "") }); });
+  seenLost = now;
+}
+document.getElementById("lost-list").addEventListener("click", e => {
+  const row = e.target.closest(".lost-row"); if (!row || PANEL || !S.map) return;
+  const r = ((S.state && S.state.lost) || []).find(x => x.id === +row.dataset.id);
+  if (r) S.map.easeTo({ center: toLL(r.search.fx, r.search.fy), duration: 600 });
+});
 
 // Після відтворення таблиця цілей має перемалюватись, навіть якщо живий кадр не змінився
 export function invalidateTable() { lastTbody = null; }

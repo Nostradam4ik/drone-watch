@@ -705,3 +705,35 @@ def test_targets_glide_between_scan_frames(server, browser):
     assert xs[4] == 5000
     ctx.close()
     assert not errors, "\n".join(errors)
+
+
+# ---------- прогноз і втрачені цілі ----------
+def lost(tid: int, reason: str = "dive", side: str = "enemy", age: float = 12.0, **kw: Any) -> dict[str, Any]:
+    r = {"id": tid, "age": age, "reason": reason, "x": 100.0, "y": 50.0, "z": 40.0, "vx": 10.0, "vy": 0.0, "model_name": "Герань-2",
+         "side": side, "level": "WARNING", "err": 6.0, "search": {"fx": 220.0, "fy": 50.0, "r": 30.0}}
+    r.update(kw)
+    return r
+
+
+def test_lost_targets_are_listed_with_a_reason_and_announced_once(dash):
+    page = dash.page
+    expect(page.locator("#lost-box")).to_be_hidden()   # поки нікого не втрачено, блоку немає
+    dash.push(dash.state(tracks=[track(1)]))            # перший кадр: нічого не оголошуємо
+    dash.push(dash.state(tracks=[track(1)], lost=[lost(7), lost(8, "low", side="friend")]))
+    expect(page.locator("#lost-box")).to_be_visible()
+    expect(page.locator("#lost-list .lost-row")).to_have_count(2)
+    expect(page.locator('#lost-list .lost-row[data-id="7"]')).to_contain_text("імовірно впала")
+    toasts = page.locator("#toast .toast.WARNING")
+    expect(toasts).to_have_count(1)                      # тост лише про чужу ціль: про «свого» не лякаємо
+    expect(toasts.first).to_contain_text("#7")
+    dash.push(dash.state(tracks=[track(1)], lost=[lost(7, age=13.0), lost(8, "low", side="friend")]))
+    expect(toasts).to_have_count(1)                      # той самий запис удруге не оголошується
+
+
+def test_untrusted_lost_text_is_escaped_and_forecast_toggle_exists(dash):
+    dash.push(dash.state(lost=[lost(9, "unknown", model_name="<img src=x onerror=window.__pwned=1>")]))
+    expect(dash.page.locator("#lost-list .lost-row")).to_contain_text("<img src=x")
+    assert dash.page.locator("#lost-list img").count() == 0
+    assert dash.page.evaluate("window.__pwned") is None
+    dash.page.locator("#legend-toggle").click()
+    expect(dash.page.locator("#fc-on")).to_be_checked()   # прогноз за замовчуванням увімкнено

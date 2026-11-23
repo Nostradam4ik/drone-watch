@@ -24,10 +24,11 @@ from typing import Any, Literal, TypedDict
 import numpy as np
 
 from dronewatch.fusion.models import Floats, Sensor
-from dronewatch.fusion.tracker import Tracker
+from dronewatch.fusion.tracker import MAX_MISSES, MERGE_DIST, RADAR_MISS_LIMIT, Track, Tracker
 from dronewatch.service.audit import AuditEntry, AuditError, AuditLog
 from dronewatch.service.auth import SensorAuth
 from dronewatch.service.catalog import DRONES, UNKNOWN_MODEL, describe
+from dronewatch.service.forecast import EDGE_FRACTION, LOST_KEEP_S, forecast, loss_reason, search_area
 from dronewatch.service.replay import SIDE_CODE, ReplayOptions, ReplayRecorder
 
 log = logging.getLogger("dronewatch.engine")
@@ -159,6 +160,8 @@ class Engine:
         self.idents: dict[int, dict[str, Counter[str]]] = {}
         self.dive_scans: dict[int, int] = {}   # track_id -> скільки сканів поспіль ціль пікірує
         self.z_hist: dict[int, deque[tuple[float, float]]] = {}   # track_id -> (час, висота) за останні секунди
+        self.snaps: dict[int, dict[str, Any]] = {}   # track_id -> останній відомий стан підтвердженої цілі (для розбору зникнення)
+        self.lost: dict[int, dict[str, Any]] = {}    # track_id -> запис про зниклу ціль (показуємо LOST_KEEP_S секунд)
         # Один замок на весь змінюваний стан: його беруть і HTTP-потоки (ingest, state), і потік MQTT, і цикл сканів.
         self.lock = threading.Lock()
         self.max_level: dict[int, Level] = {}   # track_id -> найвищий рівень, що вже дав тривогу
@@ -197,6 +200,8 @@ class Engine:
         self.idents.clear()
         self.dive_scans.clear()
         self.z_hist.clear()
+        self.snaps.clear()   # новий сеанс: старі треки зникли не самі, а скинуті, тож «втрачених» з них не буде
+        self.lost.clear()
         self.max_level.clear()
         if self.replay is not None:
             try:
@@ -331,6 +336,7 @@ class Engine:
             self.tracker.step(t, dets, heard=heard, down=down)
             self._assign_idents()
             self._update_dives(t)
+            self._track_losses(t, down)
             for k, v in self.tracker.dropped.items():
                 self.stats[k] += v
             self.stats["scans"] += 1
@@ -414,6 +420,59 @@ class Engine:
             del self.dive_scans[tid]
         for tid in set(self.z_hist) - alive:
             del self.z_hist[tid]
+
+    def _snapshot(self, tr: Track, t: float) -> dict[str, Any]:
+        ident = self._identity(tr.id)
+        zone = self._highest_zone(tr.x[:3])
+        return {"id": tr.id, "t": t, "x": float(tr.x[0]), "y": float(tr.x[1]), "z": float(tr.x[2]),
+                "vx": float(tr.x[3]), "vy": float(tr.x[4]), "vz": float(tr.x[5]),
+                "err": math.sqrt(max(float(tr.P[0, 0] + tr.P[1, 1]), 0.0)), "diving": self.dive_scans.get(tr.id, 0) >= DIVE_SCANS,
+                "alt_known": t - tr.kinds["radar"] <= ALT_RADAR_S, "misses": tr.misses, "radar_miss": tr.radar_miss,
+                "radar_miss_limit": RADAR_MISS_LIMIT, "max_misses": MAX_MISSES, "age": t - (tr.confirmed_at or t),
+                "model_name": ident["model_name"], "side": ident["side"], "level": zone.level if zone else "NONE"}
+
+    def _near_sensor_edge(self, snap: dict[str, Any]) -> bool:
+        """Ціль була на краю дальності кожного датчика (понад EDGE_FRACTION дальності): зникнення схоже на виліт із зони."""
+        fr = [float(np.hypot(snap["x"] - s.pos[0], snap["y"] - s.pos[1])) / s.max_range for s in self.sensors.values()]
+        return bool(fr) and min(fr) > EDGE_FRACTION
+
+    def _track_losses(self, t: float, down: set[str]) -> None:
+        """Помічає підтверджені цілі, що щойно зникли з трекера, і зберігає, де їх бачили востаннє (під self.lock).
+        Злиття дубліката (поруч є інша ціль) і дуже молоді треки (менше min_age_s: це шум) не рахуємо."""
+        conf = {tr.id: tr for tr in self.tracker.confirmed()}
+        for tid in [i for i in self.snaps if i not in conf]:
+            snap = self.snaps.pop(tid)
+            if snap["age"] < self.min_age_s:
+                continue
+            if any(math.hypot(tr.x[0] - snap["x"], tr.x[1] - snap["y"]) < MERGE_DIST for tr in conf.values()):
+                continue   # злито з сусіднім треком, а не втрачено
+            self.lost[tid] = {**snap, "reason": loss_reason(snap, sensors_down=bool(down), edge=self._near_sensor_edge(snap))}
+        for tid in [i for i, r in self.lost.items() if t - r["t"] > LOST_KEEP_S]:
+            del self.lost[tid]
+        while len(self.lost) > 20:
+            del self.lost[min(self.lost, key=lambda i: self.lost[i]["t"])]
+        for tid, tr in conf.items():
+            old = self.snaps.get(tid)
+            if old is None or tr.misses == 0:
+                self.snaps[tid] = self._snapshot(tr, t)   # свіжий вимір: оновлюємо «де бачили востаннє»
+            else:   # екстраполяція без вимірів: лишаємо останню виміряну позицію, оновлюємо лише лічильники мовчання
+                old["misses"], old["radar_miss"] = tr.misses, tr.radar_miss
+
+    def _lost_state(self, t: float) -> list[dict[str, Any]]:
+        out = []
+        for r in sorted(self.lost.values(), key=lambda r: -r["t"]):
+            age = t - r["t"]
+            entry = {"id": r["id"], "age": round(age, 1), "reason": r["reason"], "x": round(r["x"], 1), "y": round(r["y"], 1),
+                     "z": round(r["z"], 1), "vx": round(r["vx"], 1), "vy": round(r["vy"], 1), "model_name": r["model_name"],
+                     "side": r["side"], "level": r["level"], "err": round(r["err"], 1)}
+            if r["reason"] == "dive" and r["vz"] < -0.5 and r["z"] > 0:   # пікірувала: шукаємо там, де вона мала впасти
+                ttg = r["z"] / -r["vz"]
+                entry["search"] = {"fx": round(r["x"] + r["vx"] * ttg, 1), "fy": round(r["y"] + r["vy"] * ttg, 1),
+                                   "r": round(max(r["err"], 15.0), 1)}
+            else:
+                entry["search"] = search_area(r, age)
+            out.append(entry)
+        return out
 
     def _identity(self, track_id: int) -> dict[str, Any]:
         """Що відомо про тип цілі: модель, чия вона й звідки це відомо. Без RF-ідентифікації model = None.
@@ -567,12 +626,13 @@ class Engine:
                 # скільки секунд до землі за поточної швидкості зниження (лише коли ціль знижується)
                 "ttg": round(float(tr.x[2]) / -float(tr.x[5]), 1) if alt_known and tr.x[5] < -0.5 and tr.x[2] > 0 else None,
                 "alt_known": alt_known,
+                "forecast": forecast(tr.x, tr.P),
                 **ident,
             })
         out: dict[str, Any] = {
             "t": round(t, 1), "tracks": tracks, "stats": dict(self.stats), "calibration": self.calibration,
             "sensors": list(self._sensor_status().values()), "layout_rev": self.layout_rev,
-            "tentative": sum(1 for tr in self.tracker.tracks if tr.state == "TENTATIVE")}
+            "tentative": sum(1 for tr in self.tracker.tracks if tr.state == "TENTATIVE"), "lost": self._lost_state(t)}
         if truth is not None:
             out["truth"] = {k: [round(float(v), 1) for v in p[:3]] for k, p in truth.items()}
         return out
