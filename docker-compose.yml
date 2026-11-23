@@ -153,7 +153,7 @@ services:
 
   qdrant:                         # лише з профілем ai: векторне сховище минулих інцидентів для AI-асистента
     profiles: ["ai"]
-    image: qdrant/qdrant:v1.18.0
+    image: qdrant/qdrant:v1.20.2
     volumes:
       - qdrant-data:/qdrant/storage
     restart: unless-stopped
