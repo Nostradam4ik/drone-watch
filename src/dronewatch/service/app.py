@@ -9,11 +9,12 @@ import logging
 import math
 import os
 import re
+import socket
 import sqlite3
 import time
 import uuid
 import zlib
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager, closing
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -26,7 +27,7 @@ from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, Resp
 from pydantic import BaseModel, ConfigDict, Field
 
 from dronewatch.fusion.models import Sensor
-from dronewatch.service import config, coverage, dashboard_redis, dashboard_web, layout
+from dronewatch.service import config, coverage, dashboard_redis, dashboard_web, ha, layout
 from dronewatch.service.ai import agent
 from dronewatch.service.ai.errors import AiUnavailable
 from dronewatch.service.ai.llm import MistralClient
@@ -126,6 +127,7 @@ class Runtime:
     map_online: bool = False       # дозвіл на онлайн-тайли (лише коли власного файлу немає)
     los: LineOfSight | None = None   # рельєф і будинки для лінії видимості в покритті (None: файлів немає чи вони зіпсовані)
     target_alt: float = coverage.TARGET_ALT_M
+    ha: ha.HaState | None = None   # HA (резерв/лідер); None: одна копія, поведінка як раніше
     audit_status: VerifyResult | None = None   # результат перевірки ланцюжка журналу дій при старті (None: не перевірялось)
 
 
@@ -142,7 +144,8 @@ OperatorDep = Annotated[Identity, Depends(require_role("operator"))]
 AdminDep = Annotated[Identity, Depends(require_role("admin"))]
 
 
-def build_engine(cfg: config.Config, sensors: list[Sensor], db_path: str, zones: list[Zone] | None = None) -> Engine:
+def build_engine(cfg: config.Config, sensors: list[Sensor], db_path: str, zones: list[Zone] | None = None,
+                 standby: bool = False) -> Engine:
     required = cfg.mode == "live" and cfg.auth.mode == "required"
     auth = SensorAuth({s.id: s.key_sha256 for s in cfg.sensors if s.key_sha256}) if required else None
     if cfg.mode == "live" and auth is None:
@@ -154,7 +157,7 @@ def build_engine(cfg: config.Config, sensors: list[Sensor], db_path: str, zones:
                   max_events_per_sensor=cfg.max_events_per_sensor_scan, max_tracks=cfg.max_tracks, auth=auth,
                   origin=(cfg.origin.lat, cfg.origin.lon),
                   replay=ReplayOptions(cfg.replay.before_s, cfg.replay.after_s, cfg.replay.step_s, cfg.replay.retention_days)
-                  if cfg.replay.enabled else None)
+                  if cfg.replay.enabled else None, standby=standby)
 
 
 def build_mqtt(cfg: config.Config, engine: Engine) -> MqttIngest | None:
@@ -213,15 +216,44 @@ def build_runtime(cfg: config.Config) -> Runtime:
     sensors = make_sensors() if demo else config.build_sensors(cfg)   # demo: датчики симулятора, інакше з конфігу
     db_path = default_db_path()
     map_file = Path(cfg.map.pmtiles)
-    engine = build_engine(cfg, sensors, db_path, layout.derive_zones(sensors) if demo else None)   # demo: зони з радарів, а не з конфігу
+    engine = build_engine(cfg, sensors, db_path, layout.derive_zones(sensors) if demo else None,   # demo: зони з радарів, а не з конфігу
+                          standby=cfg.ha.enabled)
     if demo:
         engine.calibration = {"done": True, "note": "еталонний політ + компенсація затримок"}
     else:
         engine.calibration = config.calibration_note(cfg)
-    return Runtime(engine=engine, demo=demo, db_path=db_path, demo_src=DemoSource(sensors) if demo else None,
-                   mqtt=build_mqtt(cfg, engine), ai=build_ai(cfg),
-                   map_file=map_file if map_file.is_file() else None, map_online=cfg.map.online_tiles,
-                   los=load_line_of_sight(cfg), target_alt=cfg.map.target_alt_m)
+    rt = Runtime(engine=engine, demo=demo, db_path=db_path, demo_src=DemoSource(sensors) if demo else None,
+                 mqtt=build_mqtt(cfg, engine), ai=build_ai(cfg),
+                 map_file=map_file if map_file.is_file() else None, map_online=cfg.map.online_tiles,
+                 los=load_line_of_sight(cfg), target_alt=cfg.map.target_alt_m)
+    rt.ha = build_ha(cfg, rt)
+    return rt
+
+
+def build_ha(cfg: config.Config, rt: Runtime) -> ha.HaState | None:
+    """HA: оренда лідера в Redis. Redis недоступний при старті: сервіс не стартує (fail-closed, як для сесій).
+    Підвищення відкриває справжній БД і перевіряє ланцюжок журналу; пониження повертає рушій у пам'ять."""
+    if not cfg.ha.enabled:
+        return None
+    url = os.environ.get("DRONEWATCH_HA_REDIS_URL") or cfg.ha.redis_url
+    assert url   # config._check вимагає redis_url при ha.enabled
+    check_redis_url(url)
+    client = dashboard_redis.connect(url)
+    # HA_INSTANCE_ID потрібен, коли копії ділять hostname (наприклад, один мережевий простір у docker-compose)
+    owner = os.environ.get("HA_INSTANCE_ID") or (socket.gethostname() if cfg.ha.instance_id == "auto" else cfg.ha.instance_id)
+
+    def promote(epoch: int) -> None:
+        rt.engine.activate(rt.db_path, epoch)
+        rt.audit_status = check_audit_chain(rt)
+
+    elector = ha.Elector(ha.RedisLeaseStore(client), owner, cfg.ha.lease_ttl_s, on_promote=promote,
+                         on_demote=lambda role: rt.engine.deactivate())
+    def relayed(events: list[dict[str, Any]]) -> None:
+        if elector.role is ha.Role.STANDBY:   # власні публікації лідер отримує назад: другий раз їх рахувати не можна
+            rt.engine.ingest_detailed(events, trusted=True)
+
+    log.warning("HA: копія %s, резерв; оренда %.0f с", owner, cfg.ha.lease_ttl_s)
+    return ha.HaState(elector, owner, relay=ha.RedisEventRelay(client), on_relay=relayed)
 
 
 def check_audit_chain(rt: Runtime) -> VerifyResult | None:
@@ -247,6 +279,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     cfg = config.load(os.environ.get("CONFIG", BASE / "config.yaml"))
     runtime = build_runtime(cfg)
     runtime.audit_status = check_audit_chain(runtime)
+    if runtime.ha:
+        runtime.ha.start()
     if runtime.mqtt:
         runtime.mqtt.start()
     app.state.runtime = runtime
@@ -257,6 +291,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     runtime.scan_task.cancel()
     if runtime.mqtt:
         runtime.mqtt.stop()
+    if runtime.ha:
+        runtime.ha.shutdown()
 
 
 def build_dashboard_access(cfg: config.Config) -> DashboardAccess:
@@ -285,6 +321,23 @@ def build_dashboard_access(cfg: config.Config) -> DashboardAccess:
 
 app = FastAPI(title="Drone Watch", lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)   # схема API не публічна
 app.include_router(dashboard_web.router)
+HA_OPEN_PATHS = frozenset({"/readyz", "/api/health"})   # лише вони відповідають і резерву: балансувальнику й моніторингу
+HA_CHANGING_METHODS = frozenset({"POST", "PUT", "PATCH", "DELETE"})
+
+
+@app.middleware("http")
+async def ha_gate(request: Request, call_next: Callable[[Request], Awaitable[Response]]) -> Response:
+    """Резерв нічого не віддає людям (його треки мають інші номери, ніж у лідера); лідер без оренди (DEGRADED) віддає перегляд і
+    приймає події датчиків, але змін не робить. Без HA ворота нічого не змінюють. Це другий рубіж: перший `/readyz` у балансувальника."""
+    rt: Runtime | None = getattr(request.app.state, "runtime", None)
+    if rt is not None and rt.ha is not None and request.url.path not in HA_OPEN_PATHS:
+        role = rt.ha.elector.role
+        if role is ha.Role.STANDBY or (role is ha.Role.DEGRADED and request.method in HA_CHANGING_METHODS
+                                        and request.url.path != "/api/events"):
+            return JSONResponse({"detail": "Ця копія зараз резерв чи без оренди лідера"}, status_code=503, headers={"Retry-After": "3"})
+    return await call_next(request)
+
+
 app.middleware("http")(dashboard_web.add_security_headers)
 app.add_middleware(dashboard_web.BodyLimitMiddleware)   # зовнішній шар: завелике тіло відсікається до будь-якого розбору
 
@@ -293,6 +346,13 @@ app.add_middleware(dashboard_web.BodyLimitMiddleware)   # зовнішній ш�
 async def session_store_error(request: Request, exc: SessionStoreError) -> JSONResponse:
     """Спільне сховище сесій недоступне: 503 (fail-closed), без подробиць."""
     return JSONResponse({"detail": "Сховище сесій недоступне"}, status_code=503, headers={"Retry-After": "5"})
+
+
+@app.exception_handler(ha.NotActiveError)
+@app.exception_handler(ha.FencedError)
+async def ha_not_leader(request: Request, exc: Exception) -> JSONResponse:
+    """Немає чинної оренди (чи її перехопив інший): змін не робимо, 503 без подробиць."""
+    return JSONResponse({"detail": "Немає чинної оренди лідера"}, status_code=503, headers={"Retry-After": "3"})
 
 
 @app.exception_handler(RequestValidationError)
@@ -565,7 +625,20 @@ def health(user: Annotated[str | None, Depends(current_user)], rt: RuntimeDep) -
             "mqtt": rt.mqtt.status() if rt.mqtt else None,
             "audit": ({"ok": rt.audit_status.ok, "rows": rt.audit_status.rows, "broken_at": rt.audit_status.broken_at}
                       if rt.audit_status else None)}   # результат старту, не перевірка зараз: verify() тримає замок рушія
+    if rt.ha is not None:
+        body["ha"] = {"role": rt.ha.elector.role.value, "epoch": rt.ha.elector.epoch, "instance": rt.ha.instance_id}
     return body if scanning else JSONResponse(body, status_code=503)
+
+
+@app.get("/readyz", include_in_schema=False)
+def readyz(rt: RuntimeDep) -> JSONResponse:
+    """Для балансувальника: 200 лише там, де люди бачать систему. Без HA завжди готові; резерв 503; DEGRADED 200 (інакше при
+    падінні Redis не лишилось би жодної копії, що показує тривоги)."""
+    if rt.ha is None:
+        return JSONResponse({"ready": True, "role": "single"})
+    role = rt.ha.elector.role
+    ready = role is not ha.Role.STANDBY
+    return JSONResponse({"ready": ready, "role": role.value}, status_code=200 if ready else 503)
 
 
 @app.get("/api/sensors", dependencies=[Depends(require_role("viewer"))])
@@ -585,6 +658,8 @@ def post_events(events: Annotated[list[Detection], Body(max_length=MAX_HTTP_BATC
     """Ключ датчика в заголовку X-API-Key (не в тілі: тіла частіше потрапляють у логи). Ключ належить одному датчику:
     події інших датчиків у цьому ж запиті відхиляються. 401, якщо жодної події не прийнято через ключ."""
     r = rt.engine.ingest_detailed([{**e.model_dump(), "key": x_api_key} for e in events])
+    if rt.ha is not None and rt.ha.relay is not None and r.relay:
+        rt.ha.relay.publish(r.relay)   # резерв бачить ті самі події (без ключів); збій Redis подій не губить і відповідь не міняє
     if r.unauthorized and not r.accepted:
         return JSONResponse({"detail": "відсутній або хибний ключ датчика (заголовок X-API-Key)"}, status_code=401,
                             headers={"WWW-Authenticate": "ApiKey"})
@@ -684,6 +759,9 @@ def get_audit(ident: AdminDep, request: Request, rt: RuntimeDep, limit: int = 10
 async def ws(websocket: WebSocket) -> None:
     rt: Runtime | None = getattr(websocket.app.state, "runtime", None)
     access: DashboardAccess = getattr(websocket.app.state, "access", None) or DashboardAccess()
+    if rt is not None and rt.ha is not None and rt.ha.elector.role is ha.Role.STANDBY:
+        await websocket.close(code=1013)   # резерв людям нічого не віддає
+        return
     try:
         ident = await asyncio.to_thread(access.identity, websocket)
     except SessionStoreError:

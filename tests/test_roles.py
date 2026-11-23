@@ -15,7 +15,8 @@ from helpers_auth import login_as
 from test_dashboard import FAST, PASSWORD
 
 LAYOUT = {"sensors": [{"id": "r1", "type": "radar-mid", "x": 0, "y": 0}]}
-ROUTE_ALLOWLIST = {("GET", "/login"), ("POST", "/api/login"), ("POST", "/api/logout"), ("POST", "/api/events"), ("GET", "/api/health")}
+ROUTE_ALLOWLIST = {("GET", "/login"), ("POST", "/api/login"), ("POST", "/api/logout"), ("POST", "/api/events"), ("GET", "/api/health"),
+                   ("GET", "/readyz")}
 
 
 # Статика без входу: лише ці чотири маршрути, що віддають файли зі списків дозволених. Новий маршрут під /static/ має пройти guard

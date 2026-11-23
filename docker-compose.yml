@@ -76,6 +76,62 @@ services:
       mosquitto: {condition: service_healthy}
     restart: unless-stopped
 
+  # ---- HA (профіль ha): активний рушій і гарячий резерв, див. README «Резерв (HA)» ----
+  # Запускати ЯВНО, без звичайного service: docker compose --profile ha up -d --build certs mosquitto redis ha-a ha-b
+  # (інакше звичайний service писав би в той самий файл БД без оренди). Усі три контейнери живуть в одному мережевому просторі
+  # (його тримає redis), бо політика вимагає, щоб redis:// був лише на localhost; для справжнього розгортання візьміть rediss:// з TLS.
+  # Один том incidents на обох: це v1 (один вузол), захищає від падіння процесу, не від втрати вузла.
+  redis:
+    profiles: ["ha"]
+    image: redis:7
+    ports: ["127.0.0.1:8011:8000", "127.0.0.1:8012:8002"]   # 8011 = копія A, 8012 = копія B; сам Redis (6379) назовні не публікується
+    command: ["redis-server", "--bind", "127.0.0.1", "--save", "", "--appendonly", "no"]
+    restart: unless-stopped
+
+  ha-a:
+    profiles: ["ha"]
+    build: {context: ., dockerfile: docker/service.Dockerfile}
+    network_mode: "service:redis"
+    environment: &ha-env
+      CONFIG: /config/config.yaml
+      TLS_CERT_FILE: /tls/http.crt
+      TLS_KEY_FILE: /tls/http.key
+      TLS_CA_FILE: /certs/ca.crt
+      MQTT_HOST: mosquitto
+      MQTT_PORT: 8883
+      MQTT_CA_CERT: /certs/ca.crt
+      MQTT_USER: dronewatch-service
+      MQTT_PASSWORD: "8DgvEHMEllwyXmx4bD_eWc0NOTz690ll"   # ДЕМО-пароль (хеш у deploy/mosquitto.passwd)
+      HA_INSTANCE_ID: ha-a   # копії ділять hostname (один мережевий простір), тож імена задаємо явно
+    volumes: &ha-volumes
+      - ./deploy/config.ha.yaml:/config/config.yaml:ro
+      - ./data/map:/app/data/map:ro
+      - incidents:/data
+      - certs-ca:/certs:ro
+      - certs-http:/tls:ro
+    depends_on:
+      certs: {condition: service_completed_successfully}
+      mosquitto: {condition: service_healthy}
+      redis: {condition: service_started}
+    restart: unless-stopped
+
+  ha-b:
+    profiles: ["ha"]
+    build: {context: ., dockerfile: docker/service.Dockerfile}
+    network_mode: "service:redis"
+    environment:
+      <<: *ha-env
+      PORT: 8002
+      HA_INSTANCE_ID: ha-b
+      MQTT_USER: dronewatch-service-2   # власний логін: брокер ставить client_id = логін
+      MQTT_PASSWORD: "SPvOEozcD0Sshfj1zbAQ3ARsM1hKug2W"   # ДЕМО-пароль (хеш у deploy/mosquitto.passwd)
+    volumes: *ha-volumes
+    depends_on:
+      certs: {condition: service_completed_successfully}
+      mosquitto: {condition: service_healthy}
+      redis: {condition: service_started}
+    restart: unless-stopped
+
   sandbox:                        # лише з профілем sandbox: демо-режим із розстановкою датчиків мишею, https://localhost:8001
     profiles: ["sandbox"]
     build: {context: ., dockerfile: docker/service.Dockerfile}
