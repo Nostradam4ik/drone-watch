@@ -9,6 +9,7 @@ import logging
 import math
 import os
 import re
+import socket
 import sqlite3
 import time
 import uuid
@@ -26,7 +27,7 @@ from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, Resp
 from pydantic import BaseModel, ConfigDict, Field
 
 from dronewatch.fusion.models import Sensor
-from dronewatch.service import config, coverage, dashboard_redis, dashboard_web, layout
+from dronewatch.service import config, coverage, dashboard_redis, dashboard_web, ha, layout
 from dronewatch.service.ai import agent
 from dronewatch.service.ai.errors import AiUnavailable
 from dronewatch.service.ai.llm import MistralClient
@@ -126,6 +127,7 @@ class Runtime:
     map_online: bool = False       # дозвіл на онлайн-тайли (лише коли власного файлу немає)
     los: LineOfSight | None = None   # рельєф і будинки для лінії видимості в покритті (None: файлів немає чи вони зіпсовані)
     target_alt: float = coverage.TARGET_ALT_M
+    ha: ha.HaState | None = None   # HA (резерв/лідер); None: одна копія, поведінка як раніше
     audit_status: VerifyResult | None = None   # результат перевірки ланцюжка журналу дій при старті (None: не перевірялось)
 
 
@@ -142,7 +144,8 @@ OperatorDep = Annotated[Identity, Depends(require_role("operator"))]
 AdminDep = Annotated[Identity, Depends(require_role("admin"))]
 
 
-def build_engine(cfg: config.Config, sensors: list[Sensor], db_path: str, zones: list[Zone] | None = None) -> Engine:
+def build_engine(cfg: config.Config, sensors: list[Sensor], db_path: str, zones: list[Zone] | None = None,
+                 standby: bool = False) -> Engine:
     required = cfg.mode == "live" and cfg.auth.mode == "required"
     auth = SensorAuth({s.id: s.key_sha256 for s in cfg.sensors if s.key_sha256}) if required else None
     if cfg.mode == "live" and auth is None:
@@ -154,7 +157,7 @@ def build_engine(cfg: config.Config, sensors: list[Sensor], db_path: str, zones:
                   max_events_per_sensor=cfg.max_events_per_sensor_scan, max_tracks=cfg.max_tracks, auth=auth,
                   origin=(cfg.origin.lat, cfg.origin.lon),
                   replay=ReplayOptions(cfg.replay.before_s, cfg.replay.after_s, cfg.replay.step_s, cfg.replay.retention_days)
-                  if cfg.replay.enabled else None)
+                  if cfg.replay.enabled else None, standby=standby)
 
 
 def build_mqtt(cfg: config.Config, engine: Engine) -> MqttIngest | None:
@@ -213,15 +216,39 @@ def build_runtime(cfg: config.Config) -> Runtime:
     sensors = make_sensors() if demo else config.build_sensors(cfg)   # demo: датчики симулятора, інакше з конфігу
     db_path = default_db_path()
     map_file = Path(cfg.map.pmtiles)
-    engine = build_engine(cfg, sensors, db_path, layout.derive_zones(sensors) if demo else None)   # demo: зони з радарів, а не з конфігу
+    engine = build_engine(cfg, sensors, db_path, layout.derive_zones(sensors) if demo else None,   # demo: зони з радарів, а не з конфігу
+                          standby=cfg.ha.enabled)
     if demo:
         engine.calibration = {"done": True, "note": "еталонний політ + компенсація затримок"}
     else:
         engine.calibration = config.calibration_note(cfg)
-    return Runtime(engine=engine, demo=demo, db_path=db_path, demo_src=DemoSource(sensors) if demo else None,
-                   mqtt=build_mqtt(cfg, engine), ai=build_ai(cfg),
-                   map_file=map_file if map_file.is_file() else None, map_online=cfg.map.online_tiles,
-                   los=load_line_of_sight(cfg), target_alt=cfg.map.target_alt_m)
+    rt = Runtime(engine=engine, demo=demo, db_path=db_path, demo_src=DemoSource(sensors) if demo else None,
+                 mqtt=build_mqtt(cfg, engine), ai=build_ai(cfg),
+                 map_file=map_file if map_file.is_file() else None, map_online=cfg.map.online_tiles,
+                 los=load_line_of_sight(cfg), target_alt=cfg.map.target_alt_m)
+    rt.ha = build_ha(cfg, rt)
+    return rt
+
+
+def build_ha(cfg: config.Config, rt: Runtime) -> ha.HaState | None:
+    """HA: оренда лідера в Redis. Redis недоступний при старті: сервіс не стартує (fail-closed, як для сесій).
+    Підвищення відкриває справжній БД і перевіряє ланцюжок журналу; пониження повертає рушій у пам'ять."""
+    if not cfg.ha.enabled:
+        return None
+    url = os.environ.get("DRONEWATCH_HA_REDIS_URL") or cfg.ha.redis_url
+    assert url   # config._check вимагає redis_url при ha.enabled
+    check_redis_url(url)
+    client = dashboard_redis.connect(url)
+    owner = socket.gethostname() if cfg.ha.instance_id == "auto" else cfg.ha.instance_id
+
+    def promote(epoch: int) -> None:
+        rt.engine.activate(rt.db_path, epoch)
+        rt.audit_status = check_audit_chain(rt)
+
+    elector = ha.Elector(ha.RedisLeaseStore(client), owner, cfg.ha.lease_ttl_s, on_promote=promote,
+                         on_demote=lambda role: rt.engine.deactivate())
+    log.warning("HA: копія %s, резерв; оренда %.0f с", owner, cfg.ha.lease_ttl_s)
+    return ha.HaState(elector, owner)
 
 
 def check_audit_chain(rt: Runtime) -> VerifyResult | None:
@@ -247,6 +274,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     cfg = config.load(os.environ.get("CONFIG", BASE / "config.yaml"))
     runtime = build_runtime(cfg)
     runtime.audit_status = check_audit_chain(runtime)
+    if runtime.ha:
+        runtime.ha.start()
     if runtime.mqtt:
         runtime.mqtt.start()
     app.state.runtime = runtime
@@ -257,6 +286,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     runtime.scan_task.cancel()
     if runtime.mqtt:
         runtime.mqtt.stop()
+    if runtime.ha:
+        runtime.ha.shutdown()
 
 
 def build_dashboard_access(cfg: config.Config) -> DashboardAccess:

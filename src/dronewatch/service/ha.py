@@ -10,6 +10,7 @@ import logging
 import threading
 import time
 from collections.abc import Callable
+from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Any, Protocol
 
@@ -200,3 +201,22 @@ def run_forever(elector: Elector, stop: threading.Event) -> None:
         except Exception:
             log.exception("HA: збій кроку оренди")
         stop.wait(interval)
+
+
+@dataclass
+class HaState:
+    """Усе, що сервіс тримає для HA: автомат ролей, потік поновлення й ім'я цієї копії."""
+    elector: Elector
+    instance_id: str
+    stop: threading.Event = field(default_factory=threading.Event)
+    thread: threading.Thread | None = None
+
+    def start(self) -> None:
+        self.thread = threading.Thread(target=run_forever, args=(self.elector, self.stop), name="dw-ha", daemon=True)
+        self.thread.start()
+
+    def shutdown(self) -> None:
+        self.stop.set()
+        if self.thread is not None:
+            self.thread.join(timeout=5)
+        self.elector.stop()
