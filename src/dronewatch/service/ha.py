@@ -248,6 +248,16 @@ class Elector:
             except LeaseStoreError:
                 log.exception("HA: не вдалося підняти лічильник epoch")
             return
+        except Exception:
+            # Оренду взято, але зробити лідером не вдалось (напр. сховище лежить між acquire і activate): віддаємо оренду,
+            # інакше копія й сам кластер чекали б до кінця ttl. Помилку не ковтаємо мовчки: стек у лог.
+            log.exception("HA: підвищення не вдалося, віддаю оренду epoch %d", epoch)
+            self.epoch, self.role = None, Role.STANDBY
+            try:
+                self.store.release(self.owner, epoch)
+            except LeaseStoreError:
+                log.warning("HA: не вдалося віддати оренду, резерв чекатиме ttl")
+            return
         self.epoch, self.role, self._valid_until = epoch, Role.LEADER, t0 + self.ttl_s
         log.warning("HA: я лідер, epoch %d", epoch)
 

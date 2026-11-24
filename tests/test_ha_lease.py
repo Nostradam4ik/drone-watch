@@ -170,6 +170,24 @@ def test_fenced_on_promote_releases_raises_epoch_and_retries():
     assert e.role is Role.LEADER and e.epoch > 50
 
 
+def test_promote_failure_releases_lease_and_stays_standby():
+    """Оренду взято, а відкрити сховище не вдалось (збій БД між acquire і activate): віддаємо оренду, щоб не чекати ttl."""
+    c = Clock()
+    s = FakeStore(c)
+    attempts: list[int] = []
+
+    def promote(epoch: int) -> None:
+        attempts.append(epoch)
+        if len(attempts) == 1:
+            raise RuntimeError("сховище недоступне")
+
+    e = make(s, c, on_promote=promote)
+    e.step()
+    assert e.role is Role.STANDBY and e.epoch is None and s.released == [("a", 1)]
+    e.step()
+    assert e.role is Role.LEADER and e.epoch == 2
+
+
 def test_stop_releases_lease():
     c = Clock()
     s = FakeStore(c)
