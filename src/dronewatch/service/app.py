@@ -58,6 +58,7 @@ from dronewatch.service.dashboard_web import (
 )
 from dronewatch.service.demo import DemoSource, make_sensors
 from dronewatch.service.engine import Alert, Engine, SensorStatus, Zone
+from dronewatch.service.ha import HaState
 from dronewatch.service.mqtt_in import MqttIngest
 from dronewatch.service.occlusion import Buildings, LineOfSight
 from dronewatch.service.replay import ReplayOptions, read_replay
@@ -127,7 +128,7 @@ class Runtime:
     map_online: bool = False       # дозвіл на онлайн-тайли (лише коли власного файлу немає)
     los: LineOfSight | None = None   # рельєф і будинки для лінії видимості в покритті (None: файлів немає чи вони зіпсовані)
     target_alt: float = coverage.TARGET_ALT_M
-    ha: ha.HaState | None = None   # HA (резерв/лідер); None: одна копія, поведінка як раніше
+    ha: HaState | None = None   # HA (резерв/лідер); None: одна копія, поведінка як раніше
     audit_status: VerifyResult | None = None   # результат перевірки ланцюжка журналу дій при старті (None: не перевірялось)
 
 
