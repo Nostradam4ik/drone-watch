@@ -164,6 +164,15 @@ class HaCfg(BaseModel):
     instance_id: str = "auto"      # імʼя копії; auto = hostname
 
 
+class StorageCfg(BaseModel):
+    """Де лежать інциденти, рішення, replay і журнал дій. sqlite: файл (типово). postgres: лише з ha.enabled (HA на двох вузлах)."""
+    backend: Literal["sqlite", "postgres"] = "sqlite"
+    # postgresql://user@a:5432,b:5432/db?sslmode=verify-full&target_session_attrs=read-write; пароль лише в DRONEWATCH_PG_PASSWORD
+    dsn: str | None = None
+    connect_timeout_s: float = Field(default=2.0, gt=0, le=30)
+    statement_timeout_s: float = Field(default=3.0, gt=0, le=60)
+
+
 class Config(BaseModel):
     mode: Literal["demo", "live"] = "demo"
     scan_dt: float = Field(default=0.5, gt=0)
@@ -183,6 +192,7 @@ class Config(BaseModel):
     ai: AiCfg = AiCfg()
     replay: ReplayCfg = ReplayCfg()
     ha: HaCfg = HaCfg()
+    storage: StorageCfg = StorageCfg()
 
     @model_validator(mode="after")
     def _check(self) -> Self:
