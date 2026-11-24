@@ -34,3 +34,11 @@ docs/datasheets/
 .vscode/
 ca.crt
 candidature-fanatics/
+
+# HA-кластер: справжні змінні й сертифікати (ключі CA і вузлів) лише на машинах оператора
+deploy/ha-cluster/.env
+deploy/ha-cluster/.env.*
+!deploy/ha-cluster/env.example
+deploy/ha-cluster/certs/
+deploy/ha-cluster/mosquitto/passwd
+deploy/ha-cluster/mosquitto/acl

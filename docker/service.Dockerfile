@@ -3,8 +3,9 @@ FROM python:3.15-slim
 WORKDIR /app
 # Залежності беруться з pyproject.toml і ставляться окремим шаром: він перезбирається лише при зміні залежностей, а не коду
 COPY pyproject.toml .
-# + extra redis: без нього ні спільні сесії, ні HA (профіль ha) не стартують; на роботу однієї копії він не впливає
-RUN python -c "import tomllib; p = tomllib.load(open('pyproject.toml','rb'))['project']; print('\n'.join(p['dependencies'] + p['optional-dependencies']['redis']))" > /tmp/req.txt \
+# + extra redis: без нього ні спільні сесії, ні HA (профіль ha) не стартують; + extra postgres: HA на двох вузлах (storage.backend:
+# postgres). На роботу однієї копії на SQLite обидва не впливають
+RUN python -c "import tomllib; p = tomllib.load(open('pyproject.toml','rb'))['project']; print('\n'.join(p['dependencies'] + p['optional-dependencies']['redis'] + p['optional-dependencies']['postgres']))" > /tmp/req.txt \
     && pip install --no-cache-dir -r /tmp/req.txt && rm /tmp/req.txt
 COPY src src
 RUN pip install --no-cache-dir --no-deps .

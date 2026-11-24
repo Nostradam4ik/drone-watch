@@ -1,0 +1,139 @@
+# Вузол даних кластера (VPS-A і VPS-B). Той самий файл на обох, різниться лише `.env` (NODE_NAME, NODE_IP, REDIS_REPLICAOF, MQTT_USER).
+# Запуск: docker compose -f docker-compose.node.yml --env-file .env up -d --build
+#
+# Усі порти кластера (etcd, Patroni/PostgreSQL, Redis, Sentinel) опубліковані лише на адресі WireGuard ${NODE_IP}; на публічну
+# адресу ${PUBLIC_BIND} виходять лише MQTT-брокер (датчики) і HTTPS сервісу (дашборд). Усе, крім брокера й дашборда, закрите TLS
+# із взаємною автентифікацією або паролем. Порядок розгортання й перевірок: README.md.
+name: dw-${NODE_NAME:?задайте NODE_NAME у .env}
+
+services:
+  etcd:
+    image: quay.io/coreos/etcd:v3.5.17
+    restart: unless-stopped
+    ports: ["${NODE_IP:?задайте NODE_IP у .env}:2379:2379", "${NODE_IP:?задайте NODE_IP у .env}:2380:2380"]
+    environment:
+      ETCD_NAME: ${NODE_NAME}
+      ETCD_DATA_DIR: /etcd-data
+      ETCD_LISTEN_CLIENT_URLS: https://0.0.0.0:2379
+      ETCD_ADVERTISE_CLIENT_URLS: https://${NODE_IP}:2379
+      ETCD_LISTEN_PEER_URLS: https://0.0.0.0:2380
+      ETCD_INITIAL_ADVERTISE_PEER_URLS: https://${NODE_IP}:2380
+      ETCD_INITIAL_CLUSTER: node-a=https://${A_IP}:2380,node-b=https://${B_IP}:2380,witness=https://${W_IP}:2380
+      ETCD_INITIAL_CLUSTER_TOKEN: ${CLUSTER_SCOPE}
+      ETCD_INITIAL_CLUSTER_STATE: new
+      ETCD_CLIENT_CERT_AUTH: "true"
+      ETCD_TRUSTED_CA_FILE: /certs/ca.crt
+      ETCD_CERT_FILE: /certs/etcd.crt
+      ETCD_KEY_FILE: /certs/etcd.key
+      ETCD_PEER_CLIENT_CERT_AUTH: "true"
+      ETCD_PEER_TRUSTED_CA_FILE: /certs/ca.crt
+      ETCD_PEER_CERT_FILE: /certs/etcd.crt
+      ETCD_PEER_KEY_FILE: /certs/etcd.key
+    volumes:
+      - etcd-data:/etcd-data
+      - ${CERTS_DIR:-./certs}:/certs:ro
+
+  postgres:
+    build: {context: ./patroni}
+    image: dw-patroni:16
+    restart: unless-stopped
+    shm_size: 256mb
+    stop_grace_period: 60s
+    ports: ["${NODE_IP:?задайте NODE_IP у .env}:5432:5432", "${NODE_IP:?задайте NODE_IP у .env}:8008:8008"]
+    environment:
+      CLUSTER_SCOPE: ${CLUSTER_SCOPE}
+      NODE_NAME: ${NODE_NAME}
+      NODE_IP: ${NODE_IP}
+      A_IP: ${A_IP}
+      B_IP: ${B_IP}
+      W_IP: ${W_IP}
+      PG_SUPERUSER_PASSWORD: ${PG_SUPERUSER_PASSWORD:?задайте у .env}
+      PG_REPLICATION_PASSWORD: ${PG_REPLICATION_PASSWORD:?задайте у .env}
+      DW_OWNER_PASSWORD: ${DW_OWNER_PASSWORD:?задайте у .env}
+      DW_APP_PASSWORD: ${DW_APP_PASSWORD:?задайте у .env}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ${CERTS_DIR:-./certs}:/certs:ro
+    depends_on: [etcd]
+
+  redis:
+    image: redis:7
+    restart: unless-stopped
+    entrypoint: ["/bin/sh", "/opt/dw/entrypoint.sh"]
+    ports: ["${NODE_IP:?задайте NODE_IP у .env}:6379:6379"]
+    environment:
+      NODE_IP: ${NODE_IP}
+      REDIS_PASSWORD: ${REDIS_PASSWORD:?задайте у .env}
+      REDIS_REPLICAOF: ${REDIS_REPLICAOF:-}
+    volumes:
+      - ./redis/entrypoint.sh:/opt/dw/entrypoint.sh:ro
+      - redis-data:/data
+      - ${CERTS_DIR:-./certs}:/certs:ro
+
+  sentinel:
+    image: redis:7
+    restart: unless-stopped
+    entrypoint: ["/bin/sh", "/opt/dw/entrypoint.sh"]
+    ports: ["${NODE_IP:?задайте NODE_IP у .env}:26379:26379"]
+    environment:
+      NODE_IP: ${NODE_IP}
+      A_IP: ${A_IP}
+      REDIS_PASSWORD: ${REDIS_PASSWORD:?задайте у .env}
+      REDIS_MASTER_NAME: ${REDIS_MASTER_NAME:-dw}
+    volumes:
+      - ./sentinel/entrypoint.sh:/opt/dw/entrypoint.sh:ro
+      - sentinel-data:/data
+      - ${CERTS_DIR:-./certs}:/certs:ro
+    depends_on: [redis]
+
+  # Власний брокер вузла: датчики публікують в обидва (A і B), копія сервісу читає свій. passwd і acl створює оператор
+  # (mosquitto/acl.example, dronewatch-keygen --mosquitto); вони в .gitignore. Права 0700 і власник mosquitto брокер вимагає сам.
+  mosquitto:
+    image: eclipse-mosquitto:2
+    restart: unless-stopped
+    ports: ["${PUBLIC_BIND:?задайте у .env}:8883:8883"]
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        set -e
+        install -m 0700 -o mosquitto -g mosquitto /run/broker-src/passwd /mosquitto/config/passwd
+        install -m 0700 -o mosquitto -g mosquitto /run/broker-src/acl /mosquitto/config/acl
+        exec /docker-entrypoint.sh /usr/sbin/mosquitto -c /mosquitto/config/mosquitto.conf
+    volumes:
+      - ./mosquitto/mosquitto.conf:/mosquitto/config/mosquitto.conf:ro
+      - ./mosquitto/passwd:/run/broker-src/passwd:ro
+      - ./mosquitto/acl:/run/broker-src/acl:ro
+      - ${CERTS_DIR:-./certs}/ca.crt:/mosquitto/certs-ca/ca.crt:ro
+      - ${CERTS_DIR:-./certs}/broker.crt:/mosquitto/certs-server/server.crt:ro
+      - ${CERTS_DIR:-./certs}/broker.key:/mosquitto/certs-server/server.key:ro
+
+  service:
+    build: {context: ../.., dockerfile: docker/service.Dockerfile}
+    image: dw-service:ha
+    restart: unless-stopped
+    ports: ["${PUBLIC_BIND:?задайте у .env}:8000:8000"]
+    environment:
+      CONFIG: /config/config.yaml
+      TLS_CERT_FILE: /tls/http.crt
+      TLS_KEY_FILE: /tls/http.key
+      TLS_CA_FILE: /certs/ca.crt
+      MQTT_HOST: mosquitto
+      MQTT_PORT: 8883
+      MQTT_CA_CERT: /certs/ca.crt
+      MQTT_USER: ${MQTT_USER:?задайте у .env}
+      MQTT_PASSWORD: ${MQTT_PASSWORD:?задайте у .env}
+      DRONEWATCH_PG_PASSWORD: ${DW_APP_PASSWORD}
+      DRONEWATCH_REDIS_PASSWORD: ${REDIS_PASSWORD}
+      HA_INSTANCE_ID: ${NODE_NAME}
+    volumes:
+      - ./config.cluster.yaml:/config/config.yaml:ro
+      - ${CERTS_DIR:-./certs}/ca.crt:/certs/ca.crt:ro
+      - ${CERTS_DIR:-./certs}/http.crt:/tls/http.crt:ro
+      - ${CERTS_DIR:-./certs}/http.key:/tls/http.key:ro
+    depends_on: [mosquitto]
+
+volumes:
+  etcd-data:
+  pgdata:
+  redis-data:
+  sentinel-data:
