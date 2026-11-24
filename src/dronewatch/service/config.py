@@ -167,6 +167,18 @@ class HaCfg(BaseModel):
     lease_store: Literal["auto", "redis", "postgres"] = "auto"
 
 
+# ПУБЛІЧНІ демо-секрети репозиторію (deploy/config.yaml, docker-compose.yml): їх знає кожен, хто бачив репозиторій. Демо-стенд
+# на SQLite їх використовує навмисно; кластер (storage.backend: postgres) відмовляє, бо він не демо.
+DEMO_DASHBOARD_HASHES = frozenset({
+    "scrypt$16384$8$1$eXh3SgyIi0PXvYt3gCZTBg==$azmH7B819uHU3cmhsJLDBbQXCMXMqxVzisRXbkZbgHw=",
+})
+DEMO_SENSOR_KEY_HASHES = frozenset({
+    "40bc1a2ade19ee4629588e5d5b10674c50e0e178a54c6fea6d7f8b99d3314fff",   # radar1
+    "168f535e4bdfb5f79534a7907ab1a5ac085b4b0001be3b644adef1c91142d679",   # rf1
+    "9594f53087f0a4f60f9b1ceca2f5dac54d6493cca3578caa854ef5ee276d18d8",   # ac1
+})
+
+
 class RedisCfg(BaseModel):
     """Redis Sentinel (HA на двох вузлах і свідку): сесії, ліміт входів і релей подій йдуть на поточний master. Замінює
     `ha.redis_url` і `dashboard.redis_url`. Лише TLS; пароль у DRONEWATCH_REDIS_PASSWORD. Sentinel-ів рівно стільки, щоб був
@@ -232,6 +244,11 @@ class Config(BaseModel):
             if not self.storage.dsn:
                 raise ValueError("storage.backend: postgres вимагає storage.dsn")
             check_pg_dsn(self.storage.dsn)
+            demo_users = [u.name for u in self.dashboard.users if u.password_hash in DEMO_DASHBOARD_HASHES]
+            demo_sensors = [x.id for x in self.sensors if x.key_sha256 in DEMO_SENSOR_KEY_HASHES]
+            if demo_users or demo_sensors:
+                raise ValueError(f"кластер (storage.backend: postgres) не приймає публічні демо-секрети репозиторію (користувачі "
+                                 f"{demo_users}, датчики {demo_sensors}): згенеруйте свої (dronewatch-keygen)")
         if self.ha.lease_store == "auto":
             self.ha.lease_store = "postgres" if self.storage.backend == "postgres" else "redis"
         elif (self.ha.lease_store == "postgres") != (self.storage.backend == "postgres"):

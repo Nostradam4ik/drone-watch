@@ -42,3 +42,7 @@ deploy/ha-cluster/.env.*
 deploy/ha-cluster/certs/
 deploy/ha-cluster/mosquitto/passwd
 deploy/ha-cluster/mosquitto/acl
+deploy/ha-cluster/sim/certs/
+deploy/ha-cluster/sim/.env
+deploy/ha-cluster/sim/config.sim.yaml
+deploy/ha-cluster/sim/mosquitto.passwd

@@ -338,7 +338,9 @@ def test_demo_stack_is_tls_only_and_ships_no_private_keys():
     offenders = []
     skipped_dirs = {".git", ".venv", "venv", "__pycache__", ".mypy_cache", ".ruff_cache", ".pytest_cache"}
     for path in ROOT.rglob("*"):
-        scannable = path.is_file() and not skipped_dirs & set(path.parts) and path.suffix not in (".png", ".pyc", ".db")
+        # deploy/ha-cluster/**/certs: ключі, які оператор чи репетиція (sim) згенерували локально; вони в .gitignore й не потрапляють у репозиторій
+        generated = "ha-cluster" in path.parts and "certs" in path.parts
+        scannable = path.is_file() and not skipped_dirs & set(path.parts) and not generated and path.suffix not in (".png", ".pyc", ".db")
         if scannable and marker in path.read_text(encoding="utf-8", errors="ignore"):
             offenders.append(str(path.relative_to(ROOT)))
     assert not offenders, f"у репозиторії є приватні ключі: {offenders}"

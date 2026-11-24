@@ -40,4 +40,5 @@ EOF
     chown redis:redis /data/redis.conf
 fi
 
-exec gosu redis redis-server /data/redis.conf
+# gosu в образі redis:7 немає; setpriv (util-linux) скидає привілеї так само
+exec setpriv --reuid=redis --regid=redis --init-groups redis-server /data/redis.conf

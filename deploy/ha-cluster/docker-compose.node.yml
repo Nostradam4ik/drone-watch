@@ -98,14 +98,18 @@ services:
         set -e
         install -m 0700 -o mosquitto -g mosquitto /run/broker-src/passwd /mosquitto/config/passwd
         install -m 0700 -o mosquitto -g mosquitto /run/broker-src/acl /mosquitto/config/acl
+        install -d -o mosquitto -g mosquitto /mosquitto/certs-ca /mosquitto/certs-server
+        install -m 0644 -o mosquitto -g mosquitto /run/broker-src/ca.crt /mosquitto/certs-ca/ca.crt
+        install -m 0644 -o mosquitto -g mosquitto /run/broker-src/broker.crt /mosquitto/certs-server/server.crt
+        install -m 0600 -o mosquitto -g mosquitto /run/broker-src/broker.key /mosquitto/certs-server/server.key
         exec /docker-entrypoint.sh /usr/sbin/mosquitto -c /mosquitto/config/mosquitto.conf
     volumes:
       - ./mosquitto/mosquitto.conf:/mosquitto/config/mosquitto.conf:ro
       - ./mosquitto/passwd:/run/broker-src/passwd:ro
       - ./mosquitto/acl:/run/broker-src/acl:ro
-      - ${CERTS_DIR:-./certs}/ca.crt:/mosquitto/certs-ca/ca.crt:ro
-      - ${CERTS_DIR:-./certs}/broker.crt:/mosquitto/certs-server/server.crt:ro
-      - ${CERTS_DIR:-./certs}/broker.key:/mosquitto/certs-server/server.key:ro
+      - ${CERTS_DIR:-./certs}/ca.crt:/run/broker-src/ca.crt:ro
+      - ${CERTS_DIR:-./certs}/broker.crt:/run/broker-src/broker.crt:ro
+      - ${CERTS_DIR:-./certs}/broker.key:/run/broker-src/broker.key:ro
 
   service:
     build: {context: ../.., dockerfile: docker/service.Dockerfile}
@@ -122,6 +126,7 @@ services:
       MQTT_CA_CERT: /certs/ca.crt
       MQTT_USER: ${MQTT_USER:?задайте у .env}
       MQTT_PASSWORD: ${MQTT_PASSWORD:?задайте у .env}
+      PGSSLROOTCERT: /certs/ca.crt   # libpq (verify-full) довіряє лише CA кластера
       DRONEWATCH_PG_PASSWORD: ${DW_APP_PASSWORD}
       DRONEWATCH_REDIS_PASSWORD: ${REDIS_PASSWORD}
       HA_INSTANCE_ID: ${NODE_NAME}

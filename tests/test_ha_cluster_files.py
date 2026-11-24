@@ -86,12 +86,58 @@ def test_real_env_files_are_gitignored():
     assert "deploy/ha-cluster/.env" in ignore and "deploy/ha-cluster/certs/" in ignore
 
 
-def test_cluster_config_loads_and_matches_demo_base():
-    """config.cluster.yaml це deploy/config.yaml плюс блоки storage, ha, redis; датчики й зони не розходяться."""
-    base, cl = config.load(ROOT / "deploy" / "config.yaml"), config.load(CL / "config.cluster.yaml")
+CLUSTER_CONFIG = CL / "config.cluster.yaml"
+DEMO_STRINGS = (
+    "eXh3SgyIi0PXvYt3gCZTBg==",                                           # хеш демо-користувача дашборда
+    "40bc1a2ade19ee4629588e5d5b10674c50e0e178a54c6fea6d7f8b99d3314fff",   # ключі датчиків демо-стенда
+    "168f535e4bdfb5f79534a7907ab1a5ac085b4b0001be3b644adef1c91142d679",
+    "9594f53087f0a4f60f9b1ceca2f5dac54d6493cca3578caa854ef5ee276d18d8",
+    "8DgvEHMEllwyXmx4bD_eWc0NOTz690ll",                                   # демо-пароль логіна брокера dronewatch-service
+    "SPvOEozcD0Sshfj1zbAQ3ARsM1hKug2W",                                   # ... і dronewatch-service-2
+)
+
+
+def test_cluster_config_ships_placeholders_not_demo_secrets():
+    raw = CLUSTER_CONFIG.read_text(encoding="utf-8")
+    assert all(demo not in raw for demo in DEMO_STRINGS)
+    assert "REPLACE_ME_dashboard_hash" in raw and all(f"REPLACE_ME_{sid}" in raw for sid in ("radar1", "rf1", "ac1"))
+    with pytest.raises(SystemExit):   # без заміни плейсхолдерів сервіс не стартує (config.load виходить із помилкою)
+        config.load(CLUSTER_CONFIG)
+
+
+def test_no_public_demo_secrets_anywhere_in_cluster_files():
+    for path in CL.rglob("*"):
+        if path.is_file() and path.suffix in (".yml", ".yaml", ".sh", ".tmpl", ".md", ".example", ".sql", ".conf")                 and "certs" not in path.parts:
+            text_ = path.read_text(encoding="utf-8")
+            for demo in DEMO_STRINGS:
+                assert demo not in text_, f"{path.relative_to(ROOT)} містить публічний демо-секрет"
+
+
+def fill_placeholders(raw: str) -> str:
+    from dronewatch.service.auth import hash_key
+    from dronewatch.service.dashboard_auth import hash_password
+    raw = raw.replace("REPLACE_ME_dashboard_hash", hash_password("a-fresh-long-password"))
+    for sid in ("radar1", "rf1", "ac1"):
+        raw = raw.replace(f"REPLACE_ME_{sid}", hash_key(f"fresh-key-for-{sid}-0123456789"))
+    return raw
+
+
+def test_cluster_config_with_fresh_secrets_loads_and_matches_demo_base(tmp_path):
+    """З підставленими власними секретами конфіг чинний, а решта (датчики, зони, карта) не розходиться з deploy/config.yaml."""
+    filled = tmp_path / "config.yaml"
+    filled.write_text(fill_placeholders(CLUSTER_CONFIG.read_text(encoding="utf-8")), encoding="utf-8")
+    cl = config.load(filled)
     assert cl.storage.backend == "postgres" and cl.ha.enabled and cl.ha.lease_store == "postgres"
     assert cl.redis is not None and len(cl.redis.sentinels) == 3 and cl.redis.ca_cert == "/certs/ca.crt"
-    assert cl.model_copy(update={"storage": base.storage, "ha": base.ha, "redis": base.redis}) == base
+    assert cl.dashboard.session_store == "redis"   # сесії спільні для обох копій
+    base = config.load(ROOT / "deploy" / "config.yaml")
+
+    def strip(c):   # секрети й кластерні блоки відрізняються свідомо
+        sensors = [s.model_copy(update={"key_sha256": None}) for s in c.sensors]
+        return c.model_copy(update={"storage": base.storage, "ha": base.ha, "redis": base.redis, "sensors": sensors,
+                                    "dashboard": base.dashboard.model_copy(update={"users": [], "session_store": "memory"})})
+
+    assert strip(cl) == strip(base)
 
 
 def test_service_image_has_postgres_driver():

@@ -40,4 +40,4 @@ EOF
     chown redis:redis /data/sentinel.conf
 fi
 
-exec gosu redis redis-sentinel /data/sentinel.conf
+exec setpriv --reuid=redis --regid=redis --init-groups redis-sentinel /data/sentinel.conf

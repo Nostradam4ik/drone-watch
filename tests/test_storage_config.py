@@ -171,3 +171,40 @@ def test_audit_cli_verifies_postgres(pg_store, monkeypatch, capsys):
     assert audit_cli.main(["--verify", "--dsn", pg_dsn() or ""]) == 0
     assert "OK: 1" in capsys.readouterr().out
     assert PostgresStore  # імпорт використано
+
+
+# ---- публічні демо-секрети з репозиторію не можна в кластері (storage.backend: postgres)
+DEMO_DASHBOARD_HASH = "scrypt$16384$8$1$eXh3SgyIi0PXvYt3gCZTBg==$azmH7B819uHU3cmhsJLDBbQXCMXMqxVzisRXbkZbgHw="
+DEMO_RADAR_KEY_SHA = "40bc1a2ade19ee4629588e5d5b10674c50e0e178a54c6fea6d7f8b99d3314fff"
+FRESH_SENSOR_KEY_SHA = "a" * 63 + "b"
+PG = {"backend": "postgres", "dsn": GOOD}
+
+
+def secured(users, sensor_key):
+    return {**LIVE, "auth": {"mode": "required"}, "dashboard": {"auth": "required", "users": users},
+            "sensors": [{"id": "r1", "type": "radar", "position": [0, 0], "max_range": 1000, "key_sha256": sensor_key}]}
+
+
+def fresh_user():
+    from dronewatch.service.dashboard_auth import hash_password
+    return {"name": "admin", "role": "admin", "password_hash": hash_password("a-fresh-long-password")}
+
+
+def test_cluster_rejects_demo_dashboard_user():
+    with pytest.raises(ValidationError, match="демо"):
+        config.Config(**secured([{"name": "demo", "role": "admin", "password_hash": DEMO_DASHBOARD_HASH}], FRESH_SENSOR_KEY_SHA),
+                      storage=PG, ha=HA)
+
+
+def test_cluster_rejects_demo_sensor_key():
+    with pytest.raises(ValidationError, match="демо"):
+        config.Config(**secured([fresh_user()], DEMO_RADAR_KEY_SHA), storage=PG, ha=HA)
+
+
+def test_cluster_accepts_fresh_secrets():
+    config.Config(**secured([fresh_user()], FRESH_SENSOR_KEY_SHA), storage=PG, ha=HA)
+
+
+def test_single_node_demo_stand_keeps_working_with_demo_secrets():
+    """Демо-стенд (SQLite, docker-compose) лишається з публічними демо-секретами: запобіжник лише для кластера."""
+    config.Config(**secured([{"name": "demo", "role": "admin", "password_hash": DEMO_DASHBOARD_HASH}], DEMO_RADAR_KEY_SHA))

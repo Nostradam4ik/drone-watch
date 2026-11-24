@@ -1,0 +1,214 @@
+# РЕПЕТИЦІЯ кластера на одній машині: три «машини» (node-a, node-b, witness) із власними адресами в мережі 10.77.0.0/24. Кожна «машина»
+# це контейнер-тримач мережевого простору, а її процеси (etcd, Patroni, Redis, Sentinel, брокер, сервіс) живуть у тому ж просторі,
+# тож бачать одну адресу, як на справжньому VPS. Конфіги ті самі, що й у справжньому розгортанні (patroni/, redis/, sentinel/).
+# Керування: sim/sim.sh up | down | status. Сценарії відмов: ../../../scripts/ha_failover_drill.sh.
+#
+# НЕ для бойового використання (один хост, restart вимкнено: убитий лишається убитим). Секрети (паролі БД і Redis, ключі датчиків,
+# користувач дашборда, логіни брокера) sim.sh генерує випадково при першому `up` у sim/.env та sim/*: публічних демо-секретів тут нема.
+name: dwsim
+
+networks:
+  dwsim:
+    ipam:
+      config: [{subnet: 10.77.0.0/24}]
+
+x-holder: &holder
+  image: alpine:3.20
+  command: ["tail", "-f", "/dev/null"]
+  restart: "no"
+
+x-etcd-env: &etcd-env
+  ETCD_DATA_DIR: /etcd-data
+  ETCD_LISTEN_CLIENT_URLS: https://0.0.0.0:2379
+  ETCD_LISTEN_PEER_URLS: https://0.0.0.0:2380
+  ETCD_INITIAL_CLUSTER: node-a=https://${A_IP}:2380,node-b=https://${B_IP}:2380,witness=https://${W_IP}:2380
+  ETCD_INITIAL_CLUSTER_TOKEN: ${CLUSTER_SCOPE}
+  ETCD_INITIAL_CLUSTER_STATE: new
+  ETCD_CLIENT_CERT_AUTH: "true"
+  ETCD_TRUSTED_CA_FILE: /certs/ca.crt
+  ETCD_CERT_FILE: /certs/etcd.crt
+  ETCD_KEY_FILE: /certs/etcd.key
+  ETCD_PEER_CLIENT_CERT_AUTH: "true"
+  ETCD_PEER_TRUSTED_CA_FILE: /certs/ca.crt
+  ETCD_PEER_CERT_FILE: /certs/etcd.crt
+  ETCD_PEER_KEY_FILE: /certs/etcd.key
+
+x-pg-env: &pg-env
+  CLUSTER_SCOPE: ${CLUSTER_SCOPE}
+  A_IP: ${A_IP}
+  B_IP: ${B_IP}
+  W_IP: ${W_IP}
+  PG_SUPERUSER_PASSWORD: ${PG_SUPERUSER_PASSWORD}
+  PG_REPLICATION_PASSWORD: ${PG_REPLICATION_PASSWORD}
+  DW_OWNER_PASSWORD: ${DW_OWNER_PASSWORD}
+  DW_APP_PASSWORD: ${DW_APP_PASSWORD}
+
+x-service-env: &service-env
+  CONFIG: /config/config.yaml
+  TLS_CERT_FILE: /tls/http.crt
+  TLS_KEY_FILE: /tls/http.key
+  TLS_CA_FILE: /certs/ca.crt
+  MQTT_HOST: localhost
+  MQTT_PORT: 8883
+  MQTT_CA_CERT: /certs/ca.crt
+  PGSSLROOTCERT: /certs/ca.crt
+  DRONEWATCH_PG_PASSWORD: ${DW_APP_PASSWORD}
+  DRONEWATCH_REDIS_PASSWORD: ${REDIS_PASSWORD}
+
+x-broker-cmd: &broker-cmd
+  - |
+    set -e
+    install -m 0700 -o mosquitto -g mosquitto /run/broker-src/passwd /mosquitto/config/passwd
+    install -m 0700 -o mosquitto -g mosquitto /run/broker-src/acl /mosquitto/config/acl
+    install -d -o mosquitto -g mosquitto /mosquitto/certs-ca /mosquitto/certs-server
+    install -m 0644 -o mosquitto -g mosquitto /run/broker-src/ca.crt /mosquitto/certs-ca/ca.crt
+    install -m 0644 -o mosquitto -g mosquitto /run/broker-src/broker.crt /mosquitto/certs-server/server.crt
+    install -m 0600 -o mosquitto -g mosquitto /run/broker-src/broker.key /mosquitto/certs-server/server.key
+    exec /docker-entrypoint.sh /usr/sbin/mosquitto -c /mosquitto/config/mosquitto.conf
+
+services:
+  # ---------- машини ----------
+  node-a:
+    <<: *holder
+    networks: {dwsim: {ipv4_address: 10.77.0.11}}
+    ports: ["127.0.0.1:8101:8000"]
+  node-b:
+    <<: *holder
+    networks: {dwsim: {ipv4_address: 10.77.0.12}}
+    ports: ["127.0.0.1:8102:8000"]
+  witness:
+    <<: *holder
+    networks: {dwsim: {ipv4_address: 10.77.0.13}}
+
+  # ---------- etcd ----------
+  etcd-a:
+    image: quay.io/coreos/etcd:v3.5.17
+    network_mode: "service:node-a"
+    restart: "no"
+    environment: {<<: *etcd-env, ETCD_NAME: node-a, ETCD_ADVERTISE_CLIENT_URLS: "https://${A_IP}:2379", ETCD_INITIAL_ADVERTISE_PEER_URLS: "https://${A_IP}:2380"}
+    volumes: ["./certs/node-a:/certs:ro"]
+  etcd-b:
+    image: quay.io/coreos/etcd:v3.5.17
+    network_mode: "service:node-b"
+    restart: "no"
+    environment: {<<: *etcd-env, ETCD_NAME: node-b, ETCD_ADVERTISE_CLIENT_URLS: "https://${B_IP}:2379", ETCD_INITIAL_ADVERTISE_PEER_URLS: "https://${B_IP}:2380"}
+    volumes: ["./certs/node-b:/certs:ro"]
+  etcd-w:
+    image: quay.io/coreos/etcd:v3.5.17
+    network_mode: "service:witness"
+    restart: "no"
+    environment: {<<: *etcd-env, ETCD_NAME: witness, ETCD_ADVERTISE_CLIENT_URLS: "https://${W_IP}:2379", ETCD_INITIAL_ADVERTISE_PEER_URLS: "https://${W_IP}:2380"}
+    volumes: ["./certs/witness:/certs:ro"]
+
+  # ---------- PostgreSQL під Patroni ----------
+  pg-a:
+    build: {context: ../patroni}
+    image: dw-patroni:16
+    network_mode: "service:node-a"
+    restart: "no"
+    shm_size: 256mb
+    environment: {<<: *pg-env, NODE_NAME: node-a, NODE_IP: "${A_IP}"}
+    volumes: ["./certs/node-a:/certs:ro", "pg-a:/var/lib/postgresql/data"]
+    depends_on: [etcd-a]
+  pg-b:
+    image: dw-patroni:16
+    pull_policy: never
+    network_mode: "service:node-b"
+    restart: "no"
+    shm_size: 256mb
+    environment: {<<: *pg-env, NODE_NAME: node-b, NODE_IP: "${B_IP}"}
+    volumes: ["./certs/node-b:/certs:ro", "pg-b:/var/lib/postgresql/data"]
+    depends_on: [etcd-b]
+
+  # ---------- Redis і Sentinel ----------
+  redis-a:
+    image: redis:7
+    network_mode: "service:node-a"
+    restart: "no"
+    entrypoint: ["/bin/sh", "/opt/dw/entrypoint.sh"]
+    environment: {NODE_IP: "${A_IP}", REDIS_PASSWORD: "${REDIS_PASSWORD}"}
+    volumes: ["../redis/entrypoint.sh:/opt/dw/entrypoint.sh:ro", "redis-a:/data", "./certs/node-a:/certs:ro"]
+  redis-b:
+    image: redis:7
+    network_mode: "service:node-b"
+    restart: "no"
+    entrypoint: ["/bin/sh", "/opt/dw/entrypoint.sh"]
+    environment: {NODE_IP: "${B_IP}", REDIS_PASSWORD: "${REDIS_PASSWORD}", REDIS_REPLICAOF: "${A_IP}"}
+    volumes: ["../redis/entrypoint.sh:/opt/dw/entrypoint.sh:ro", "redis-b:/data", "./certs/node-b:/certs:ro"]
+  sentinel-a:
+    image: redis:7
+    network_mode: "service:node-a"
+    restart: "no"
+    entrypoint: ["/bin/sh", "/opt/dw/entrypoint.sh"]
+    environment: {NODE_IP: "${A_IP}", A_IP: "${A_IP}", REDIS_PASSWORD: "${REDIS_PASSWORD}", REDIS_MASTER_NAME: dw}
+    volumes: ["../sentinel/entrypoint.sh:/opt/dw/entrypoint.sh:ro", "sentinel-a:/data", "./certs/node-a:/certs:ro"]
+    depends_on: [redis-a]
+  sentinel-b:
+    image: redis:7
+    network_mode: "service:node-b"
+    restart: "no"
+    entrypoint: ["/bin/sh", "/opt/dw/entrypoint.sh"]
+    environment: {NODE_IP: "${B_IP}", A_IP: "${A_IP}", REDIS_PASSWORD: "${REDIS_PASSWORD}", REDIS_MASTER_NAME: dw}
+    volumes: ["../sentinel/entrypoint.sh:/opt/dw/entrypoint.sh:ro", "sentinel-b:/data", "./certs/node-b:/certs:ro"]
+    depends_on: [redis-b]
+  sentinel-w:
+    image: redis:7
+    network_mode: "service:witness"
+    restart: "no"
+    entrypoint: ["/bin/sh", "/opt/dw/entrypoint.sh"]
+    environment: {NODE_IP: "${W_IP}", A_IP: "${A_IP}", REDIS_PASSWORD: "${REDIS_PASSWORD}", REDIS_MASTER_NAME: dw}
+    volumes: ["../sentinel/entrypoint.sh:/opt/dw/entrypoint.sh:ro", "sentinel-w:/data", "./certs/witness:/certs:ro"]
+
+  # ---------- брокери й сервіси (стартують після схеми: sim.sh up) ----------
+  mosquitto-a:
+    image: eclipse-mosquitto:2
+    network_mode: "service:node-a"
+    restart: "no"
+    entrypoint: ["/bin/sh", "-c"]
+    command: *broker-cmd
+    volumes:
+      - ../mosquitto/mosquitto.conf:/mosquitto/config/mosquitto.conf:ro
+      - ./mosquitto.passwd:/run/broker-src/passwd:ro
+      - ../mosquitto/acl.example:/run/broker-src/acl:ro
+      - ./certs/node-a/ca.crt:/run/broker-src/ca.crt:ro
+      - ./certs/node-a/broker.crt:/run/broker-src/broker.crt:ro
+      - ./certs/node-a/broker.key:/run/broker-src/broker.key:ro
+  mosquitto-b:
+    image: eclipse-mosquitto:2
+    network_mode: "service:node-b"
+    restart: "no"
+    entrypoint: ["/bin/sh", "-c"]
+    command: *broker-cmd
+    volumes:
+      - ../mosquitto/mosquitto.conf:/mosquitto/config/mosquitto.conf:ro
+      - ./mosquitto.passwd:/run/broker-src/passwd:ro
+      - ../mosquitto/acl.example:/run/broker-src/acl:ro
+      - ./certs/node-b/ca.crt:/run/broker-src/ca.crt:ro
+      - ./certs/node-b/broker.crt:/run/broker-src/broker.crt:ro
+      - ./certs/node-b/broker.key:/run/broker-src/broker.key:ro
+
+  service-a:
+    build: {context: ../../.., dockerfile: docker/service.Dockerfile}
+    image: dw-service:ha
+    network_mode: "service:node-a"
+    restart: "no"
+    environment: {<<: *service-env, HA_INSTANCE_ID: node-a, MQTT_USER: dronewatch-service, MQTT_PASSWORD: "${SIM_MQTT_PW_A}"}
+    volumes: ["./config.sim.yaml:/config/config.yaml:ro", "./certs/node-a/ca.crt:/certs/ca.crt:ro", "./certs/node-a/http.crt:/tls/http.crt:ro", "./certs/node-a/http.key:/tls/http.key:ro"]
+    depends_on: [mosquitto-a]
+  service-b:
+    image: dw-service:ha
+    pull_policy: never
+    network_mode: "service:node-b"
+    restart: "no"
+    environment: {<<: *service-env, HA_INSTANCE_ID: node-b, MQTT_USER: dronewatch-service-2, MQTT_PASSWORD: "${SIM_MQTT_PW_B}"}
+    volumes: ["./config.sim.yaml:/config/config.yaml:ro", "./certs/node-b/ca.crt:/certs/ca.crt:ro", "./certs/node-b/http.crt:/tls/http.crt:ro", "./certs/node-b/http.key:/tls/http.key:ro"]
+    depends_on: [mosquitto-b]
+
+volumes:
+  pg-a:
+  pg-b:
+  redis-a:
+  redis-b:
+  sentinel-a:
+  sentinel-b:
+  sentinel-w:

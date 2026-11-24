@@ -1,23 +1,21 @@
-# Конфігурація сервісу в docker-compose. Змініть датчики й зони на свої.
-# Адресу брокера задає змінна MQTT_HOST у docker-compose.yml.
-#
-# ДЕМО-КЛЮЧІ ДАТЧИКІВ. key_sha256 нижче відповідають ключам, що лежать у docker-compose.yml (сервіс emulator), тобто
-# вони публічні, як і весь цей репозиторій: так стенд працює одразу після `docker compose up`. Для будь-чого, окрім
-# локальної демонстрації, згенеруйте свої (dronewatch-keygen radar1 rf1 ac1), замініть тут хеші й видайте
-# кожен ключ лише своєму датчику.
+# Конфіг сервісу в КЛАСТЕРІ (deploy/ha-cluster). Структура та сама, що в deploy/config.yaml, але БЕЗ публічних демо-секретів:
+# REPLACE_ME_* нижче треба замінити своїми, інакше сервіс не стартує (fail-closed), а кластерний режим окремо відмовляє на демо-секретах.
+#   dronewatch-keygen radar1 rf1 ac1                                        (key_sha256 кожного датчика; ключ датчика видати лише йому)
+#   dronewatch-keygen --dashboard-user admin --role admin --generate         (password_hash користувача дашборда)
+# Адреси 10.10.0.x (WireGuard) замініть на свої. Паролі БД і Redis лише в змінних оточення (DRONEWATCH_PG_PASSWORD, DRONEWATCH_REDIS_PASSWORD).
 mode: live
 scan_dt: 0.5
 sensor_timeout_s: 5   # тиша довше за це = датчик відмовив (емулятор шле heartbeat кожен скан)
 max_events_per_sensor_scan: 150  # стелі проти потопу подій, пояснення в src/dronewatch/service/config.example.yaml
 max_tracks: 200
 
-# ДЕМО-КОРИСТУВАЧ ДАШБОРДА: логін demo, пароль лежить у docker-compose.yml (ДЕМО-секрет, публічний, як і весь репозиторій).
-# Для чогось, окрім локальної демонстрації: dronewatch-keygen --dashboard-user ІМ'Я --role РОЛЬ і замініть рядок нижче.
+# Користувач дашборда: password_hash згенеруйте (див. шапку), роль admin бачить усе, operator вирішує тривоги, viewer лише читає.
 dashboard:
   auth: required
   session_ttl_s: 28800
+  session_store: redis   # сесії й ліміт входів спільні для обох копій (Redis Sentinel): вхід не губиться при перемиканні копії
   users:
-    - {name: demo, role: admin, password_hash: "scrypt$16384$8$1$eXh3SgyIi0PXvYt3gCZTBg==$azmH7B819uHU3cmhsJLDBbQXCMXMqxVzisRXbkZbgHw="}
+    - {name: admin, role: admin, password_hash: "REPLACE_ME_dashboard_hash"}
 
 sensors:
   - id: radar1
@@ -26,21 +24,21 @@ sensors:
     max_range: 1500
     noise: {range_m: 5, azimuth_deg: 0.7, elevation_deg: 1.5}
     latency_s: 0.1
-    key_sha256: "40bc1a2ade19ee4629588e5d5b10674c50e0e178a54c6fea6d7f8b99d3314fff"
+    key_sha256: "REPLACE_ME_radar1"
   - id: rf1
     type: rf
     position: [400, -300]
     max_range: 1800
     noise: {azimuth_deg: 5}
     latency_s: 0.3
-    key_sha256: "168f535e4bdfb5f79534a7907ab1a5ac085b4b0001be3b644adef1c91142d679"
+    key_sha256: "REPLACE_ME_rf1"
   - id: ac1
     type: acoustic
     position: [-300, 200]
     max_range: 700
     noise: {azimuth_deg: 10}
     latency_s: 0.5
-    key_sha256: "9594f53087f0a4f60f9b1ceca2f5dac54d6493cca3578caa854ef5ee276d18d8"
+    key_sha256: "REPLACE_ME_ac1"
 
 zones:
   - {name: "Буферна зона",  radius_m: 600, level: WARNING}
@@ -62,9 +60,7 @@ ai:
   enabled: true
   qdrant_url: http://qdrant:6333   # ім'я сервісу qdrant у мережі docker-compose (профіль ai)
 
-# ---- HA-кластер (deploy/ha-cluster): PostgreSQL під Patroni, Redis Sentinel. Решта файлу копія deploy/config.yaml: при зміні
-# датчиків і зон правте обидва. Адреси нижче (10.10.0.x, адреси WireGuard) замініть на свої; паролі лише в змінних оточення
-# (DRONEWATCH_PG_PASSWORD, DRONEWATCH_REDIS_PASSWORD): у цей файл їх не пишемо. Демо-користувач дашборда вище публічний: замініть.
+# ---- HA-кластер: PostgreSQL під Patroni і Redis Sentinel (адреси 10.10.0.x замініть на свої).
 storage:
   backend: postgres
   dsn: postgresql://dw_app@10.10.0.1:5432,10.10.0.2:5432/dronewatch?sslmode=verify-full&target_session_attrs=read-write
