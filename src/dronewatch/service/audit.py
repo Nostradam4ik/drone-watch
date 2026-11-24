@@ -82,6 +82,8 @@ class AuditLog:
 
     @staticmethod
     def _create_postgres(db: Db) -> None:
+        if db.columns("audit_log") and db.columns("audit_head"):
+            return   # робоча роль dw_app не має права DDL (CREATE/DROP TRIGGER): таблиці й тригери вже створив власник
         """id призначає код (не IDENTITY): послідовність PostgreSQL пропускає значення при відкаті, а ланцюжок вимагає id підряд.
         `audit_head` тримає останній id і хеш; рядок блокується на час вставки, тож додавання йдуть по черзі."""
         db.execute("""CREATE TABLE IF NOT EXISTS audit_log (

@@ -12,7 +12,17 @@ def _t(db: Db) -> tuple[str, str, str]:
     return "INTEGER PRIMARY KEY AUTOINCREMENT", "REAL", "BLOB"
 
 
+_PG_TABLES = ("incidents", "incident_reviews", "ha_epoch", "ha_lease")
+
+
+def _pg_ready(db: Db) -> bool:
+    """Робоча роль dw_app не має права CREATE: якщо власник уже створив таблиці, DDL не виконуємо взагалі."""
+    return all(db.columns(t) for t in _PG_TABLES) and "failover" in db.columns("incidents")
+
+
 def ensure_schema(db: Db) -> None:
+    if db.dialect == "postgres" and _pg_ready(db):
+        return
     pk, real, _ = _t(db)
     db.execute(f"""CREATE TABLE IF NOT EXISTS incidents (
         id {pk}, ts {real}, track_id INTEGER, level TEXT, zone TEXT,
@@ -32,6 +42,8 @@ def ensure_schema(db: Db) -> None:
 
 
 def ensure_replay_schema(db: Db) -> None:
+    if db.dialect == "postgres" and db.columns("incident_replays"):
+        return
     _, real, blob = _t(db)
     db.execute(f"""CREATE TABLE IF NOT EXISTS incident_replays (
         incident_id BIGINT PRIMARY KEY, ts {real}, complete INTEGER, data {blob})""")

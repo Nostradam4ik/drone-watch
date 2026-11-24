@@ -10,6 +10,7 @@ from pydantic import BaseModel, Field, ValidationError, field_validator, model_v
 from dronewatch.fusion.models import Sensor
 from dronewatch.service.dashboard_auth import Role, check_redis_url, parse_hash
 from dronewatch.service.engine import Zone
+from dronewatch.service.store import check_pg_dsn
 
 
 class Noise(BaseModel):
@@ -162,6 +163,8 @@ class HaCfg(BaseModel):
     redis_url: str | None = None   # той самий Redis, що для сесій; закрита внутрішня мережа
     lease_ttl_s: float = Field(default=6.0, ge=2, le=60)   # скільки живе оренда; перемикання не довше за це
     instance_id: str = "auto"      # імʼя копії; auto = hostname
+    # де живе оренда лідера: redis (v1, дані в SQLite) чи postgres (v2, оренда й epoch у тій самій БД, що дані). auto: за storage.backend
+    lease_store: Literal["auto", "redis", "postgres"] = "auto"
 
 
 class StorageCfg(BaseModel):
@@ -201,6 +204,17 @@ class Config(BaseModel):
                 raise ValueError("ha.enabled працює лише з mode: live (демо не має що резервувати)")
             if not self.ha.redis_url:
                 raise ValueError("ha.enabled вимагає ha.redis_url: оренда лідера живе в Redis")
+        if self.storage.backend == "postgres":
+            if not self.ha.enabled:
+                raise ValueError("storage.backend: postgres працює лише з ha.enabled (HA на двох вузлах); одна копія лишається на SQLite")
+            if not self.storage.dsn:
+                raise ValueError("storage.backend: postgres вимагає storage.dsn")
+            check_pg_dsn(self.storage.dsn)
+        if self.ha.lease_store == "auto":
+            self.ha.lease_store = "postgres" if self.storage.backend == "postgres" else "redis"
+        elif (self.ha.lease_store == "postgres") != (self.storage.backend == "postgres"):
+            raise ValueError("ha.lease_store: postgres потребує storage.backend: postgres, а storage.backend: postgres потребує "
+                             "ha.lease_store: postgres (оренда й epoch мають жити в тій самій БД, що й дані)")
         ids = [s.id for s in self.sensors]
         if len(ids) != len(set(ids)):
             raise ValueError("id датчиків мають бути унікальними")

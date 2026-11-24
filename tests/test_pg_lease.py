@@ -194,3 +194,41 @@ def test_public_fence_releases_lock(store):
     started = time.monotonic()
     assert PgLeaseStore(store).acquire("b", 5000) == 2
     assert time.monotonic() - started < 1.5
+
+
+def test_review_missing_incident_releases_fence_lock(store):
+    """Регресія: вихід `return None` після перевірки epoch не повинен лишати FOR SHARE (перехоплення оренди зависло б)."""
+    a_lease = PgLeaseStore(store)
+    eng_a = make_standby()
+    e1 = a_lease.acquire("a", 100)
+    assert e1 is not None
+    eng_a.activate(store, e1)
+    assert eng_a.review_incident(999, "confirmed", "op") is None
+    time.sleep(0.25)
+    started = time.monotonic()
+    assert PgLeaseStore(store).acquire("b", 5000) == 2
+    assert time.monotonic() - started < 1.5
+
+
+def test_review_error_releases_fence_lock(store, monkeypatch):
+    a_lease = PgLeaseStore(store)
+    eng_a = make_standby()
+    e1 = a_lease.acquire("a", 100)
+    assert e1 is not None
+    eng_a.activate(store, e1)
+    iid = _incident(eng_a)
+    orig = eng_a.db.execute
+
+    def boom(sql, params=()):
+        if sql.startswith("INSERT INTO incident_reviews"):
+            raise RuntimeError("boom")
+        return orig(sql, params)
+
+    monkeypatch.setattr(eng_a.db, "execute", boom)
+    with pytest.raises(RuntimeError):
+        eng_a.review_incident(iid, "confirmed", "op")
+    monkeypatch.undo()
+    time.sleep(0.25)
+    started = time.monotonic()
+    assert PgLeaseStore(store).acquire("b", 5000) == 2
+    assert time.monotonic() - started < 1.5

@@ -680,29 +680,39 @@ class Engine:
         clean = (note or "").strip()[:MAX_REVIEW_NOTE] or None
         with self.lock:
             self._fence_locked()
-            if self.db.execute("SELECT 1 FROM incidents WHERE id=?", (incident_id,)).fetchone() is None:
-                return None
-            ts = self.clock()
-            try:
-                self.db.execute("INSERT INTO incident_reviews (incident_id, status, by, ts, note) VALUES (?,?,?,?,?)",
-                                (incident_id, status, by, ts, clean))
-                self.db.execute("UPDATE incidents SET status=?, reviewed_by=?, reviewed_at=?, review_note=? WHERE id=?",
-                                (status, by, ts, clean, incident_id))
-                if audit is not None:
-                    self.audit.append_locked(audit)
-                self.db.commit()
-            except Exception as e:   # не лише sqlite: будь-який збій запису журналу не має лишити напівтранзакцію на спільному зʼєднанні
-                if audit is None:
-                    raise
-                with contextlib.suppress(sqlite3.Error, StoreError):
-                    self.db.rollback()
-                raise AuditError(f"рішення не записано, журнал дій недоступний: {e}") from e
-            for a in self.alerts:
-                if a["id"] == incident_id:
-                    a["status"], a["reviewed_by"], a["reviewed_at"], a["review_note"] = status, by, ts, clean
-            cur = self.db.execute("SELECT * FROM incidents WHERE id=?", (incident_id,))
-            cols = [c[0] for c in cur.description]
-            return dict(zip(cols, cur.fetchone(), strict=True))
+            try:   # finally знімає FOR SHARE на ha_epoch на КОЖНОМУ виході: інакше перехоплення оренди зависло б
+                if self.db.execute("SELECT 1 FROM incidents WHERE id=?", (incident_id,)).fetchone() is None:
+                    return None
+                ts = self.clock()
+                try:
+                    self.db.execute("INSERT INTO incident_reviews (incident_id, status, by, ts, note) VALUES (?,?,?,?,?)",
+                                    (incident_id, status, by, ts, clean))
+                    self.db.execute("UPDATE incidents SET status=?, reviewed_by=?, reviewed_at=?, review_note=? WHERE id=?",
+                                    (status, by, ts, clean, incident_id))
+                    if audit is not None:
+                        self.audit.append_locked(audit)
+                    self.db.commit()
+                except Exception as e:   # не лише sqlite: збій запису журналу не має лишити напівтранзакцію на спільному зʼєднанні
+                    if audit is None:
+                        raise
+                    with contextlib.suppress(sqlite3.Error, StoreError):
+                        self.db.rollback()
+                    raise AuditError(f"рішення не записано, журнал дій недоступний: {e}") from e
+                for a in self.alerts:
+                    if a["id"] == incident_id:
+                        a["status"], a["reviewed_by"], a["reviewed_at"], a["review_note"] = status, by, ts, clean
+                cur = self.db.execute("SELECT * FROM incidents WHERE id=?", (incident_id,))
+                cols = [c[0] for c in cur.description]
+                return dict(zip(cols, cur.fetchone(), strict=True))
+            finally:
+                self._end_txn()
+
+    def _end_txn(self) -> None:
+        """PostgreSQL: закриває транзакцію, що лишилась відкритою (читання після commit, вихід без запису): знімає FOR SHARE і знімок.
+        SQLite: нічого (його поведінка не змінюється)."""
+        if self.db.dialect == "postgres":
+            with contextlib.suppress(StoreError):
+                self.db.rollback()
 
     def incident_stats(self, since_ts: float | None = None) -> list[dict[str, Any]]:
         """Кількість інцидентів за зоною й статусом (NULL = new); since_ts відсікає старіші."""
@@ -710,6 +720,7 @@ class Engine:
             rows = self.db.execute("SELECT zone, COALESCE(status,'new'), count(*) FROM incidents WHERE ts >= ? "
                                    "GROUP BY zone, COALESCE(status,'new') ORDER BY zone, 2",
                                    (since_ts if since_ts is not None else float("-inf"),)).fetchall()
+            self._end_txn()
         return [{"zone": z, "status": st, "count": n} for z, st, n in rows]
 
     # --- вихід

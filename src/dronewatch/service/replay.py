@@ -18,7 +18,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from dronewatch.service.schema import ensure_replay_schema
-from dronewatch.service.store import Db, as_db
+from dronewatch.service.store import Db, SqliteStore, Store, as_db
 
 log = logging.getLogger("dronewatch.replay")
 FORMAT = 1
@@ -120,9 +120,11 @@ class ReplayRecorder:
         self.db.commit()
 
 
-def read_replay(db_path: str, incident_id: int) -> dict[str, Any] | None:
-    """Запис відтворення інциденту або None (запису немає). `complete` false: після тривоги ще дописується."""
-    with closing(sqlite3.connect(db_path)) as db:
+def read_replay(src: "str | Store", incident_id: int) -> dict[str, Any] | None:
+    """Запис відтворення інциденту або None (запису немає). `complete` false: після тривоги ще дописується.
+    `src`: шлях до файлу SQLite або Store."""
+    store = SqliteStore(src) if isinstance(src, str) else src
+    with closing(store.connect(readonly=store.kind == "postgres")) as db:
         row = db.execute("SELECT ts, complete, data FROM incident_replays WHERE incident_id=?", (incident_id,)).fetchone()
     if row is None:
         return None

@@ -61,7 +61,9 @@ from dronewatch.service.engine import Alert, Engine, SensorStatus, Zone
 from dronewatch.service.ha import HaState
 from dronewatch.service.mqtt_in import MqttIngest
 from dronewatch.service.occlusion import Buildings, LineOfSight
+from dronewatch.service.pg_lease import PgLeaseStore
 from dronewatch.service.replay import ReplayOptions, read_replay
+from dronewatch.service.store import SqliteStore, Store, StoreError, open_store, probe
 from dronewatch.service.terrain import Terrain
 
 log = logging.getLogger("dronewatch")
@@ -117,6 +119,7 @@ class Runtime:
     engine: Engine
     demo: bool = False
     db_path: str = field(default_factory=default_db_path)
+    store: Store | None = None   # сховище інцидентів; None: файл SQLite за db_path (одна копія, тести)
     demo_src: DemoSource | None = None
     mqtt: MqttIngest | None = None
     clients: dict[WebSocket, str | None] = field(default_factory=dict)   # вебсокет -> токен сесії (None, коли входу немає)
@@ -130,6 +133,9 @@ class Runtime:
     target_alt: float = coverage.TARGET_ALT_M
     ha: HaState | None = None   # HA (резерв/лідер); None: одна копія, поведінка як раніше
     audit_status: VerifyResult | None = None   # результат перевірки ланцюжка журналу дій при старті (None: не перевірялось)
+
+    def get_store(self) -> Store:
+        return self.store if self.store is not None else SqliteStore(self.db_path)
 
 
 def get_runtime(conn: HTTPConnection) -> Runtime:
@@ -216,6 +222,9 @@ def build_runtime(cfg: config.Config) -> Runtime:
     demo = cfg.mode == "demo"
     sensors = make_sensors() if demo else config.build_sensors(cfg)   # demo: датчики симулятора, інакше з конфігу
     db_path = default_db_path()
+    store = open_store(cfg.storage, db_path)
+    if store.kind == "postgres":
+        probe(store)   # PostgreSQL недоступний (чи нема драйвера) при старті HA: сервіс не стартує, а не працює без сховища мовчки
     map_file = Path(cfg.map.pmtiles)
     engine = build_engine(cfg, sensors, db_path, layout.derive_zones(sensors) if demo else None,   # demo: зони з радарів, а не з конфігу
                           standby=cfg.ha.enabled)
@@ -223,7 +232,7 @@ def build_runtime(cfg: config.Config) -> Runtime:
         engine.calibration = {"done": True, "note": "еталонний політ + компенсація затримок"}
     else:
         engine.calibration = config.calibration_note(cfg)
-    rt = Runtime(engine=engine, demo=demo, db_path=db_path, demo_src=DemoSource(sensors) if demo else None,
+    rt = Runtime(engine=engine, demo=demo, db_path=db_path, store=store, demo_src=DemoSource(sensors) if demo else None,
                  mqtt=build_mqtt(cfg, engine), ai=build_ai(cfg),
                  map_file=map_file if map_file.is_file() else None, map_online=cfg.map.online_tiles,
                  los=load_line_of_sight(cfg), target_alt=cfg.map.target_alt_m)
@@ -244,10 +253,11 @@ def build_ha(cfg: config.Config, rt: Runtime) -> ha.HaState | None:
     owner = os.environ.get("HA_INSTANCE_ID") or (socket.gethostname() if cfg.ha.instance_id == "auto" else cfg.ha.instance_id)
 
     def promote(epoch: int) -> None:
-        rt.engine.activate(rt.db_path, epoch)
+        rt.engine.activate(rt.get_store(), epoch)
         rt.audit_status = check_audit_chain(rt)
 
-    elector = ha.Elector(ha.RedisLeaseStore(client), owner, cfg.ha.lease_ttl_s, on_promote=promote,
+    lease: ha.LeaseStore = PgLeaseStore(rt.get_store()) if cfg.ha.lease_store == "postgres" else ha.RedisLeaseStore(client)
+    elector = ha.Elector(lease, owner, cfg.ha.lease_ttl_s, on_promote=promote,
                          on_demote=lambda role: rt.engine.deactivate())
     def relayed(events: list[dict[str, Any]]) -> None:
         if elector.role is ha.Role.STANDBY:   # власні публікації лідер отримує назад: другий раз їх рахувати не можна
@@ -667,21 +677,25 @@ def post_events(events: Annotated[list[Detection], Body(max_length=MAX_HTTP_BATC
     return {"accepted": r.accepted, "rejected": r.rejected, "unauthorized": r.unauthorized}
 
 
-def read_incidents(db_path: str, limit: int = 100, status: str | None = None) -> list[dict[str, Any]]:
-    # окреме з'єднання на запит, і його треба закривати (раніше воно витікало); LIMIT -1 у SQLite = «без ліміту», тож clamp знизу
-    # status=new відповідає й NULL (рядки, записані до появи рішень оператора)
+def read_incidents(src: str | Store, limit: int = 100, status: str | None = None) -> list[dict[str, Any]]:
+    """`src`: шлях до файлу SQLite або Store. З'єднання окреме на запит і закривається; LIMIT -1 у SQLite = «без ліміту», тож clamp
+    знизу. status=new відповідає й NULL (рядки, записані до появи рішень оператора). PostgreSQL: лише читання."""
     where, args = ("WHERE COALESCE(status,'new') = ?", (status,)) if status else ("", ())
-    with closing(sqlite3.connect(db_path)) as db:
-        db.row_factory = sqlite3.Row
-        rows = db.execute(f"SELECT * FROM incidents {where} ORDER BY id DESC LIMIT ?",
-                          (*args, max(1, min(limit, 1000)))).fetchall()
-        return [dict(r) for r in rows]
+    store = SqliteStore(src) if isinstance(src, str) else src
+    with closing(store.connect(readonly=store.kind == "postgres")) as db:
+        cur = db.execute(f"SELECT * FROM incidents {where} ORDER BY id DESC LIMIT ?", (*args, max(1, min(limit, 1000))))
+        cols = [c[0] for c in cur.description]
+        return [dict(zip(cols, r, strict=True)) for r in cur.fetchall()]
 
 
 @app.get("/api/incidents", dependencies=[Depends(require_role("viewer"))])
 def incidents(rt: RuntimeDep, limit: int = 100,
               status: Literal["new", "confirmed", "dismissed"] | None = None) -> list[dict[str, Any]]:
-    return read_incidents(rt.db_path, limit, status)
+    try:
+        return read_incidents(rt.get_store(), limit, status)
+    except StoreError as e:
+        log.error("журнал інцидентів недоступний: %s", e)   # без тексту драйвера: у ньому може бути адреса сервера
+        raise HTTPException(503, "Сховище інцидентів недоступне") from None
 
 
 @app.get("/api/incidents/{incident_id}/replay", dependencies=[Depends(require_role("viewer"))])
@@ -689,7 +703,10 @@ def incident_replay(incident_id: int, rt: RuntimeDep) -> dict[str, Any]:
     """Кадри цілей навколо тривоги (див. replay.py) для відтворення на карті. Лише читання. 404: інциденту чи запису немає
     (старі інциденти, вимкнений запис, прибрані за терміном)."""
     try:
-        found = read_replay(rt.db_path, incident_id)
+        found = read_replay(rt.get_store(), incident_id)
+    except StoreError as e:
+        log.error("відтворення інциденту %s: сховище недоступне: %s", incident_id, e)
+        raise HTTPException(503, "Сховище інцидентів недоступне") from None
     except (ValueError, sqlite3.Error, zlib.error) as e:   # зіпсований запис: не віддаємо напіввідновлене
         log.error("відтворення інциденту %s не прочитано: %s", incident_id, e)
         raise HTTPException(500, "Запис відтворення пошкоджено") from e

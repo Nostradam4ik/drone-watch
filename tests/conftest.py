@@ -42,6 +42,7 @@ def db_backend(request, tmp_path):
     pytest.importorskip("psycopg")
     store = PostgresStore(dsn, None, 2, 3)
     db = store.connect()
+    db.execute("SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = current_database() AND pid <> pg_backend_pid()")
     db.execute("DROP SCHEMA public CASCADE")
     db.execute("CREATE SCHEMA public")
     db.commit()
@@ -59,6 +60,7 @@ def pg_store():
     from dronewatch.service.store import PostgresStore
     store = PostgresStore(dsn, None, 2, 3)
     db = store.connect()
+    db.execute("SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = current_database() AND pid <> pg_backend_pid()")
     db.execute("DROP SCHEMA public CASCADE")
     db.execute("CREATE SCHEMA public")
     db.commit()

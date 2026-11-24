@@ -158,3 +158,28 @@ def open_store(cfg: "StorageCfg", sqlite_path: str) -> Store:
         assert cfg.dsn   # config._check вимагає dsn при backend=postgres
         return PostgresStore(cfg.dsn, os.environ.get("DRONEWATCH_PG_PASSWORD"), cfg.connect_timeout_s, cfg.statement_timeout_s)
     return SqliteStore(sqlite_path)
+
+
+def check_pg_dsn(dsn: str) -> None:
+    """Політика DSN (fail-closed): лише URL-формат, TLS із перевіркою імені сервера, перехід на поточний master, без пароля в DSN.
+    Тексту DSN у повідомленнях немає: у ньому може бути пароль."""
+    from urllib.parse import parse_qs, urlsplit
+    if not dsn.startswith(("postgresql://", "postgres://")):
+        raise ValueError("storage.dsn: потрібен формат postgresql://user@host:port[,host:port]/db?...")
+    parts = urlsplit(dsn)
+    query = parse_qs(parts.query)
+    if parts.password or "password" in query:
+        raise ValueError("storage.dsn: пароль не пишемо в DSN, він береться зі змінної DRONEWATCH_PG_PASSWORD")
+    if query.get("sslmode") != ["verify-full"]:
+        raise ValueError("storage.dsn: потрібен sslmode=verify-full (TLS із перевіркою імені сервера)")
+    if query.get("target_session_attrs") != ["read-write"]:
+        raise ValueError("storage.dsn: потрібен target_session_attrs=read-write (клієнт сам знаходить поточний master)")
+
+
+def probe(store: Store) -> None:
+    """Старт у режимі HA: недоступне сховище це відмова запуску, а не тихий відкат на пам'ять (fail-closed)."""
+    db = store.connect()
+    try:
+        db.execute("SELECT 1").fetchone()
+    finally:
+        db.close()
