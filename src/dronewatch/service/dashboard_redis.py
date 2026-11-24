@@ -9,6 +9,7 @@ import json
 import logging
 import secrets
 import time
+from collections.abc import Sequence
 from typing import Any
 
 from dronewatch.service.dashboard_auth import Role, Session, SessionStoreError
@@ -31,6 +32,29 @@ def connect(url: str) -> Any:
     except redis.RedisError as e:
         raise SessionStoreError(f"Redis недоступний: {type(e).__name__}") from e   # без тексту помилки: у ньому може бути URL із паролем
     return client
+
+
+def connect_sentinel(sentinels: Sequence[tuple[str, int]], master_name: str, password: str | None, ca_cert: str | None) -> Any:
+    """Клієнт поточного master через Redis Sentinel (HA). Лише TLS (і до Sentinel, і до master), без відкату на відкритий текст.
+    Після перемикання master клієнт сам знаходить новий: наступна команда йде вже на нього (сесії лишаються fail-closed на час
+    перемикання). Недоступний Sentinel/master при старті: сервіс не стартує. Тексту помилок немає: у ньому адреси й пароль."""
+    try:
+        import redis
+        from redis.sentinel import Sentinel
+    except ImportError:
+        raise SessionStoreError("потрібен пакет redis: pip install 'dronewatch[redis]'") from None
+    timeouts: dict[str, Any] = {"socket_timeout": TIMEOUT_S, "socket_connect_timeout": TIMEOUT_S}
+    tls: dict[str, Any] = {"ssl": True, "ssl_ca_certs": ca_cert, "password": password}
+    client = Sentinel(list(sentinels), sentinel_kwargs={**tls, **timeouts}, **tls, **timeouts)
+    master = client.master_for(master_name, decode_responses=True, health_check_interval=30, **timeouts)
+    failed = ""
+    try:
+        master.ping()
+    except redis.RedisError as e:
+        failed = type(e).__name__
+    if failed:
+        raise SessionStoreError(f"Redis (Sentinel) недоступний: {failed}")
+    return master
 
 
 class RedisSessionStore:

@@ -246,9 +246,7 @@ def build_ha(cfg: config.Config, rt: Runtime) -> ha.HaState | None:
     if not cfg.ha.enabled:
         return None
     url = os.environ.get("DRONEWATCH_HA_REDIS_URL") or cfg.ha.redis_url
-    assert url   # config._check вимагає redis_url при ha.enabled
-    check_redis_url(url)
-    client = dashboard_redis.connect(url)
+    client = redis_client(cfg, url)
     # HA_INSTANCE_ID потрібен, коли копії ділять hostname (наприклад, один мережевий простір у docker-compose)
     owner = os.environ.get("HA_INSTANCE_ID") or (socket.gethostname() if cfg.ha.instance_id == "auto" else cfg.ha.instance_id)
 
@@ -306,6 +304,16 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         runtime.ha.shutdown()
 
 
+def redis_client(cfg: config.Config, url: str | None) -> Any:
+    """Секція `redis` (Sentinel) має перевагу над окремим URL; без неї звичайний Redis за URL (TLS або localhost)."""
+    if cfg.redis is not None:
+        return dashboard_redis.connect_sentinel(cfg.redis.endpoints(), cfg.redis.master_name,
+                                                os.environ.get("DRONEWATCH_REDIS_PASSWORD"), cfg.redis.ca_cert)
+    assert url   # config._check і build_dashboard_access вимагають URL без секції redis
+    check_redis_url(url)
+    return dashboard_redis.connect(url)
+
+
 def build_dashboard_access(cfg: config.Config) -> DashboardAccess:
     """Вхід обов'язковий у live (за замовчуванням) і в demo, якщо в конфігу є користувачі. Без входу (demo без користувачів
     або свідоме `dashboard.auth: disabled`) анонім отримує лише viewer: читає, але нічого не змінює."""
@@ -320,10 +328,9 @@ def build_dashboard_access(cfg: config.Config) -> DashboardAccess:
     users = Users({u.name: UserEntry(u.password_hash, u.role) for u in cfg.dashboard.users})
     if cfg.dashboard.session_store == "redis":
         url = os.environ.get("DRONEWATCH_REDIS_URL") or cfg.dashboard.redis_url   # пароль краще в середовищі, не в конфігу
-        if not url:
-            raise ValueError("dashboard.session_store: redis потребує dashboard.redis_url або DRONEWATCH_REDIS_URL")
-        check_redis_url(url)
-        client = dashboard_redis.connect(url)   # недоступний Redis: сервіс не стартує (SessionStoreError)
+        if not url and cfg.redis is None:
+            raise ValueError("dashboard.session_store: redis потребує dashboard.redis_url, DRONEWATCH_REDIS_URL або секцію redis")
+        client = redis_client(cfg, url)   # недоступний Redis: сервіс не стартує (SessionStoreError)
         log.info("сесії та ліміт входів спільні через Redis")
         return DashboardAccess(users, dashboard_redis.RedisSessionStore(client, cfg.dashboard.session_ttl_s),
                                dashboard_redis.RedisLoginLimiter(client))

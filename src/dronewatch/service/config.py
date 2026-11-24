@@ -167,6 +167,27 @@ class HaCfg(BaseModel):
     lease_store: Literal["auto", "redis", "postgres"] = "auto"
 
 
+class RedisCfg(BaseModel):
+    """Redis Sentinel (HA на двох вузлах і свідку): сесії, ліміт входів і релей подій йдуть на поточний master. Замінює
+    `ha.redis_url` і `dashboard.redis_url`. Лише TLS; пароль у DRONEWATCH_REDIS_PASSWORD. Sentinel-ів рівно стільки, щоб був
+    кворум 2 з 3: менше трьох не дозволено."""
+    sentinels: list[str] = Field(min_length=3, description="host:port кожного Sentinel (вузол A, вузол B, свідок)")
+    master_name: str = Field(default="dw", min_length=1)
+    ca_cert: str | None = Field(default=None, description="шлях до CA, що підписав сертифікати Redis/Sentinel")
+
+    @field_validator("sentinels")
+    @classmethod
+    def _hostport(cls, items: list[str]) -> list[str]:
+        for item in items:
+            host, _, port = item.rpartition(":")
+            if not host or not port.isdigit() or not 1 <= int(port) <= 65535:
+                raise ValueError("redis.sentinels: кожен елемент має вигляд host:port")
+        return items
+
+    def endpoints(self) -> list[tuple[str, int]]:
+        return [(host, int(port)) for host, _, port in (item.rpartition(":") for item in self.sentinels)]
+
+
 class StorageCfg(BaseModel):
     """Де лежать інциденти, рішення, replay і журнал дій. sqlite: файл (типово). postgres: лише з ha.enabled (HA на двох вузлах)."""
     backend: Literal["sqlite", "postgres"] = "sqlite"
@@ -196,13 +217,14 @@ class Config(BaseModel):
     replay: ReplayCfg = ReplayCfg()
     ha: HaCfg = HaCfg()
     storage: StorageCfg = StorageCfg()
+    redis: RedisCfg | None = None
 
     @model_validator(mode="after")
     def _check(self) -> Self:
         if self.ha.enabled:
             if self.mode != "live":
                 raise ValueError("ha.enabled працює лише з mode: live (демо не має що резервувати)")
-            if not self.ha.redis_url:
+            if not self.ha.redis_url and self.redis is None:
                 raise ValueError("ha.enabled вимагає ha.redis_url: оренда лідера живе в Redis")
         if self.storage.backend == "postgres":
             if not self.ha.enabled:
