@@ -47,3 +47,20 @@ def db_backend(request, tmp_path):
     db.commit()
     db.close()
     return store
+
+
+@pytest.fixture
+def pg_store():
+    """Те саме, що db_backend[pg], але лише PostgreSQL (для тестів, що перевіряють саме його: права, тригери, блокування)."""
+    dsn = pg_dsn()
+    if not dsn:
+        pytest.skip("DRONEWATCH_TEST_PG_DSN не задано")
+    pytest.importorskip("psycopg")
+    from dronewatch.service.store import PostgresStore
+    store = PostgresStore(dsn, None, 2, 3)
+    db = store.connect()
+    db.execute("DROP SCHEMA public CASCADE")
+    db.execute("CREATE SCHEMA public")
+    db.commit()
+    db.close()
+    return store
