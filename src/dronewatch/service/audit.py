@@ -14,6 +14,8 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
+from dronewatch.service.store import Db, StoreError, as_db
+
 GENESIS = "0" * 64
 MAX_LEN = {"user": 64, "role": 16, "action": 32, "target": 200, "result": 16, "ip": 64}
 MAX_BLOCKED_KEYS = 10_000
@@ -55,9 +57,10 @@ def _digest(prev_hash: str, ts: float, user: str, role: str, action: str, target
 
 
 class AuditLog:
-    def __init__(self, db: sqlite3.Connection, lock: threading.Lock, clock: Callable[[], float] = time.time,
+    def __init__(self, db: "Db | sqlite3.Connection", lock: threading.Lock, clock: Callable[[], float] = time.time,
                  create: bool = True) -> None:
         """create=False: лише читання готової БД (CLI перевірки), нічого не створює й не пише."""
+        db = as_db(db)
         self._db, self._lock, self._clock = db, lock, clock
         self._blocked: dict[str, float] = {}
         self._blocked_lock = threading.Lock()
@@ -94,7 +97,7 @@ class AuditLog:
                 self._db.commit()
                 return rid
             except Exception as e:   # будь-який збій (не лише sqlite) = відкіт і AuditError, щоб виклик не лишив напівтранзакцію
-                with contextlib.suppress(sqlite3.Error):
+                with contextlib.suppress(sqlite3.Error, StoreError):
                     self._db.rollback()
                 raise AuditError(f"не вдалося записати в журнал дій: {e}") from e
 

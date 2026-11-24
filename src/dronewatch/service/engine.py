@@ -31,6 +31,8 @@ from dronewatch.service.catalog import DRONES, UNKNOWN_MODEL, describe
 from dronewatch.service.forecast import EDGE_FRACTION, LOST_KEEP_S, forecast, loss_reason, search_area
 from dronewatch.service.ha import FencedError, NotActiveError
 from dronewatch.service.replay import SIDE_CODE, ReplayOptions, ReplayRecorder
+from dronewatch.service.schema import ensure_schema
+from dronewatch.service.store import Db, SqliteStore, Store, StoreError
 
 log = logging.getLogger("dronewatch.engine")
 Level = Literal["NONE", "WARNING", "CRITICAL"]
@@ -134,20 +136,15 @@ class Zone:
         return {"name": self.name, "radius": self.radius, "level": self.level, "center": self.center.tolist()}
 
 
-def _open_db(path: str) -> sqlite3.Connection:
-    """Відкриває БД і створює/мігрує таблиці рушія (інциденти, рішення оператора, запобіжник epoch для HA)."""
-    db = sqlite3.connect(path, check_same_thread=False)
-    db.execute("""CREATE TABLE IF NOT EXISTS incidents (
-        id INTEGER PRIMARY KEY AUTOINCREMENT, ts REAL, track_id INTEGER, level TEXT, zone TEXT,
-        x REAL, y REAL, z REAL, speed REAL, sensors TEXT)""")
-    have = {r[1] for r in db.execute("PRAGMA table_info(incidents)")}
-    for col, typ in (("model", "TEXT"), ("model_name", "TEXT"), ("side", "TEXT"), ("status", "TEXT"),
-                     ("reviewed_by", "TEXT"), ("reviewed_at", "REAL"), ("review_note", "TEXT"), ("failover", "INTEGER")):
-        if col not in have:   # міграція старих журналів: нові колонки лишаються NULL у старих рядках (NULL status = new)
-            db.execute(f"ALTER TABLE incidents ADD COLUMN {col} {typ}")
-    db.execute("""CREATE TABLE IF NOT EXISTS incident_reviews (
-        id INTEGER PRIMARY KEY AUTOINCREMENT, incident_id INTEGER, status TEXT, by TEXT, ts REAL, note TEXT)""")
-    db.commit()
+def _open_db(target: "str | Store") -> Db:
+    """Відкриває сховище (шлях до файлу SQLite чи Store) і створює/мігрує таблиці рушія."""
+    store = SqliteStore(target) if isinstance(target, str) else target
+    db = store.connect()
+    try:
+        ensure_schema(db)
+    except BaseException:
+        db.close()
+        raise
     return db
 
 
@@ -203,12 +200,11 @@ class Engine:
         self.audit = AuditLog(self.db, self.lock)   # той самий файл БД; append бере self.lock, тож під замком лише append_locked
 
     # --- HA: роль резерв/лідер
-    def activate(self, db_path: str, epoch: int) -> None:
+    def activate(self, target: "str | Store", epoch: int) -> None:
         """Стає лідером: відкриває справжній файл БД, захоплює запобіжник epoch у самому файлі (FencedError, якщо там уже новіший),
         дописує тривоги, підняті без оренди (failover=1). Той самий epoch удруге дозволений: лідер, що повернувся до Redis."""
-        db = _open_db(db_path)
+        db = _open_db(target)
         try:
-            db.execute("CREATE TABLE IF NOT EXISTS ha_epoch (id INTEGER PRIMARY KEY CHECK (id = 1), epoch INTEGER NOT NULL)")
             db.execute("BEGIN IMMEDIATE")
             row = db.execute("SELECT epoch FROM ha_epoch").fetchone()
             if row is not None and row[0] > epoch:
@@ -292,11 +288,10 @@ class Engine:
             del self.pending[:-MAX_PENDING]
 
     def _insert_incident(self, a: Alert, *, failover: bool = False) -> int:
-        cur = self.db.execute("INSERT INTO incidents (ts, track_id, level, zone, x, y, z, speed, sensors,"
-                              " model, model_name, side, status, failover) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,'new',?)",
-                              (a["ts"], a["track_id"], a["level"], a["zone"], *a["pos"], a["speed"], ",".join(a["sensors"]),
-                               a["model"], a["model_name"], a["side"], 1 if failover else None))
-        return cur.lastrowid or 0
+        return self.db.insert_id("INSERT INTO incidents (ts, track_id, level, zone, x, y, z, speed, sensors,"
+                                 " model, model_name, side, status, failover) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,'new',?)",
+                                 (a["ts"], a["track_id"], a["level"], a["zone"], *a["pos"], a["speed"], ",".join(a["sensors"]),
+                                  a["model"], a["model_name"], a["side"], 1 if failover else None))
 
     # --- вхід
     def reset(self) -> None:
@@ -678,7 +673,7 @@ class Engine:
             except Exception as e:   # не лише sqlite: будь-який збій запису журналу не має лишити напівтранзакцію на спільному зʼєднанні
                 if audit is None:
                     raise
-                with contextlib.suppress(sqlite3.Error):
+                with contextlib.suppress(sqlite3.Error, StoreError):
                     self.db.rollback()
                 raise AuditError(f"рішення не записано, журнал дій недоступний: {e}") from e
             for a in self.alerts:

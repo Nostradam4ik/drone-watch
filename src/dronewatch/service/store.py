@@ -62,6 +62,15 @@ class SqliteDb:
     def close(self) -> None:
         self._c.close()
 
+    @property
+    def total_changes(self) -> int:
+        return self._c.total_changes
+
+
+def as_db(conn: "Db | sqlite3.Connection") -> Db:
+    """Сире з'єднання SQLite (старі виклики й тести) загортається в SqliteDb; Db лишається як є."""
+    return SqliteDb(conn) if isinstance(conn, sqlite3.Connection) else conn
+
 
 class SqliteStore:
     kind: Literal["sqlite", "postgres"] = "sqlite"
