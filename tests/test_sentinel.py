@@ -37,8 +37,16 @@ def test_bad_sentinels_rejected(sentinels):
 
 
 def test_sentinel_replaces_redis_url_for_ha():
-    cfg = config.Config(**LIVE, ha={"enabled": True}, redis={"sentinels": SENTINELS, "master_name": "dw"})
+    cfg = config.Config(**LIVE, ha={"enabled": True}, redis={"sentinels": SENTINELS, "master_name": "dw", "ca_cert": "/ca.pem"})
     assert cfg.redis is not None and cfg.redis.master_name == "dw"
+
+
+def test_sentinel_requires_ca_cert():
+    """Без CA перевірити сервер нічим: Sentinel-режим без ca_cert не дозволено (захист від MITM між VPS)."""
+    with pytest.raises(ValidationError, match="ca_cert"):
+        config.Config(redis={"sentinels": SENTINELS})
+    with pytest.raises(ValidationError, match="ca_cert"):
+        config.Config(redis={"sentinels": SENTINELS, "ca_cert": ""})
 
 
 def test_ha_without_url_or_sentinel_still_rejected():
@@ -69,15 +77,23 @@ def test_connect_sentinel_passes_tls_and_secrets(monkeypatch):
     kw, mkw = seen["kw"], seen["master_kw"]
     assert kw["ssl"] is True and kw["ssl_ca_certs"] == "/ca.pem" and kw["password"] == "s3cret"
     assert kw["sentinel_kwargs"]["ssl"] is True and kw["sentinel_kwargs"]["password"] == "s3cret"
+    # перевірка сертифіката й імені сервера задана явно (не залежить від типових значень бібліотеки), і для Sentinel, і для master
+    for opts in (kw, kw["sentinel_kwargs"]):
+        assert opts["ssl_cert_reqs"] == "required" and opts["ssl_check_hostname"] is True
     assert mkw["decode_responses"] is True and mkw["socket_timeout"] == dashboard_redis.TIMEOUT_S
 
 
 def test_connect_sentinel_unreachable_is_session_store_error_without_secrets():
     pytest.importorskip("redis")
     with pytest.raises(SessionStoreError) as e:
-        dashboard_redis.connect_sentinel([("127.0.0.1", 1), ("127.0.0.1", 2), ("127.0.0.1", 3)], "dw", "s3cretpw", None)
+        dashboard_redis.connect_sentinel([("127.0.0.1", 1), ("127.0.0.1", 2), ("127.0.0.1", 3)], "dw", "s3cretpw", "/no/such/ca.pem")
     text = str(e.value) + repr(e.value) + repr(e.value.__cause__) + repr(e.value.__context__)
     assert "s3cretpw" not in text and "127.0.0.1" not in text
+
+
+def test_connect_sentinel_without_ca_refused():
+    with pytest.raises(SessionStoreError, match="ca_cert"):
+        dashboard_redis.connect_sentinel([("a", 1), ("b", 2), ("c", 3)], "dw", "pw", None)
 
 
 def test_missing_redis_package_message(monkeypatch):
@@ -91,7 +107,7 @@ def test_missing_redis_package_message(monkeypatch):
 
     monkeypatch.setattr(builtins, "__import__", fake)
     with pytest.raises(SessionStoreError, match=r"dronewatch\[redis\]"):
-        dashboard_redis.connect_sentinel([("a", 1), ("b", 2), ("c", 3)], "dw", None, None)
+        dashboard_redis.connect_sentinel([("a", 1), ("b", 2), ("c", 3)], "dw", None, "/ca.pem")
 
 
 def test_build_runtime_ha_uses_sentinel_not_url(monkeypatch, tmp_path):
@@ -119,7 +135,7 @@ def test_dashboard_sessions_use_sentinel(monkeypatch):
     monkeypatch.setattr(dashboard_redis, "connect_sentinel", lambda *a: fake)
     monkeypatch.setattr(dashboard_redis, "connect", lambda url: pytest.fail("звичайний connect не мав викликатись"))
     cfg = config.Config(
-        redis={"sentinels": SENTINELS},
+        redis={"sentinels": SENTINELS, "ca_cert": "/ca.pem"},
         dashboard=config.DashboardCfg(session_store="redis",
                                       users=[config.DashboardUser(name="a", role="admin", password_hash=FAST)]))
     access = app.build_dashboard_access(cfg)

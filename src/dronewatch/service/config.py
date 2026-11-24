@@ -173,7 +173,7 @@ class RedisCfg(BaseModel):
     кворум 2 з 3: менше трьох не дозволено."""
     sentinels: list[str] = Field(min_length=3, description="host:port кожного Sentinel (вузол A, вузол B, свідок)")
     master_name: str = Field(default="dw", min_length=1)
-    ca_cert: str | None = Field(default=None, description="шлях до CA, що підписав сертифікати Redis/Sentinel")
+    ca_cert: str = Field(min_length=1, description="шлях до CA, що підписав сертифікати Redis/Sentinel (обовʼязково: сервер перевіряється)")
 
     @field_validator("sentinels")
     @classmethod
