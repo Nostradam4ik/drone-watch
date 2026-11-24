@@ -232,3 +232,20 @@ def test_review_error_releases_fence_lock(store, monkeypatch):
     started = time.monotonic()
     assert PgLeaseStore(store).acquire("b", 5000) == 2
     assert time.monotonic() - started < 1.5
+
+
+def test_no_connection_is_left_idle_in_transaction_after_activation_and_a_scan(store):
+    """idle_in_transaction_session_timeout (60 с) убив би таке з'єднання й дав зайву аварію: читання під час активації мають закриватись."""
+    lease = PgLeaseStore(store)
+    eng = make_standby()
+    epoch = lease.acquire("a", 5000)
+    assert epoch is not None
+    eng.activate(store, epoch)
+    eng.tick()
+    eng.incident_stats()
+    eng.audit.read(5)
+    eng.audit.verify()
+    probe = store.connect()
+    idle = probe.execute("SELECT count(*) FROM pg_stat_activity WHERE datname = current_database() "
+                         "AND state = 'idle in transaction' AND pid <> pg_backend_pid()").fetchone()[0]
+    assert idle == 0

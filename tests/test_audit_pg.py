@@ -1,4 +1,5 @@
 """Журнал дій на PostgreSQL: ланцюжок, audit_head, незмінність, права ролі dw_app (і спільні сценарії на обох бекендах)."""
+import re
 import threading
 from pathlib import Path
 
@@ -103,7 +104,7 @@ def test_app_role_can_append_but_not_modify(pg_store):
     admin.commit()
     dsn = pg_dsn()
     assert dsn
-    app = PostgresStore(dsn.replace("postgres:x@", "dw_app@"), "apppw", 2, 3).connect()
+    app = PostgresStore(re.sub(r"//[^@/]*@", "//dw_app@", dsn), "apppw", 2, 3).connect()   # той самий сервер, інший користувач (у CI інший пароль postgres)
     log = AuditLog(app, threading.Lock(), create=False)
     log.append(E)
     assert log.verify().ok
