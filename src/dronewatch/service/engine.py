@@ -32,7 +32,7 @@ from dronewatch.service.forecast import EDGE_FRACTION, LOST_KEEP_S, forecast, lo
 from dronewatch.service.ha import FencedError, NotActiveError
 from dronewatch.service.replay import SIDE_CODE, ReplayOptions, ReplayRecorder
 from dronewatch.service.schema import ensure_schema
-from dronewatch.service.store import Db, SqliteStore, Store, StoreError
+from dronewatch.service.store import Db, GuardedDb, SqliteStore, Store, StoreError
 
 log = logging.getLogger("dronewatch.engine")
 Level = Literal["NONE", "WARNING", "CRITICAL"]
@@ -145,7 +145,7 @@ def _open_db(target: "str | Store") -> Db:
     except BaseException:
         db.close()
         raise
-    return db
+    return GuardedDb(store, db) if store.kind == "postgres" else db
 
 
 class Engine:
@@ -300,6 +300,8 @@ class Engine:
         if written:
             self.db.commit()
             log.warning("HA: дописано %d тривог, піднятих без чинної оренди", written)
+        else:
+            self._end_txn()
         self.pending.clear()
 
     def _stash_pending(self, alerts: list[Alert]) -> None:
@@ -474,9 +476,22 @@ class Engine:
             for k, v in self.tracker.dropped.items():
                 self.stats[k] += v
             self.stats["scans"] += 1
+            self._retry_pending_locked()
             alerts = self._evaluate(t)
             self._record_replay(alerts)
             return alerts
+
+    def _retry_pending_locked(self) -> None:
+        """Лідер із чинною орендою, чиї тривоги не записались (сховище лежало): дописуємо, щойно воно відповідає."""
+        if not self.pending or not self.active:
+            return
+        try:
+            self._fence_locked()
+            self._flush_pending()
+        except (NotActiveError, FencedError):
+            pass   # нас відсікли: pending допишеться при наступному підвищенні
+        except StoreError:
+            pass   # досі лежить; відкат і лог зробило зʼєднання
 
     def _record_replay(self, alerts: list[Alert]) -> None:
         """Кадр для відтворення інцидентів (під self.lock). Збій запису лише в лог: трекінг від нього не залежить."""
@@ -484,6 +499,8 @@ class Engine:
             return
         try:
             self.replay.on_scan(self.clock(), self._replay_frame, alerts if self.active else [], self._replay_setup)
+        except StoreError:
+            pass   # сховище недоступне: це вже в логу один раз (GuardedDb), стек на кожен скан не потрібен
         except Exception:
             log.exception("запис для відтворення інцидентів не вдався")
 
@@ -653,12 +670,17 @@ class Engine:
         if new_alerts:
             try:
                 self._fence_locked()   # без HA це no-op; з HA: чинна ли ще наша оренда (інакше тривога йде в pending)
-            except (NotActiveError, FencedError):
+            except (NotActiveError, FencedError, StoreError):   # StoreError: сховище недоступне, тривога лишається в памʼяті й pending
                 self._stash_pending(new_alerts)
             else:
-                for a in new_alerts:
-                    a["id"] = self._insert_incident(a)
-                self.db.commit()
+                try:
+                    for a in new_alerts:
+                        a["id"] = self._insert_incident(a)
+                    self.db.commit()
+                except StoreError:   # відкат уже зробило зʼєднання; commit міг дійти без відповіді: дедуплікація при дописуванні
+                    for a in new_alerts:
+                        a["id"] = 0
+                    self._stash_pending(new_alerts)
             self.alerts = (new_alerts[::-1] + self.alerts)[:200]
         alive = {tr.id for tr in self.tracker.tracks}
         for tid in list(self.max_level):
@@ -706,6 +728,11 @@ class Engine:
                 return dict(zip(cols, cur.fetchone(), strict=True))
             finally:
                 self._end_txn()
+
+    @property
+    def db_healthy(self) -> bool:
+        """False, коли сховище (PostgreSQL) зараз недоступне; SQLite і пам'ять завжди True."""
+        return bool(getattr(self.db, "healthy", True))
 
     def _end_txn(self) -> None:
         """PostgreSQL: закриває транзакцію, що лишилась відкритою (читання після commit, вихід без запису): знімає FOR SHARE і знімок.

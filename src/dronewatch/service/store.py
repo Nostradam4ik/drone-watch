@@ -4,9 +4,12 @@ SQL у коді пишеться з плейсхолдерами `?`; для Pos
 вставленого рядка, перелік колонок) ховають `insert_id` і `columns`. Помилки PostgreSQL це `StoreError` БЕЗ тексту драйвера:
 у ньому можуть бути адреса сервера, імʼя БД чи пароль. Пароль передається окремо від DSN й у DSN його бути не повинно."""
 import contextlib
+import logging
 import math
 import sqlite3
-from collections.abc import Sequence
+import threading
+import time
+from collections.abc import Callable, Sequence
 from typing import TYPE_CHECKING, Any, Literal, Protocol
 
 if TYPE_CHECKING:
@@ -143,7 +146,7 @@ class PostgresStore:
         name, state = "", None
         try:
             conn = psycopg.connect(self._dsn, password=self._password, connect_timeout=self._connect_timeout, autocommit=False,
-                                   options=f"-c statement_timeout={self._statement_ms}")
+                                   options=f"-c statement_timeout={self._statement_ms} -c idle_in_transaction_session_timeout=60000")
             if readonly:
                 conn.read_only = True
             return PostgresDb(conn, psycopg.Error)
@@ -183,3 +186,116 @@ def probe(store: Store) -> None:
         db.execute("SELECT 1").fetchone()
     finally:
         db.close()
+
+
+log = logging.getLogger("dronewatch.store")
+BREAKER_S = 5.0
+_CONN_CLASSES = ("08", "53", "57", "58", "25")   # SQLSTATE: звʼязок, ресурси, зупинка/скасування, системні, транзакція (idle timeout)
+
+
+def is_connection_error(e: StoreError) -> bool:
+    """Обрив/таймаут/недоступність (з'єднання треба перестворити), а не помилка самого запиту (унікальність, права, тригер)."""
+    return e.sqlstate is None or e.sqlstate[:2] in _CONN_CLASSES
+
+
+class GuardedDb:
+    """Db поверх PostgreSQL для рушія. Після збою зʼєднання мережі не торкається `breaker_s` секунд (кожен виклик одразу StoreError),
+    а перепідключення йде у ФОНІ: замок рушія ніколи не чекає connect. Помилка самого запиту (не обрив) з'єднання не вбиває,
+    але транзакцію відкочує (у PostgreSQL невдалий запит усе одно зіпсував би її). Про збій і повернення пишеться по одному рядку."""
+
+    def __init__(self, store: Store, inner: Db, *, breaker_s: float = BREAKER_S, clock: Callable[[], float] = time.monotonic) -> None:
+        self.dialect = inner.dialect
+        self._store, self._breaker_s, self._clock = store, breaker_s, clock
+        self._inner: Db | None = inner
+        self._down_until = 0.0
+        self._connecting = False
+        self._thread: threading.Thread | None = None
+        self._lock = threading.Lock()
+
+    @property
+    def healthy(self) -> bool:
+        return self._inner is not None
+
+    def wait_reconnect(self, timeout: float) -> None:
+        t = self._thread
+        if t is not None:
+            t.join(timeout)
+
+    def _live(self) -> Db:
+        with self._lock:
+            if self._inner is not None:
+                return self._inner
+            if not self._connecting and self._clock() >= self._down_until:
+                self._connecting = True
+                self._thread = threading.Thread(target=self._reconnect, name="dw-db-reconnect", daemon=True)
+                self._thread.start()
+        raise StoreError("сховище тимчасово недоступне")
+
+    def _reconnect(self) -> None:
+        fresh: Db | None = None
+        failed = ""
+        try:
+            fresh = self._store.connect()
+        except StoreError as e:
+            failed = str(e) or type(e).__name__
+        except Exception as e:   # будь-який збій фонового потоку не повинен лишити _connecting=True
+            failed = type(e).__name__
+        with self._lock:
+            self._connecting = False
+            if fresh is None:
+                self._down_until = self._clock() + self._breaker_s
+            else:
+                self._inner = fresh
+        if fresh is None:
+            log.debug("перепідключення до сховища не вдалось (%s)", failed)
+        else:
+            log.warning("сховище знову доступне")
+
+    def _drop(self, inner: Db, why: str) -> None:
+        with self._lock:
+            if self._inner is not inner:
+                return
+            self._inner = None
+            self._down_until = self._clock() + self._breaker_s
+        log.error("сховище недоступне (%s): запис призупинено, тривоги лишаються в памʼяті й будуть дописані після повернення", why)
+        with contextlib.suppress(Exception):
+            inner.rollback()
+        with contextlib.suppress(Exception):
+            inner.close()
+
+    def _call(self, name: str, *args: Any) -> Any:
+        inner = self._live()
+        err: StoreError | None = None
+        try:
+            return getattr(inner, name)(*args)
+        except StoreError as e:
+            err = e
+        if is_connection_error(err):
+            self._drop(inner, str(err) or type(err).__name__)
+        elif name != "rollback":
+            with contextlib.suppress(StoreError):
+                inner.rollback()
+        raise StoreError(str(err), sqlstate=err.sqlstate)
+
+    def execute(self, sql: str, params: Sequence[Any] = ()) -> Any:
+        return self._call("execute", sql, params)
+
+    def insert_id(self, sql: str, params: Sequence[Any] = ()) -> int:
+        return int(self._call("insert_id", sql, params))
+
+    def columns(self, table: str) -> set[str]:
+        result: set[str] = self._call("columns", table)
+        return result
+
+    def commit(self) -> None:
+        self._call("commit")
+
+    def rollback(self) -> None:
+        self._call("rollback")
+
+    def close(self) -> None:
+        with self._lock:
+            inner, self._inner = self._inner, None
+        if inner is not None:
+            with contextlib.suppress(Exception):
+                inner.close()

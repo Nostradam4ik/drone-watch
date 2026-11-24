@@ -142,7 +142,15 @@ class AuditLog:
         with self._lock:
             cur = self._db.execute(f"SELECT {_COLS} FROM audit_log ORDER BY id DESC LIMIT ?", (n,))
             cols = [c[0] for c in cur.description]
-            return [dict(zip(cols, r, strict=True)) for r in cur.fetchall()]
+            rows = [dict(zip(cols, r, strict=True)) for r in cur.fetchall()]
+            self._end_read()
+            return rows
+
+    def _end_read(self) -> None:
+        """PostgreSQL: читання відкрило транзакцію; закриваємо, щоб зʼєднання не стояло idle in transaction."""
+        if self._db.dialect == "postgres":
+            with contextlib.suppress(StoreError):
+                self._db.rollback()
 
     def verify(self) -> VerifyResult:
         """Іде по id, перераховує хеш і звіряє prev_hash; id мусять іти підряд від 1, а останній дорівнювати лічильнику
@@ -167,6 +175,7 @@ class AuditLog:
             else:
                 seq_row = self._db.execute("SELECT seq FROM sqlite_sequence WHERE name = 'audit_log'").fetchone()
                 seq = seq_row[0] if seq_row else 0
+            self._end_read()
         if broken is None and seq != expected - 1:   # лічильник пам'ятає більше (кінець видалено) або менше, ніж є в таблиці
             broken = min(seq, expected - 1) + 1
         return VerifyResult(ok=broken is None, rows=rows, broken_at=broken, head=prev)

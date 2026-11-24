@@ -366,6 +366,12 @@ async def ha_not_leader(request: Request, exc: Exception) -> JSONResponse:
     return JSONResponse({"detail": "Немає чинної оренди лідера"}, status_code=503, headers={"Retry-After": "3"})
 
 
+@app.exception_handler(StoreError)
+async def store_error(request: Request, exc: StoreError) -> JSONResponse:
+    """Сховище (PostgreSQL) недоступне: 503 без подробиць (у тексті драйвера може бути адреса сервера)."""
+    return JSONResponse({"detail": "Сховище недоступне"}, status_code=503, headers={"Retry-After": "5"})
+
+
 @app.exception_handler(RequestValidationError)
 async def validation_error(request: Request, exc: RequestValidationError) -> JSONResponse:
     """422 без значень, що не пройшли перевірку. Стандартна відповідь їх відлунює (`input`), а NaN/Infinity Starlette
@@ -634,6 +640,7 @@ def health(user: Annotated[str | None, Depends(current_user)], rt: RuntimeDep) -
             "scan": {"errors": sh.errors, "consecutive_errors": sh.consecutive, "last_error": sh.last_error,
                      "last_ok_age_s": round(now - sh.last_ok, 1) if sh.last_ok is not None else None},
             "mqtt": rt.mqtt.status() if rt.mqtt else None,
+            "storage": {"ok": rt.engine.db_healthy, "backend": rt.get_store().kind},
             "audit": ({"ok": rt.audit_status.ok, "rows": rt.audit_status.rows, "broken_at": rt.audit_status.broken_at}
                       if rt.audit_status else None)}   # результат старту, не перевірка зараз: verify() тримає замок рушія
     if rt.ha is not None:
