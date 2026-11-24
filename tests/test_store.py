@@ -84,3 +84,22 @@ def test_pg_timeouts_applied():
 
 def test_sqlite_store_kind(tmp_path):
     assert SqliteStore(str(tmp_path / "a.db")).kind == "sqlite"
+
+
+def test_connect_sets_client_side_dead_peer_detection(monkeypatch):
+    """statement_timeout працює на сервері й не рятує, коли сервер зник з мережі (TCP мовчить): клієнт має сам обривати з'єднання."""
+    psycopg = pytest.importorskip("psycopg")
+    seen: dict = {}
+
+    class Boom(Exception):
+        pass
+
+    def fake_connect(dsn, **kw):
+        seen.update(kw)
+        raise psycopg.OperationalError("stop")
+
+    monkeypatch.setattr(psycopg, "connect", fake_connect)
+    with pytest.raises(StoreError):
+        PostgresStore("postgresql://u@h/d", None, 2, 3).connect()
+    assert seen["tcp_user_timeout"] == 3000   # = statement_timeout: мовчання сервера довше за це обриває з'єднання
+    assert seen["keepalives"] == 1 and seen["keepalives_idle"] <= 10 and seen["keepalives_interval"] <= 5 and seen["keepalives_count"] <= 3

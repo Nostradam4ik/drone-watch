@@ -345,3 +345,20 @@ def test_redis_error_becomes_lease_store_error_without_password():
         with pytest.raises(LeaseStoreError) as e:
             call()
         assert "secret" not in str(e.value)
+
+
+def test_acquire_failures_are_logged_once_per_outage(caplog):
+    """Резерв, що не може дістатись сховища оренди, мовчав: причину перемикання, що не відбулось, було не видно."""
+    import logging
+    c = Clock()
+    s = FakeStore(c)
+    s.down = True
+    e = make(s, c)
+    with caplog.at_level(logging.INFO, logger="dronewatch.ha"):
+        for _ in range(5):
+            e.step()
+        s.down = False
+        e.step()
+    warnings = [r for r in caplog.records if r.levelno == logging.WARNING and "оренди недоступне" in r.getMessage()]
+    assert len(warnings) == 1, [r.getMessage() for r in caplog.records]
+    assert any("знову доступне" in r.getMessage() for r in caplog.records)

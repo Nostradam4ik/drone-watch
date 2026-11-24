@@ -145,7 +145,12 @@ class PostgresStore:
             raise StoreError("потрібен пакет psycopg: pip install 'dronewatch[postgres]'") from None
         name, state = "", None
         try:
+            # statement_timeout діє на сервері і не рятує, коли сервер зник з мережі (TCP мовчить, RST нема): без клієнтських
+            # таймаутів запит завис би на хвилини під замком рушія. tcp_user_timeout обриває з'єднання, коли відповіді на надіслане
+            # нема довше за statement_timeout; keepalives ловлять мертвого сусіда на простої (≈ 5 + 2 * 3 с).
             conn = psycopg.connect(self._dsn, password=self._password, connect_timeout=self._connect_timeout, autocommit=False,
+                                   tcp_user_timeout=self._statement_ms, keepalives=1, keepalives_idle=5, keepalives_interval=2,
+                                   keepalives_count=3,
                                    options=f"-c statement_timeout={self._statement_ms} -c idle_in_transaction_session_timeout=60000")
             if readonly:
                 conn.read_only = True

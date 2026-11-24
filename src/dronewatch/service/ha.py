@@ -174,6 +174,7 @@ class Elector:
         self.role = Role.STANDBY
         self.epoch: int | None = None
         self._valid_until = 0.0
+        self._store_failing = False   # збій сховища оренди вже в лозі (один рядок на аварію, а не на кожен крок)
 
     @property
     def _ttl_ms(self) -> int:
@@ -202,7 +203,7 @@ class Elector:
                 self.role = Role.DEGRADED
                 self.on_demote(Role.DEGRADED)
             else:
-                log.warning("HA: Redis недоступний, оренда ще чинна %.1f с", self._valid_until - self.clock())
+                log.warning("HA: сховище оренди недоступне, оренда ще чинна %.1f с", self._valid_until - self.clock())
             return
         if ok:
             self._valid_until = t0 + self.ttl_s
@@ -219,7 +220,7 @@ class Elector:
         except LeaseStoreError:
             return
         if not ok:
-            log.error("HA: поки Redis не відповідав, лідером став інший: стаю резервом")
+            log.error("HA: поки сховище оренди не відповідало, лідером став інший: стаю резервом")
             self.epoch, self.role = None, Role.STANDBY
             self.on_demote(Role.STANDBY)
             return
@@ -230,7 +231,13 @@ class Elector:
         try:
             epoch = self.store.acquire(self.owner, self._ttl_ms)
         except LeaseStoreError:
+            if not self._store_failing:
+                self._store_failing = True
+                log.warning("HA: сховище оренди недоступне, перехопити оренду не вдається (повторю без нових повідомлень)")
             return
+        if self._store_failing:
+            self._store_failing = False
+            log.warning("HA: сховище оренди знову доступне")
         if epoch is not None:
             self._promote(epoch, t0)
 
