@@ -73,7 +73,8 @@ ok "брокер: із ключем пускає, без логіна й із х
 #    а наприкінці (навіть при збої) запускаємо знову.
 #    Ролі: rf1 пише у свій топік (має дійти) і в топік ac1 (не має); ac1 пише у свій (контроль, що читач бачить чужі події);
 #    radar1 підписується на все (не має отримати нічого, хоча трафік є).
-SVC_PW=$(grep -oE 'MQTT_PASSWORD: *"[^"]+"' docker-compose.yml | sed -E 's/.*: *"//; s/"$//')
+# Перший збіг це service: профіль ha нижче має ще MQTT_PASSWORD для ha-a і ha-b, і без head -n1 SVC_PW став би багаторядковим
+SVC_PW=$(grep -oE 'MQTT_PASSWORD: *"[^"]+"' docker-compose.yml | head -n1 | sed -E 's/.*: *"//; s/"$//')
 [ -n "$SVC_PW" ] || fail "не знайдено MQTT_PASSWORD сервісу в docker-compose.yml"
 sensor_key() { grep -oE 'DRONEWATCH_KEYS: *"[^"]+"' docker-compose.yml | grep -oE "$1=[^,\"]+" | cut -d= -f2; }
 AC1_KEY=$(sensor_key ac1); RADAR_KEY=$(sensor_key radar1)
