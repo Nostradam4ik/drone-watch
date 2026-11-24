@@ -12,6 +12,8 @@ name = "dronewatch"
 version = "0.1.0"
 description = "Drone Watch: мультидатчикове виявлення дронів (fusion-трекер, сервіс, емулятор датчиків)"
 requires-python = ">=3.12"
+license = "MIT"
+license-files = ["LICENSE"]
 dependencies = [
     "fastapi>=0.162.7",
     "uvicorn>=0.54.0",
