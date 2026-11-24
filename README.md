@@ -1,5 +1,7 @@
 # Drone Watch
 
+English summary: [README.en.md](README.en.md).
+
 [![CI](https://github.com/Nostradam4ik/drone-watch/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/Nostradam4ik/drone-watch/actions/workflows/ci.yml)
 
 Мультидатчикове виявлення дронів: fusion-трекер (EKF + IMM, гейтинг за Махаланобісом, угорський алгоритм), HTTP/WebSocket-сервіс
