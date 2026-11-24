@@ -205,13 +205,7 @@ class Engine:
         дописує тривоги, підняті без оренди (failover=1). Той самий epoch удруге дозволений: лідер, що повернувся до Redis."""
         db = _open_db(target)
         try:
-            db.execute("BEGIN IMMEDIATE")
-            row = db.execute("SELECT epoch FROM ha_epoch").fetchone()
-            if row is not None and row[0] > epoch:
-                db.rollback()
-                raise FencedError(f"у файлі БД epoch {row[0]} новіший за {epoch}", stored=int(row[0]))
-            db.execute("INSERT INTO ha_epoch (id, epoch) VALUES (1, ?) ON CONFLICT(id) DO UPDATE SET epoch = excluded.epoch", (epoch,))
-            db.commit()
+            self._claim_epoch(db, epoch)
         except BaseException:
             db.close()
             raise
@@ -223,6 +217,26 @@ class Engine:
             self._flush_pending()
             self.active, self.epoch = True, epoch
             old.close()
+
+    @staticmethod
+    def _claim_epoch(db: Db, epoch: int) -> None:
+        """Записує epoch у файл/БД, якщо там не новіший (інакше FencedError зі збереженим)."""
+        if db.dialect == "postgres":
+            row = db.execute("INSERT INTO ha_epoch (id, epoch) VALUES (1, ?) ON CONFLICT (id) DO UPDATE SET epoch = excluded.epoch "
+                             "WHERE ha_epoch.epoch <= excluded.epoch RETURNING epoch", (epoch,)).fetchone()
+            if row is None:
+                stored = int(db.execute("SELECT epoch FROM ha_epoch WHERE id = 1").fetchone()[0])
+                db.rollback()
+                raise FencedError(f"у БД epoch {stored} новіший за {epoch}", stored=stored)
+            db.commit()
+            return
+        db.execute("BEGIN IMMEDIATE")
+        row = db.execute("SELECT epoch FROM ha_epoch").fetchone()
+        if row is not None and row[0] > epoch:
+            db.rollback()
+            raise FencedError(f"у файлі БД epoch {row[0]} новіший за {epoch}", stored=int(row[0]))
+        db.execute("INSERT INTO ha_epoch (id, epoch) VALUES (1, ?) ON CONFLICT(id) DO UPDATE SET epoch = excluded.epoch", (epoch,))
+        db.commit()
 
     def deactivate(self) -> None:
         """Більше не лідер: назад на :memory:. Тривоги далі йдуть у pending і показуються, але нічого не пишеться у файл."""
@@ -245,14 +259,21 @@ class Engine:
         резерв), якщо у файлі новіший epoch. Без HA (epoch None) нічого не робить."""
         with self.lock:
             self._fence_locked()
+            if self.epoch is not None and self.db.dialect == "postgres":
+                self.db.rollback()   # самостійна перевірка не тримає FOR SHARE: блокування знімається одразу
 
     def _fence_locked(self) -> None:
         if not self.active:
             raise NotActiveError("немає чинної оренди: запис і дії оператора заборонені")
         if self.epoch is None:
             return
-        row = self.db.execute("SELECT epoch FROM ha_epoch").fetchone()
+        # PostgreSQL: FOR SHARE тримається до commit запису, що йде далі в тій самій транзакції. Перехоплення оренди підіймає
+        # ha_epoch (UPDATE) і чекає завершення такого запису, тож між перевіркою й записом старий лідер не встигне пробитись.
+        pg = self.db.dialect == "postgres"
+        row = self.db.execute("SELECT epoch FROM ha_epoch WHERE id = 1 FOR SHARE" if pg else "SELECT epoch FROM ha_epoch").fetchone()
         if row is None or row[0] != self.epoch:
+            if pg:
+                self.db.rollback()
             stored = int(row[0]) if row else 0
             self._deactivate_locked()
             raise FencedError(f"у файлі БД epoch {stored}, мій {self.epoch}: лідером став інший", stored=stored)

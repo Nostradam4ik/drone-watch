@@ -25,6 +25,9 @@ def ensure_schema(db: Db) -> None:
     db.execute(f"""CREATE TABLE IF NOT EXISTS incident_reviews (
         id {pk}, incident_id BIGINT, status TEXT, by TEXT, ts {real}, note TEXT)""")
     db.execute("CREATE TABLE IF NOT EXISTS ha_epoch (id INTEGER PRIMARY KEY CHECK (id = 1), epoch BIGINT NOT NULL)")
+    if db.dialect == "postgres":   # оренда лідера живе в БД лише в режимі PostgreSQL (в SQLite вона в Redis)
+        db.execute("CREATE TABLE IF NOT EXISTS ha_lease (id INTEGER PRIMARY KEY CHECK (id = 1), owner TEXT NOT NULL, "
+                   "epoch BIGINT NOT NULL, expires_at TIMESTAMPTZ NOT NULL)")
     db.commit()
 
 
