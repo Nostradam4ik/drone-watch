@@ -4,8 +4,8 @@ import threading
 
 import pytest
 from pydantic import ValidationError
-from tests.conftest import pg_dsn
 
+from conftest import pg_dsn
 from dronewatch.service import app, config, dashboard_redis
 from dronewatch.service.audit import AuditEntry, AuditLog
 from dronewatch.service.pg_lease import PgLeaseStore

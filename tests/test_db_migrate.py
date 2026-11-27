@@ -6,8 +6,8 @@ import zlib
 from pathlib import Path
 
 import pytest
-from tests.conftest import pg_dsn
 
+from conftest import pg_dsn
 from dronewatch.service import db_migrate
 from dronewatch.service.audit import AuditEntry, AuditLog
 from dronewatch.service.pg_lease import PgLeaseStore

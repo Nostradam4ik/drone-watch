@@ -4,8 +4,8 @@ import threading
 from pathlib import Path
 
 import pytest
-from tests.conftest import pg_dsn
 
+from conftest import pg_dsn
 from dronewatch.service.audit import GENESIS, AuditEntry, AuditLog, VerifyResult
 from dronewatch.service.store import PostgresStore, StoreError
 

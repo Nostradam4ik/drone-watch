@@ -3,8 +3,8 @@ import builtins
 import sqlite3
 
 import pytest
-from tests.conftest import pg_dsn
 
+from conftest import pg_dsn
 from dronewatch.service.config import StorageCfg
 from dronewatch.service.store import PostgresStore, SqliteStore, StoreError, open_store
 
