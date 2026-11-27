@@ -1,0 +1,73 @@
+# Конфіг сервісу в КЛАСТЕРІ (deploy/ha-cluster). Структура та сама, що в deploy/config.yaml, але БЕЗ публічних демо-секретів:
+# REPLACE_ME_* нижче треба замінити своїми, інакше сервіс не стартує (fail-closed), а кластерний режим окремо відмовляє на демо-секретах.
+#   dronewatch-keygen radar1 rf1 ac1                                        (key_sha256 кожного датчика; ключ датчика видати лише йому)
+#   dronewatch-keygen --dashboard-user admin --role admin --generate         (password_hash користувача дашборда)
+# Адреси 10.10.0.x (WireGuard) замініть на свої. Паролі БД і Redis лише в змінних оточення (DRONEWATCH_PG_PASSWORD, DRONEWATCH_REDIS_PASSWORD).
+mode: live
+scan_dt: 0.5
+sensor_timeout_s: 5   # тиша довше за це = датчик відмовив (емулятор шле heartbeat кожен скан)
+max_events_per_sensor_scan: 150  # стелі проти потопу подій, пояснення в src/dronewatch/service/config.example.yaml
+max_tracks: 200
+
+# Користувач дашборда: password_hash згенеруйте (див. шапку), роль admin бачить усе, operator вирішує тривоги, viewer лише читає.
+dashboard:
+  auth: required
+  session_ttl_s: 28800
+  session_store: redis   # сесії й ліміт входів спільні для обох копій (Redis Sentinel): вхід не губиться при перемиканні копії
+  users:
+    - {name: admin, role: admin, password_hash: "REPLACE_ME_dashboard_hash"}
+
+sensors:
+  - id: radar1
+    type: radar
+    position: [0, 0]
+    max_range: 1500
+    noise: {range_m: 5, azimuth_deg: 0.7, elevation_deg: 1.5}
+    latency_s: 0.1
+    key_sha256: "REPLACE_ME_radar1"
+  - id: rf1
+    type: rf
+    position: [400, -300]
+    max_range: 1800
+    noise: {azimuth_deg: 5}
+    latency_s: 0.3
+    key_sha256: "REPLACE_ME_rf1"
+  - id: ac1
+    type: acoustic
+    position: [-300, 200]
+    max_range: 700
+    noise: {azimuth_deg: 10}
+    latency_s: 0.5
+    key_sha256: "REPLACE_ME_ac1"
+
+zones:
+  - {name: "Буферна зона",  radius_m: 600, level: WARNING}
+  - {name: "Критична зона", radius_m: 250, level: CRITICAL}
+
+# Де на карті світу лежить точка (0, 0) системи координат датчиків (position у метрах: схід, північ).
+# Лише для показу на карті дашборда; за замовчуванням Ейфелева вежа в Парижі.
+origin: {lat: 48.8584, lon: 2.2945}
+
+alerts:
+  min_age_s: 5
+  require_radar_in_cover: true
+  max_coast_scans: 2
+
+# AI-асистент оператора: безпечно лишати enabled: true навіть без ключа. Без MISTRAL_API_KEY у середовищі сервіс
+# все одно стартує, AI-асистент просто вимкнений (/api/ai/ask повертає 503). Щоб увімкнути:
+# MISTRAL_API_KEY=ваш_ключ docker compose --profile demo-sensors --profile ai up --build
+ai:
+  enabled: true
+  qdrant_url: http://qdrant:6333   # ім'я сервісу qdrant у мережі docker-compose (профіль ai)
+
+# ---- HA-кластер: PostgreSQL під Patroni і Redis Sentinel (адреси 10.10.0.x замініть на свої).
+storage:
+  backend: postgres
+  dsn: postgresql://dw_app@10.10.0.1:5432,10.10.0.2:5432/dronewatch?sslmode=verify-full&target_session_attrs=read-write
+ha:
+  enabled: true
+  lease_ttl_s: 6
+redis:
+  sentinels: ["10.10.0.1:26379", "10.10.0.2:26379", "10.10.0.3:26379"]
+  master_name: dw
+  ca_cert: /certs/ca.crt

@@ -9,6 +9,7 @@ import json
 import logging
 import secrets
 import time
+from collections.abc import Sequence
 from typing import Any
 
 from dronewatch.service.dashboard_auth import Role, Session, SessionStoreError
@@ -31,6 +32,32 @@ def connect(url: str) -> Any:
     except redis.RedisError as e:
         raise SessionStoreError(f"Redis недоступний: {type(e).__name__}") from e   # без тексту помилки: у ньому може бути URL із паролем
     return client
+
+
+def connect_sentinel(sentinels: Sequence[tuple[str, int]], master_name: str, password: str | None, ca_cert: str | None) -> Any:
+    """Клієнт поточного master через Redis Sentinel (HA). Лише TLS (і до Sentinel, і до master), без відкату на відкритий текст.
+    Після перемикання master клієнт сам знаходить новий: наступна команда йде вже на нього (сесії лишаються fail-closed на час
+    перемикання). Недоступний Sentinel/master при старті: сервіс не стартує. Тексту помилок немає: у ньому адреси й пароль."""
+    if not ca_cert:
+        raise SessionStoreError("redis (Sentinel): потрібен ca_cert, без нього сервер не перевірити")
+    try:
+        from redis.sentinel import Sentinel
+    except ImportError:
+        raise SessionStoreError("потрібен пакет redis: pip install 'dronewatch[redis]'") from None
+    timeouts: dict[str, Any] = {"socket_timeout": TIMEOUT_S, "socket_connect_timeout": TIMEOUT_S}
+    # перевірка сертифіката й імені сервера задана явно: безпека не залежить від типових значень версії redis-py
+    tls: dict[str, Any] = {"ssl": True, "ssl_ca_certs": ca_cert, "ssl_cert_reqs": "required", "ssl_check_hostname": True,
+                           "password": password}
+    client = Sentinel(list(sentinels), sentinel_kwargs={**tls, **timeouts}, **tls, **timeouts)
+    master = client.master_for(master_name, decode_responses=True, health_check_interval=30, **timeouts)
+    failed = ""
+    try:
+        master.ping()
+    except Exception as e:   # RedisError, а також помилки TLS/файлу CA: у тексті адреси й шляхи, тож лише імʼя типу
+        failed = type(e).__name__
+    if failed:
+        raise SessionStoreError(f"Redis (Sentinel) недоступний: {failed}")
+    return master
 
 
 class RedisSessionStore:

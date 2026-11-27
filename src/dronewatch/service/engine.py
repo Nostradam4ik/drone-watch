@@ -31,6 +31,8 @@ from dronewatch.service.catalog import DRONES, UNKNOWN_MODEL, describe
 from dronewatch.service.forecast import EDGE_FRACTION, LOST_KEEP_S, forecast, loss_reason, search_area
 from dronewatch.service.ha import FencedError, NotActiveError
 from dronewatch.service.replay import SIDE_CODE, ReplayOptions, ReplayRecorder
+from dronewatch.service.schema import ensure_schema
+from dronewatch.service.store import Db, GuardedDb, SqliteStore, Store, StoreError
 
 log = logging.getLogger("dronewatch.engine")
 Level = Literal["NONE", "WARNING", "CRITICAL"]
@@ -134,21 +136,16 @@ class Zone:
         return {"name": self.name, "radius": self.radius, "level": self.level, "center": self.center.tolist()}
 
 
-def _open_db(path: str) -> sqlite3.Connection:
-    """Відкриває БД і створює/мігрує таблиці рушія (інциденти, рішення оператора, запобіжник epoch для HA)."""
-    db = sqlite3.connect(path, check_same_thread=False)
-    db.execute("""CREATE TABLE IF NOT EXISTS incidents (
-        id INTEGER PRIMARY KEY AUTOINCREMENT, ts REAL, track_id INTEGER, level TEXT, zone TEXT,
-        x REAL, y REAL, z REAL, speed REAL, sensors TEXT)""")
-    have = {r[1] for r in db.execute("PRAGMA table_info(incidents)")}
-    for col, typ in (("model", "TEXT"), ("model_name", "TEXT"), ("side", "TEXT"), ("status", "TEXT"),
-                     ("reviewed_by", "TEXT"), ("reviewed_at", "REAL"), ("review_note", "TEXT"), ("failover", "INTEGER")):
-        if col not in have:   # міграція старих журналів: нові колонки лишаються NULL у старих рядках (NULL status = new)
-            db.execute(f"ALTER TABLE incidents ADD COLUMN {col} {typ}")
-    db.execute("""CREATE TABLE IF NOT EXISTS incident_reviews (
-        id INTEGER PRIMARY KEY AUTOINCREMENT, incident_id INTEGER, status TEXT, by TEXT, ts REAL, note TEXT)""")
-    db.commit()
-    return db
+def _open_db(target: "str | Store") -> Db:
+    """Відкриває сховище (шлях до файлу SQLite чи Store) і створює/мігрує таблиці рушія."""
+    store = SqliteStore(target) if isinstance(target, str) else target
+    db = store.connect()
+    try:
+        ensure_schema(db)
+    except BaseException:
+        db.close()
+        raise
+    return GuardedDb(store, db) if store.kind == "postgres" else db
 
 
 class Engine:
@@ -203,19 +200,12 @@ class Engine:
         self.audit = AuditLog(self.db, self.lock)   # той самий файл БД; append бере self.lock, тож під замком лише append_locked
 
     # --- HA: роль резерв/лідер
-    def activate(self, db_path: str, epoch: int) -> None:
+    def activate(self, target: "str | Store", epoch: int) -> None:
         """Стає лідером: відкриває справжній файл БД, захоплює запобіжник epoch у самому файлі (FencedError, якщо там уже новіший),
         дописує тривоги, підняті без оренди (failover=1). Той самий epoch удруге дозволений: лідер, що повернувся до Redis."""
-        db = _open_db(db_path)
+        db = _open_db(target)
         try:
-            db.execute("CREATE TABLE IF NOT EXISTS ha_epoch (id INTEGER PRIMARY KEY CHECK (id = 1), epoch INTEGER NOT NULL)")
-            db.execute("BEGIN IMMEDIATE")
-            row = db.execute("SELECT epoch FROM ha_epoch").fetchone()
-            if row is not None and row[0] > epoch:
-                db.rollback()
-                raise FencedError(f"у файлі БД epoch {row[0]} новіший за {epoch}", stored=int(row[0]))
-            db.execute("INSERT INTO ha_epoch (id, epoch) VALUES (1, ?) ON CONFLICT(id) DO UPDATE SET epoch = excluded.epoch", (epoch,))
-            db.commit()
+            self._claim_epoch(db, epoch)
         except BaseException:
             db.close()
             raise
@@ -227,6 +217,26 @@ class Engine:
             self._flush_pending()
             self.active, self.epoch = True, epoch
             old.close()
+
+    @staticmethod
+    def _claim_epoch(db: Db, epoch: int) -> None:
+        """Записує epoch у файл/БД, якщо там не новіший (інакше FencedError зі збереженим)."""
+        if db.dialect == "postgres":
+            row = db.execute("INSERT INTO ha_epoch (id, epoch) VALUES (1, ?) ON CONFLICT (id) DO UPDATE SET epoch = excluded.epoch "
+                             "WHERE ha_epoch.epoch <= excluded.epoch RETURNING epoch", (epoch,)).fetchone()
+            if row is None:
+                stored = int(db.execute("SELECT epoch FROM ha_epoch WHERE id = 1").fetchone()[0])
+                db.rollback()
+                raise FencedError(f"у БД epoch {stored} новіший за {epoch}", stored=stored)
+            db.commit()
+            return
+        db.execute("BEGIN IMMEDIATE")
+        row = db.execute("SELECT epoch FROM ha_epoch").fetchone()
+        if row is not None and row[0] > epoch:
+            db.rollback()
+            raise FencedError(f"у файлі БД epoch {row[0]} новіший за {epoch}", stored=int(row[0]))
+        db.execute("INSERT INTO ha_epoch (id, epoch) VALUES (1, ?) ON CONFLICT(id) DO UPDATE SET epoch = excluded.epoch", (epoch,))
+        db.commit()
 
     def deactivate(self) -> None:
         """Більше не лідер: назад на :memory:. Тривоги далі йдуть у pending і показуються, але нічого не пишеться у файл."""
@@ -249,14 +259,21 @@ class Engine:
         резерв), якщо у файлі новіший epoch. Без HA (epoch None) нічого не робить."""
         with self.lock:
             self._fence_locked()
+            if self.epoch is not None and self.db.dialect == "postgres":
+                self.db.rollback()   # самостійна перевірка не тримає FOR SHARE: блокування знімається одразу
 
     def _fence_locked(self) -> None:
         if not self.active:
             raise NotActiveError("немає чинної оренди: запис і дії оператора заборонені")
         if self.epoch is None:
             return
-        row = self.db.execute("SELECT epoch FROM ha_epoch").fetchone()
+        # PostgreSQL: FOR SHARE тримається до commit запису, що йде далі в тій самій транзакції. Перехоплення оренди підіймає
+        # ha_epoch (UPDATE) і чекає завершення такого запису, тож між перевіркою й записом старий лідер не встигне пробитись.
+        pg = self.db.dialect == "postgres"
+        row = self.db.execute("SELECT epoch FROM ha_epoch WHERE id = 1 FOR SHARE" if pg else "SELECT epoch FROM ha_epoch").fetchone()
         if row is None or row[0] != self.epoch:
+            if pg:
+                self.db.rollback()
             stored = int(row[0]) if row else 0
             self._deactivate_locked()
             raise FencedError(f"у файлі БД epoch {stored}, мій {self.epoch}: лідером став інший", stored=stored)
@@ -283,6 +300,8 @@ class Engine:
         if written:
             self.db.commit()
             log.warning("HA: дописано %d тривог, піднятих без чинної оренди", written)
+        else:
+            self._end_txn()
         self.pending.clear()
 
     def _stash_pending(self, alerts: list[Alert]) -> None:
@@ -292,11 +311,10 @@ class Engine:
             del self.pending[:-MAX_PENDING]
 
     def _insert_incident(self, a: Alert, *, failover: bool = False) -> int:
-        cur = self.db.execute("INSERT INTO incidents (ts, track_id, level, zone, x, y, z, speed, sensors,"
-                              " model, model_name, side, status, failover) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,'new',?)",
-                              (a["ts"], a["track_id"], a["level"], a["zone"], *a["pos"], a["speed"], ",".join(a["sensors"]),
-                               a["model"], a["model_name"], a["side"], 1 if failover else None))
-        return cur.lastrowid or 0
+        return self.db.insert_id("INSERT INTO incidents (ts, track_id, level, zone, x, y, z, speed, sensors,"
+                                 " model, model_name, side, status, failover) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,'new',?)",
+                                 (a["ts"], a["track_id"], a["level"], a["zone"], *a["pos"], a["speed"], ",".join(a["sensors"]),
+                                  a["model"], a["model_name"], a["side"], 1 if failover else None))
 
     # --- вхід
     def reset(self) -> None:
@@ -458,9 +476,22 @@ class Engine:
             for k, v in self.tracker.dropped.items():
                 self.stats[k] += v
             self.stats["scans"] += 1
+            self._retry_pending_locked()
             alerts = self._evaluate(t)
             self._record_replay(alerts)
             return alerts
+
+    def _retry_pending_locked(self) -> None:
+        """Лідер із чинною орендою, чиї тривоги не записались (сховище лежало): дописуємо, щойно воно відповідає."""
+        if not self.pending or not self.active:
+            return
+        try:
+            self._fence_locked()
+            self._flush_pending()
+        except (NotActiveError, FencedError):
+            pass   # нас відсікли: pending допишеться при наступному підвищенні
+        except StoreError:
+            pass   # досі лежить; відкат і лог зробило зʼєднання
 
     def _record_replay(self, alerts: list[Alert]) -> None:
         """Кадр для відтворення інцидентів (під self.lock). Збій запису лише в лог: трекінг від нього не залежить."""
@@ -468,6 +499,8 @@ class Engine:
             return
         try:
             self.replay.on_scan(self.clock(), self._replay_frame, alerts if self.active else [], self._replay_setup)
+        except StoreError:
+            pass   # сховище недоступне: це вже в логу один раз (GuardedDb), стек на кожен скан не потрібен
         except Exception:
             log.exception("запис для відтворення інцидентів не вдався")
 
@@ -637,12 +670,17 @@ class Engine:
         if new_alerts:
             try:
                 self._fence_locked()   # без HA це no-op; з HA: чинна ли ще наша оренда (інакше тривога йде в pending)
-            except (NotActiveError, FencedError):
+            except (NotActiveError, FencedError, StoreError):   # StoreError: сховище недоступне, тривога лишається в памʼяті й pending
                 self._stash_pending(new_alerts)
             else:
-                for a in new_alerts:
-                    a["id"] = self._insert_incident(a)
-                self.db.commit()
+                try:
+                    for a in new_alerts:
+                        a["id"] = self._insert_incident(a)
+                    self.db.commit()
+                except StoreError:   # відкат уже зробило зʼєднання; commit міг дійти без відповіді: дедуплікація при дописуванні
+                    for a in new_alerts:
+                        a["id"] = 0
+                    self._stash_pending(new_alerts)
             self.alerts = (new_alerts[::-1] + self.alerts)[:200]
         alive = {tr.id for tr in self.tracker.tracks}
         for tid in list(self.max_level):
@@ -664,29 +702,44 @@ class Engine:
         clean = (note or "").strip()[:MAX_REVIEW_NOTE] or None
         with self.lock:
             self._fence_locked()
-            if self.db.execute("SELECT 1 FROM incidents WHERE id=?", (incident_id,)).fetchone() is None:
-                return None
-            ts = self.clock()
-            try:
-                self.db.execute("INSERT INTO incident_reviews (incident_id, status, by, ts, note) VALUES (?,?,?,?,?)",
-                                (incident_id, status, by, ts, clean))
-                self.db.execute("UPDATE incidents SET status=?, reviewed_by=?, reviewed_at=?, review_note=? WHERE id=?",
-                                (status, by, ts, clean, incident_id))
-                if audit is not None:
-                    self.audit.append_locked(audit)
-                self.db.commit()
-            except Exception as e:   # не лише sqlite: будь-який збій запису журналу не має лишити напівтранзакцію на спільному зʼєднанні
-                if audit is None:
-                    raise
-                with contextlib.suppress(sqlite3.Error):
-                    self.db.rollback()
-                raise AuditError(f"рішення не записано, журнал дій недоступний: {e}") from e
-            for a in self.alerts:
-                if a["id"] == incident_id:
-                    a["status"], a["reviewed_by"], a["reviewed_at"], a["review_note"] = status, by, ts, clean
-            cur = self.db.execute("SELECT * FROM incidents WHERE id=?", (incident_id,))
-            cols = [c[0] for c in cur.description]
-            return dict(zip(cols, cur.fetchone(), strict=True))
+            try:   # finally знімає FOR SHARE на ha_epoch на КОЖНОМУ виході: інакше перехоплення оренди зависло б
+                if self.db.execute("SELECT 1 FROM incidents WHERE id=?", (incident_id,)).fetchone() is None:
+                    return None
+                ts = self.clock()
+                try:
+                    self.db.execute("INSERT INTO incident_reviews (incident_id, status, by, ts, note) VALUES (?,?,?,?,?)",
+                                    (incident_id, status, by, ts, clean))
+                    self.db.execute("UPDATE incidents SET status=?, reviewed_by=?, reviewed_at=?, review_note=? WHERE id=?",
+                                    (status, by, ts, clean, incident_id))
+                    if audit is not None:
+                        self.audit.append_locked(audit)
+                    self.db.commit()
+                except Exception as e:   # не лише sqlite: збій запису журналу не має лишити напівтранзакцію на спільному зʼєднанні
+                    if audit is None:
+                        raise
+                    with contextlib.suppress(sqlite3.Error, StoreError):
+                        self.db.rollback()
+                    raise AuditError(f"рішення не записано, журнал дій недоступний: {e}") from e
+                for a in self.alerts:
+                    if a["id"] == incident_id:
+                        a["status"], a["reviewed_by"], a["reviewed_at"], a["review_note"] = status, by, ts, clean
+                cur = self.db.execute("SELECT * FROM incidents WHERE id=?", (incident_id,))
+                cols = [c[0] for c in cur.description]
+                return dict(zip(cols, cur.fetchone(), strict=True))
+            finally:
+                self._end_txn()
+
+    @property
+    def db_healthy(self) -> bool:
+        """False, коли сховище (PostgreSQL) зараз недоступне; SQLite і пам'ять завжди True."""
+        return bool(getattr(self.db, "healthy", True))
+
+    def _end_txn(self) -> None:
+        """PostgreSQL: закриває транзакцію, що лишилась відкритою (читання після commit, вихід без запису): знімає FOR SHARE і знімок.
+        SQLite: нічого (його поведінка не змінюється)."""
+        if self.db.dialect == "postgres":
+            with contextlib.suppress(StoreError):
+                self.db.rollback()
 
     def incident_stats(self, since_ts: float | None = None) -> list[dict[str, Any]]:
         """Кількість інцидентів за зоною й статусом (NULL = new); since_ts відсікає старіші."""
@@ -694,6 +747,7 @@ class Engine:
             rows = self.db.execute("SELECT zone, COALESCE(status,'new'), count(*) FROM incidents WHERE ts >= ? "
                                    "GROUP BY zone, COALESCE(status,'new') ORDER BY zone, 2",
                                    (since_ts if since_ts is not None else float("-inf"),)).fetchall()
+            self._end_txn()
         return [{"zone": z, "status": st, "count": n} for z, st, n in rows]
 
     # --- вихід

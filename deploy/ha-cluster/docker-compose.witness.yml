@@ -1,0 +1,50 @@
+# Свідок кластера (третя крихітна машина): лише кворум, жодних даних. etcd (третій голос Patroni) і Sentinel (третій голос Redis).
+# Запуск: docker compose -f docker-compose.witness.yml --env-file .env up -d      (.env: NODE_NAME=witness, NODE_IP=W_IP)
+# Без PostgreSQL, брокера й сервісу. Порти лише на адресі WireGuard ${NODE_IP}.
+name: dw-witness
+
+services:
+  etcd:
+    image: quay.io/coreos/etcd:v3.5.17
+    restart: unless-stopped
+    ports: ["${NODE_IP:?задайте NODE_IP у .env}:2379:2379", "${NODE_IP:?задайте NODE_IP у .env}:2380:2380"]
+    environment:
+      ETCD_NAME: witness
+      ETCD_DATA_DIR: /etcd-data
+      ETCD_LISTEN_CLIENT_URLS: https://0.0.0.0:2379
+      ETCD_ADVERTISE_CLIENT_URLS: https://${NODE_IP}:2379
+      ETCD_LISTEN_PEER_URLS: https://0.0.0.0:2380
+      ETCD_INITIAL_ADVERTISE_PEER_URLS: https://${NODE_IP}:2380
+      ETCD_INITIAL_CLUSTER: node-a=https://${A_IP}:2380,node-b=https://${B_IP}:2380,witness=https://${W_IP}:2380
+      ETCD_INITIAL_CLUSTER_TOKEN: ${CLUSTER_SCOPE}
+      ETCD_INITIAL_CLUSTER_STATE: new
+      ETCD_CLIENT_CERT_AUTH: "true"
+      ETCD_TRUSTED_CA_FILE: /certs/ca.crt
+      ETCD_CERT_FILE: /certs/etcd.crt
+      ETCD_KEY_FILE: /certs/etcd.key
+      ETCD_PEER_CLIENT_CERT_AUTH: "true"
+      ETCD_PEER_TRUSTED_CA_FILE: /certs/ca.crt
+      ETCD_PEER_CERT_FILE: /certs/etcd.crt
+      ETCD_PEER_KEY_FILE: /certs/etcd.key
+    volumes:
+      - etcd-data:/etcd-data
+      - ${CERTS_DIR:-./certs}:/certs:ro
+
+  sentinel:
+    image: redis:7
+    restart: unless-stopped
+    entrypoint: ["/bin/sh", "/opt/dw/entrypoint.sh"]
+    ports: ["${NODE_IP:?задайте NODE_IP у .env}:26379:26379"]
+    environment:
+      NODE_IP: ${NODE_IP}
+      A_IP: ${A_IP}
+      REDIS_PASSWORD: ${REDIS_PASSWORD:?задайте у .env}
+      REDIS_MASTER_NAME: ${REDIS_MASTER_NAME:-dw}
+    volumes:
+      - ./sentinel/entrypoint.sh:/opt/dw/entrypoint.sh:ro
+      - sentinel-data:/data
+      - ${CERTS_DIR:-./certs}:/certs:ro
+
+volumes:
+  etcd-data:
+  sentinel-data:

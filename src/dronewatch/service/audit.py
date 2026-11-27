@@ -14,11 +14,13 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
+from dronewatch.service.store import Db, StoreError, as_db
+
 GENESIS = "0" * 64
 MAX_LEN = {"user": 64, "role": 16, "action": 32, "target": 200, "result": 16, "ip": 64}
 MAX_BLOCKED_KEYS = 10_000
 OVERFLOW_KEY = "*overflow*"   # спільний ключ для всіх, кому не вистачило місця в таблиці
-_COLS = "id, ts, user, role, action, target, result, ip, prev_hash, hash"
+_COLS = 'id, ts, "user", role, action, target, result, ip, prev_hash, hash'   # "user" у лапках: у PostgreSQL голе user це поточна роль
 
 
 class AuditError(Exception):
@@ -55,14 +57,18 @@ def _digest(prev_hash: str, ts: float, user: str, role: str, action: str, target
 
 
 class AuditLog:
-    def __init__(self, db: sqlite3.Connection, lock: threading.Lock, clock: Callable[[], float] = time.time,
+    def __init__(self, db: "Db | sqlite3.Connection", lock: threading.Lock, clock: Callable[[], float] = time.time,
                  create: bool = True) -> None:
         """create=False: лише читання готової БД (CLI перевірки), нічого не створює й не пише."""
+        db = as_db(db)
         self._db, self._lock, self._clock = db, lock, clock
         self._blocked: dict[str, float] = {}
         self._blocked_lock = threading.Lock()
         self._rates: dict[str, tuple[float, int]] = {}
         if not create:
+            return
+        if db.dialect == "postgres":
+            self._create_postgres(db)
             return
         db.execute("""CREATE TABLE IF NOT EXISTS audit_log (
             id INTEGER PRIMARY KEY AUTOINCREMENT, ts REAL, user TEXT, role TEXT, action TEXT, target TEXT,
@@ -74,18 +80,51 @@ class AuditLog:
                    "BEGIN SELECT RAISE(ABORT, 'audit_log is append-only'); END")
         db.commit()
 
+    @staticmethod
+    def _create_postgres(db: Db) -> None:
+        if db.columns("audit_log") and db.columns("audit_head"):
+            return   # робоча роль dw_app не має права DDL (CREATE/DROP TRIGGER): таблиці й тригери вже створив власник
+        """id призначає код (не IDENTITY): послідовність PostgreSQL пропускає значення при відкаті, а ланцюжок вимагає id підряд.
+        `audit_head` тримає останній id і хеш; рядок блокується на час вставки, тож додавання йдуть по черзі."""
+        db.execute("""CREATE TABLE IF NOT EXISTS audit_log (
+            id BIGINT PRIMARY KEY, ts DOUBLE PRECISION, "user" TEXT, role TEXT, action TEXT, target TEXT,
+            result TEXT, ip TEXT, prev_hash TEXT, hash TEXT)""")
+        db.execute("CREATE INDEX IF NOT EXISTS audit_log_ts ON audit_log (ts)")
+        db.execute("CREATE TABLE IF NOT EXISTS audit_head (id INTEGER PRIMARY KEY CHECK (id = 1), "
+                   "last_id BIGINT NOT NULL, head_hash TEXT NOT NULL)")
+        db.execute("INSERT INTO audit_head (id, last_id, head_hash) VALUES (1, 0, ?) ON CONFLICT (id) DO NOTHING", (GENESIS,))
+        db.execute("CREATE OR REPLACE FUNCTION audit_log_immutable() RETURNS trigger AS $$ BEGIN "
+                   "RAISE EXCEPTION 'audit_log is append-only'; END $$ LANGUAGE plpgsql")
+        db.execute("DROP TRIGGER IF EXISTS audit_log_immutable ON audit_log")
+        db.execute("CREATE TRIGGER audit_log_immutable BEFORE UPDATE OR DELETE ON audit_log "
+                   "FOR EACH ROW EXECUTE FUNCTION audit_log_immutable()")
+        db.execute("DROP TRIGGER IF EXISTS audit_log_no_truncate ON audit_log")
+        db.execute("CREATE TRIGGER audit_log_no_truncate BEFORE TRUNCATE ON audit_log "
+                   "FOR EACH STATEMENT EXECUTE FUNCTION audit_log_immutable()")
+        db.commit()
+
     def append_locked(self, entry: AuditEntry) -> int:
         """Без замка й без commit: для транзакцій, які вже тримає виклик (він сам комітить або відкочує)."""
         user, role = clean(entry.user, MAX_LEN["user"]), clean(entry.role, MAX_LEN["role"])
         action, target = clean(entry.action, MAX_LEN["action"]), clean(entry.target, MAX_LEN["target"])
         result, ip = clean(entry.result, MAX_LEN["result"]), clean(entry.ip, MAX_LEN["ip"])
         ts = float(self._clock())
+        if self._db.dialect == "postgres":
+            head = self._db.execute("SELECT last_id, head_hash FROM audit_head WHERE id = 1 FOR UPDATE").fetchone()
+            if head is None:
+                raise AuditError("audit_head не ініціалізовано")
+            new_id, prev = int(head[0]) + 1, str(head[1])
+            digest = _digest(prev, ts, user, role, action, target, result, ip)
+            self._db.execute(
+                'INSERT INTO audit_log (id, ts, "user", role, action, target, result, ip, prev_hash, hash) VALUES (?,?,?,?,?,?,?,?,?,?)',
+                (new_id, ts, user, role, action, target, result, ip, prev, digest))
+            self._db.execute("UPDATE audit_head SET last_id = ?, head_hash = ? WHERE id = 1", (new_id, digest))
+            return new_id
         row = self._db.execute("SELECT hash FROM audit_log ORDER BY id DESC LIMIT 1").fetchone()
         prev = row[0] if row else GENESIS
-        cur = self._db.execute(
-            "INSERT INTO audit_log (ts, user, role, action, target, result, ip, prev_hash, hash) VALUES (?,?,?,?,?,?,?,?,?)",
+        return self._db.insert_id(
+            'INSERT INTO audit_log (ts, "user", role, action, target, result, ip, prev_hash, hash) VALUES (?,?,?,?,?,?,?,?,?)',
             (ts, user, role, action, target, result, ip, prev, _digest(prev, ts, user, role, action, target, result, ip)))
-        return cur.lastrowid or 0
 
     def append(self, entry: AuditEntry) -> int:
         with self._lock:
@@ -94,7 +133,7 @@ class AuditLog:
                 self._db.commit()
                 return rid
             except Exception as e:   # будь-який збій (не лише sqlite) = відкіт і AuditError, щоб виклик не лишив напівтранзакцію
-                with contextlib.suppress(sqlite3.Error):
+                with contextlib.suppress(sqlite3.Error, StoreError):
                     self._db.rollback()
                 raise AuditError(f"не вдалося записати в журнал дій: {e}") from e
 
@@ -103,7 +142,15 @@ class AuditLog:
         with self._lock:
             cur = self._db.execute(f"SELECT {_COLS} FROM audit_log ORDER BY id DESC LIMIT ?", (n,))
             cols = [c[0] for c in cur.description]
-            return [dict(zip(cols, r, strict=True)) for r in cur.fetchall()]
+            rows = [dict(zip(cols, r, strict=True)) for r in cur.fetchall()]
+            self._end_read()
+            return rows
+
+    def _end_read(self) -> None:
+        """PostgreSQL: читання відкрило транзакцію; закриваємо, щоб зʼєднання не стояло idle in transaction."""
+        if self._db.dialect == "postgres":
+            with contextlib.suppress(StoreError):
+                self._db.rollback()
 
     def verify(self) -> VerifyResult:
         """Іде по id, перераховує хеш і звіряє prev_hash; id мусять іти підряд від 1, а останній дорівнювати лічильнику
@@ -120,8 +167,15 @@ class AuditLog:
                     elif prev_hash != prev or h != _digest(prev_hash, ts, user, role, action, target, result, ip):
                         broken = rid
                 prev, expected = h, rid + 1
-            seq_row = self._db.execute("SELECT seq FROM sqlite_sequence WHERE name = 'audit_log'").fetchone()
-        seq = seq_row[0] if seq_row else 0
+            if self._db.dialect == "postgres":
+                head = self._db.execute("SELECT last_id, head_hash FROM audit_head WHERE id = 1").fetchone()
+                seq, head_hash = (int(head[0]), str(head[1])) if head else (0, GENESIS)
+                if broken is None and seq == expected - 1 and head_hash != prev:   # хвіст підмінено разом із ланцюжком
+                    broken = max(1, expected - 1)
+            else:
+                seq_row = self._db.execute("SELECT seq FROM sqlite_sequence WHERE name = 'audit_log'").fetchone()
+                seq = seq_row[0] if seq_row else 0
+            self._end_read()
         if broken is None and seq != expected - 1:   # лічильник пам'ятає більше (кінець видалено) або менше, ніж є в таблиці
             broken = min(seq, expected - 1) + 1
         return VerifyResult(ok=broken is None, rows=rows, broken_at=broken, head=prev)

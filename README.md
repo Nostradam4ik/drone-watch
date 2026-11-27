@@ -285,6 +285,37 @@ HTTP-події лідер дзеркалить у резерв через ка�
 (одна 200, інша 503), `docker kill saasfor-ha-<лідер>-1`, секундомір до 200 на другій (≈ 6-8 с), `dronewatch-audit --verify`.
 Конфіг стенда `deploy/config.ha.yaml` це копія `deploy/config.yaml` плюс блок `ha`: датчики й зони правте в обох.
 
+### HA v2: два вузли, PostgreSQL і Redis Sentinel
+
+Для втрати цілого вузла: `storage.backend: postgres` (інциденти, рішення, replay і журнал дій у PostgreSQL), оренда лідера й
+запобіжник epoch у тій самій БД (`ha.lease_store: postgres`, виставляється сам), секція `redis` з Sentinel для сесій і релея.
+Проєкт і рішення: `docs/superpowers/specs/2026-11-24-ha-v2-postgres-design.md`. Нове в конфігу:
+
+```yaml
+storage:
+  backend: postgres
+  # без пароля в DSN (він у DRONEWATCH_PG_PASSWORD); sslmode і target_session_attrs обов'язкові
+  dsn: postgresql://dw_app@vps-a:5432,vps-b:5432/dronewatch?sslmode=verify-full&target_session_attrs=read-write
+ha: {enabled: true}
+redis:
+  sentinels: ["vps-a:26379", "vps-b:26379", "witness:26379"]   # рівно кворум 2 з 3, мінімум три
+  master_name: dw
+  ca_cert: /certs/ca.pem        # обов'язково: сервер перевіряється, TLS завжди
+```
+
+Пакети: `pip install 'dronewatch[postgres,redis]'`. PostgreSQL недоступний при старті HA: сервіс не стартує (fail-closed). Під час
+роботи його збій не зупиняє сканування: тривоги лишаються на екрані й дописуються в журнал після повернення БД, дії оператора
+дають 503; `/api/health` показує `storage.ok`. Схема створюється під `dw_owner` (`dronewatch-db-migrate --dsn ... --init`,
+права для `dw_app`: `deploy/ha-cluster/postgres-roles.sql`); перенесення журналу з файлу: `dronewatch-db-migrate --dsn ... --from incidents.db`
+(джерело не змінюється, ціль має бути порожня, ланцюжок хешів перевіряється до й після). Перевірка журналу в PostgreSQL:
+`dronewatch-audit --verify --dsn ...`.
+
+**Датчики пишуть в обидва брокери** (по одному на кожен вузол): так смерть вузла разом з його брокером не лишає систему без вхідних
+подій, а резерв бачить потік напряму. Рушій приймає кожну подію двічі без наслідків (дублі не дають зайвих треків і тривог,
+перевірено `tests/test_dual_broker.py`), але для цього обидва брокери мають отримувати **ті самі** вимірювання: датчик публікує
+одне вимірювання у два брокери, а не робить два незалежні виміри. Емулятор (`--mqtt`) шле лише в один брокер, тож два його
+процеси дали б різний шум під одним `sensor_id`: для перевірки дублів він не годиться, тут допомагає `tests/test_dual_broker.py`.
+
 ## Безпека входу
 
 ### Автентифікація датчиків (ключ на датчик)

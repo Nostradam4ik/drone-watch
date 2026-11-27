@@ -10,6 +10,7 @@ from pydantic import BaseModel, Field, ValidationError, field_validator, model_v
 from dronewatch.fusion.models import Sensor
 from dronewatch.service.dashboard_auth import Role, check_redis_url, parse_hash
 from dronewatch.service.engine import Zone
+from dronewatch.service.store import check_pg_dsn
 
 
 class Noise(BaseModel):
@@ -162,6 +163,50 @@ class HaCfg(BaseModel):
     redis_url: str | None = None   # той самий Redis, що для сесій; закрита внутрішня мережа
     lease_ttl_s: float = Field(default=6.0, ge=2, le=60)   # скільки живе оренда; перемикання не довше за це
     instance_id: str = "auto"      # імʼя копії; auto = hostname
+    # де живе оренда лідера: redis (v1, дані в SQLite) чи postgres (v2, оренда й epoch у тій самій БД, що дані). auto: за storage.backend
+    lease_store: Literal["auto", "redis", "postgres"] = "auto"
+
+
+# ПУБЛІЧНІ демо-секрети репозиторію (deploy/config.yaml, docker-compose.yml): їх знає кожен, хто бачив репозиторій. Демо-стенд
+# на SQLite їх використовує навмисно; кластер (storage.backend: postgres) відмовляє, бо він не демо.
+DEMO_DASHBOARD_HASHES = frozenset({
+    "scrypt$16384$8$1$eXh3SgyIi0PXvYt3gCZTBg==$azmH7B819uHU3cmhsJLDBbQXCMXMqxVzisRXbkZbgHw=",
+})
+DEMO_SENSOR_KEY_HASHES = frozenset({
+    "40bc1a2ade19ee4629588e5d5b10674c50e0e178a54c6fea6d7f8b99d3314fff",   # radar1
+    "168f535e4bdfb5f79534a7907ab1a5ac085b4b0001be3b644adef1c91142d679",   # rf1
+    "9594f53087f0a4f60f9b1ceca2f5dac54d6493cca3578caa854ef5ee276d18d8",   # ac1
+})
+
+
+class RedisCfg(BaseModel):
+    """Redis Sentinel (HA на двох вузлах і свідку): сесії, ліміт входів і релей подій йдуть на поточний master. Замінює
+    `ha.redis_url` і `dashboard.redis_url`. Лише TLS; пароль у DRONEWATCH_REDIS_PASSWORD. Sentinel-ів рівно стільки, щоб був
+    кворум 2 з 3: менше трьох не дозволено."""
+    sentinels: list[str] = Field(min_length=3, description="host:port кожного Sentinel (вузол A, вузол B, свідок)")
+    master_name: str = Field(default="dw", min_length=1)
+    ca_cert: str = Field(min_length=1, description="шлях до CA, що підписав сертифікати Redis/Sentinel (обовʼязково: сервер перевіряється)")
+
+    @field_validator("sentinels")
+    @classmethod
+    def _hostport(cls, items: list[str]) -> list[str]:
+        for item in items:
+            host, _, port = item.rpartition(":")
+            if not host or not port.isdigit() or not 1 <= int(port) <= 65535:
+                raise ValueError("redis.sentinels: кожен елемент має вигляд host:port")
+        return items
+
+    def endpoints(self) -> list[tuple[str, int]]:
+        return [(host, int(port)) for host, _, port in (item.rpartition(":") for item in self.sentinels)]
+
+
+class StorageCfg(BaseModel):
+    """Де лежать інциденти, рішення, replay і журнал дій. sqlite: файл (типово). postgres: лише з ha.enabled (HA на двох вузлах)."""
+    backend: Literal["sqlite", "postgres"] = "sqlite"
+    # postgresql://user@a:5432,b:5432/db?sslmode=verify-full&target_session_attrs=read-write; пароль лише в DRONEWATCH_PG_PASSWORD
+    dsn: str | None = None
+    connect_timeout_s: float = Field(default=2.0, gt=0, le=30)
+    statement_timeout_s: float = Field(default=3.0, gt=0, le=60)
 
 
 class Config(BaseModel):
@@ -183,14 +228,32 @@ class Config(BaseModel):
     ai: AiCfg = AiCfg()
     replay: ReplayCfg = ReplayCfg()
     ha: HaCfg = HaCfg()
+    storage: StorageCfg = StorageCfg()
+    redis: RedisCfg | None = None
 
     @model_validator(mode="after")
     def _check(self) -> Self:
         if self.ha.enabled:
             if self.mode != "live":
                 raise ValueError("ha.enabled працює лише з mode: live (демо не має що резервувати)")
-            if not self.ha.redis_url:
+            if not self.ha.redis_url and self.redis is None:
                 raise ValueError("ha.enabled вимагає ha.redis_url: оренда лідера живе в Redis")
+        if self.storage.backend == "postgres":
+            if not self.ha.enabled:
+                raise ValueError("storage.backend: postgres працює лише з ha.enabled (HA на двох вузлах); одна копія лишається на SQLite")
+            if not self.storage.dsn:
+                raise ValueError("storage.backend: postgres вимагає storage.dsn")
+            check_pg_dsn(self.storage.dsn)
+            demo_users = [u.name for u in self.dashboard.users if u.password_hash in DEMO_DASHBOARD_HASHES]
+            demo_sensors = [x.id for x in self.sensors if x.key_sha256 in DEMO_SENSOR_KEY_HASHES]
+            if demo_users or demo_sensors:
+                raise ValueError(f"кластер (storage.backend: postgres) не приймає публічні демо-секрети репозиторію (користувачі "
+                                 f"{demo_users}, датчики {demo_sensors}): згенеруйте свої (dronewatch-keygen)")
+        if self.ha.lease_store == "auto":
+            self.ha.lease_store = "postgres" if self.storage.backend == "postgres" else "redis"
+        elif (self.ha.lease_store == "postgres") != (self.storage.backend == "postgres"):
+            raise ValueError("ha.lease_store: postgres потребує storage.backend: postgres, а storage.backend: postgres потребує "
+                             "ha.lease_store: postgres (оренда й epoch мають жити в тій самій БД, що й дані)")
         ids = [s.id for s in self.sensors]
         if len(ids) != len(set(ids)):
             raise ValueError("id датчиків мають бути унікальними")

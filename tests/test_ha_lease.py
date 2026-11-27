@@ -170,6 +170,24 @@ def test_fenced_on_promote_releases_raises_epoch_and_retries():
     assert e.role is Role.LEADER and e.epoch > 50
 
 
+def test_promote_failure_releases_lease_and_stays_standby():
+    """Оренду взято, а відкрити сховище не вдалось (збій БД між acquire і activate): віддаємо оренду, щоб не чекати ttl."""
+    c = Clock()
+    s = FakeStore(c)
+    attempts: list[int] = []
+
+    def promote(epoch: int) -> None:
+        attempts.append(epoch)
+        if len(attempts) == 1:
+            raise RuntimeError("сховище недоступне")
+
+    e = make(s, c, on_promote=promote)
+    e.step()
+    assert e.role is Role.STANDBY and e.epoch is None and s.released == [("a", 1)]
+    e.step()
+    assert e.role is Role.LEADER and e.epoch == 2
+
+
 def test_stop_releases_lease():
     c = Clock()
     s = FakeStore(c)
@@ -327,3 +345,20 @@ def test_redis_error_becomes_lease_store_error_without_password():
         with pytest.raises(LeaseStoreError) as e:
             call()
         assert "secret" not in str(e.value)
+
+
+def test_acquire_failures_are_logged_once_per_outage(caplog):
+    """Резерв, що не може дістатись сховища оренди, мовчав: причину перемикання, що не відбулось, було не видно."""
+    import logging
+    c = Clock()
+    s = FakeStore(c)
+    s.down = True
+    e = make(s, c)
+    with caplog.at_level(logging.INFO, logger="dronewatch.ha"):
+        for _ in range(5):
+            e.step()
+        s.down = False
+        e.step()
+    warnings = [r for r in caplog.records if r.levelno == logging.WARNING and "оренди недоступне" in r.getMessage()]
+    assert len(warnings) == 1, [r.getMessage() for r in caplog.records]
+    assert any("знову доступне" in r.getMessage() for r in caplog.records)

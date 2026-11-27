@@ -30,6 +30,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from dronewatch.service.audit import AuditEntry, AuditError
 from dronewatch.service.dashboard_auth import MAX_PASSWORD_LEN, LimiterLike, Role, Session, SessionStoreLike, Users, has_role, limiter_key
 from dronewatch.service.ha import FencedError, NotActiveError
+from dronewatch.service.store import StoreError
 
 log = logging.getLogger("dronewatch.dashboard")
 STATIC = Path(__file__).resolve().parent / "static"
@@ -125,7 +126,7 @@ def audit_or_503(conn: HTTPConnection, entry: AuditEntry) -> None:
         raise HTTPException(503, AUDIT_UNAVAILABLE)
     try:
         conn.app.state.runtime.engine.fence()   # HA: без чинної оренди запис пішов би в памʼять, а дія пройшла б без сліду
-    except (NotActiveError, FencedError) as e:
+    except (NotActiveError, FencedError, StoreError) as e:
         log.error("%s: дію %s відхилено", e, entry.action)
         raise HTTPException(503, AUDIT_UNAVAILABLE) from e
     try:

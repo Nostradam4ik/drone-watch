@@ -1,0 +1,18 @@
+# ACL брокера. Усе, чого тут не дозволено, заборонено; анонімів немає (allow_anonymous false у mosquitto.conf).
+#
+# Датчик (користувач = id датчика) може ПИСАТИ лише у власний топік dronewatch/events/<id>: %u це ім'я користувача.
+# Читати йому нічого не можна: ні події інших датчиків, ні #, ні $SYS. Тож ключі й події одного датчика не бачить інший.
+pattern write dronewatch/events/%u
+
+# Сервіс лише читає події всіх датчиків.
+user dronewatch-service
+topic read dronewatch/events/#
+
+# Друга копія сервісу (резерв HA, профіль ha в docker-compose.yml). Окремий логін обов'язковий: брокер ставить client_id
+# рівним логіну (use_username_as_clientid), тож дві копії з одним логіном вибивали б одна одну з брокера безперервно.
+user dronewatch-service-2
+topic read dronewatch/events/#
+
+# Healthcheck контейнера: єдине, що йому треба, це час роботи брокера.
+user healthcheck
+topic read $SYS/broker/uptime

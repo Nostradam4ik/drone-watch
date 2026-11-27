@@ -17,6 +17,9 @@ from contextlib import closing
 from dataclasses import dataclass
 from typing import Any
 
+from dronewatch.service.schema import ensure_replay_schema
+from dronewatch.service.store import Db, SqliteStore, Store, as_db
+
 log = logging.getLogger("dronewatch.replay")
 FORMAT = 1
 MAX_BLOB_BYTES = 32 * 1024 * 1024   # стеля розпакованого блока при читанні: зіпсований запис не роздуває памʼять
@@ -44,8 +47,8 @@ class _Capture:
 
 
 class ReplayRecorder:
-    def __init__(self, db: sqlite3.Connection, opts: ReplayOptions) -> None:
-        self.db, self.opts = db, opts
+    def __init__(self, db: "Db | sqlite3.Connection", opts: ReplayOptions) -> None:
+        self.db, self.opts = as_db(db), opts
         self._ring: deque[tuple[float, list[list[Any]]]] = deque()
         self._pending: dict[int, _Capture] = {}
         self._last = float("-inf")
@@ -54,13 +57,10 @@ class ReplayRecorder:
         self._ensure_table()
 
     def _ensure_table(self) -> None:
-        self.db.execute("""CREATE TABLE IF NOT EXISTS incident_replays (
-            incident_id INTEGER PRIMARY KEY, ts REAL, complete INTEGER, data BLOB)""")
-        self.db.commit()
-
-    def rebind(self, db: sqlite3.Connection) -> None:
+        ensure_replay_schema(self.db)
+    def rebind(self, db: "Db | sqlite3.Connection") -> None:
         """Той самий кільцевий буфер, інша БД (HA: резерв пише в памʼять, лідер у файл). Буфер кадрів не губиться."""
-        self.db = db
+        self.db = as_db(db)
         self._ensure_table()
 
     def on_scan(self, ts: float, frame: Callable[[], list[list[Any]]], new_alerts: list[Any],
@@ -110,7 +110,8 @@ class ReplayRecorder:
         payload = {"v": FORMAT, "step": self.opts.step_s, "target": cap.target, "setup": cap.setup,
                    "frames": [[round(t - cap.ts, 2), tr] for t, tr in cap.frames]}
         blob = zlib.compress(json.dumps(payload, separators=(",", ":")).encode(), 6)
-        self.db.execute("INSERT OR REPLACE INTO incident_replays (incident_id, ts, complete, data) VALUES (?,?,?,?)",
+        self.db.execute("INSERT INTO incident_replays (incident_id, ts, complete, data) VALUES (?,?,?,?) "
+                        "ON CONFLICT (incident_id) DO UPDATE SET ts = excluded.ts, complete = excluded.complete, data = excluded.data",
                         (cap.incident_id, cap.ts, int(complete), blob))
         self.db.commit()
 
@@ -119,9 +120,11 @@ class ReplayRecorder:
         self.db.commit()
 
 
-def read_replay(db_path: str, incident_id: int) -> dict[str, Any] | None:
-    """Запис відтворення інциденту або None (запису немає). `complete` false: після тривоги ще дописується."""
-    with closing(sqlite3.connect(db_path)) as db:
+def read_replay(src: "str | Store", incident_id: int) -> dict[str, Any] | None:
+    """Запис відтворення інциденту або None (запису немає). `complete` false: після тривоги ще дописується.
+    `src`: шлях до файлу SQLite або Store."""
+    store = SqliteStore(src) if isinstance(src, str) else src
+    with closing(store.connect(readonly=store.kind == "postgres")) as db:
         row = db.execute("SELECT ts, complete, data FROM incident_replays WHERE incident_id=?", (incident_id,)).fetchone()
     if row is None:
         return None

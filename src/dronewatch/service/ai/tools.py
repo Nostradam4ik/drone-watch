@@ -40,7 +40,7 @@ def get_sensors(rt: "Runtime") -> list[SensorStatus]:
 
 def get_incidents(rt: "Runtime", limit: int = 10) -> list[dict[str, Any]]:
     from dronewatch.service.app import read_incidents
-    return read_incidents(rt.db_path, limit)
+    return read_incidents(rt.get_store(), limit)
 
 
 def get_incident_stats(rt: "Runtime", days: Any = 7) -> list[dict[str, Any]]:
