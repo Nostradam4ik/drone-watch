@@ -149,6 +149,7 @@ def test_pending_flushed_once_after_recovery(tmp_path):
     run_until_alert(eng, 20)
     shown = len(eng.alerts)
     assert shown >= 1 and len(eng.pending) == shown
+    eng.db.wait_reconnect(2)   # спроба з часів збою має провалитись до зсуву годинника, інакше вона відсуне вимикач ще на breaker_s
     ctl.down = False
     eng.clock.now += 6
     for _ in range(3):
